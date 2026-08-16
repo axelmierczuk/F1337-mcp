@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Our RPCs intentionally reuse a small set of shared response shapes where
+    # the semantics are identical; enforcing a unique Request/Response pair per
+    # RPC would produce a tier of empty aliases that carry no information.
+    - RPC_REQUEST_RESPONSE_UNIQUE
+breaking:
+  use:
+    - FILE

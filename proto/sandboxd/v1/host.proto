@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package sandboxd.v1;
+
+import "google/protobuf/timestamp.proto";
+import "sandboxd/v1/common.proto";
+
+option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+
+// HostService reports identity, capability, and liveness for a sandbox host.
+// It is the first service the MCP server calls after dialing an agent.
+service HostService {
+  // GetHostInfo returns a full description of the host: platform, resources,
+  // detected toolchains, agent version, and the roots the agent will permit
+  // filesystem access under.
+  rpc GetHostInfo(GetHostInfoRequest) returns (GetHostInfoResponse);
+
+  // Health is a cheap liveness and readiness probe used to populate sandbox
+  // status in sandbox_list without paying for full host introspection.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message GetHostInfoRequest {
+  // When true, probe the filesystem for installed toolchains. This is
+  // measurably slower than the rest of the call, so it is opt-in.
+  bool include_toolchains = 1;
+}
+
+message GetHostInfoResponse {
+  Platform platform = 1;
+  Resources resources = 2;
+  repeated Toolchain toolchains = 3;
+  // Semantic version of the sandboxd-agent binary serving this request.
+  string agent_version = 4;
+  // Absolute paths the agent will allow filesystem operations under. Empty
+  // means the agent is running without a path jail, which it warns about.
+  repeated string allowed_roots = 5;
+  // When the agent process started, used to detect restarts.
+  google.protobuf.Timestamp started_at = 6;
+  // Subject common name from the client certificate the agent authenticated,
+  // echoed back so the caller can confirm which identity it is using.
+  string authenticated_principal = 7;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_SERVING = 1;
+    STATUS_DEGRADED = 2;
+    STATUS_DRAINING = 3;
+  }
+
+  Status status = 1;
+  // Human-readable explanation, populated when status is not SERVING.
+  string message = 2;
+  string agent_version = 3;
+  // Number of supervised background processes currently tracked.
+  uint32 running_processes = 4;
+}

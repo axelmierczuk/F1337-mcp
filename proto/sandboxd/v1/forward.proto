@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package sandboxd.v1;
+
+option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+
+// ForwardService tunnels TCP connections from the MCP server host to a port on
+// the sandbox.
+//
+// This closes the remote dev loop: the model starts a dev server with
+// sandbox_process_start, forwards its port, and can then reach it over
+// localhost the same way it would a local server.
+service ForwardService {
+  // Forward carries a single TCP connection. The MCP server opens one stream
+  // per accepted local connection.
+  rpc Forward(stream ForwardRequest) returns (stream ForwardResponse);
+}
+
+message ForwardRequest {
+  oneof event {
+    // Must be the first message on the stream.
+    ForwardOpen open = 1;
+    // Bytes travelling from the local listener to the sandbox port.
+    bytes data = 2;
+    // Half-close: no more data will be sent in this direction.
+    ForwardClose close = 3;
+  }
+}
+
+message ForwardOpen {
+  // Port on the sandbox to connect to.
+  uint32 remote_port = 1;
+  // Host on the sandbox to connect to. Empty means loopback, which is the
+  // common case and keeps the agent from being turned into a general-purpose
+  // network pivot by default.
+  string remote_host = 2;
+}
+
+message ForwardResponse {
+  oneof event {
+    // Sent once the sandbox-side connection is established or has failed.
+    ForwardOpened opened = 1;
+    // Bytes travelling from the sandbox port back to the local listener.
+    bytes data = 2;
+    ForwardClose close = 3;
+  }
+}
+
+message ForwardOpened {
+  bool success = 1;
+  // Populated when success is false.
+  string error = 2;
+  // Local address the sandbox-side socket bound to.
+  string local_address = 3;
+}
+
+message ForwardClose {
+  string reason = 1;
+}

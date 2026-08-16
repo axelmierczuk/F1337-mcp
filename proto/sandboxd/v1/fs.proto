@@ -1,0 +1,238 @@
+syntax = "proto3";
+
+package sandboxd.v1;
+
+import "google/protobuf/timestamp.proto";
+import "sandboxd/v1/common.proto";
+
+option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+
+// FileService provides the filesystem primitives that back sandbox_read,
+// sandbox_write, sandbox_edit, sandbox_ls, sandbox_glob and sandbox_grep.
+//
+// Every path in this service is resolved through the agent's path jail:
+// symlinks are resolved first and containment is checked on the result, since
+// rejecting ".." before resolution is the classic way to get this wrong.
+service FileService {
+  // ReadFile streams file contents, so large files never have to be buffered
+  // whole on either side.
+  rpc ReadFile(ReadFileRequest) returns (stream ReadFileResponse);
+
+  // WriteFile streams contents to the agent, which writes to a temporary file
+  // and renames it into place so a failed transfer cannot leave a truncated
+  // file behind.
+  rpc WriteFile(stream WriteFileRequest) returns (WriteFileResponse);
+
+  // EditFile performs an exact string replacement in place.
+  rpc EditFile(EditFileRequest) returns (EditFileResponse);
+
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc StatPath(StatPathRequest) returns (StatPathResponse);
+  rpc Glob(GlobRequest) returns (GlobResponse);
+
+  // Grep streams matches so a search over a large tree returns useful results
+  // before it has finished walking everything.
+  rpc Grep(GrepRequest) returns (stream GrepResponse);
+
+  rpc MakeDirectory(MakeDirectoryRequest) returns (MakeDirectoryResponse);
+  rpc RemovePath(RemovePathRequest) returns (RemovePathResponse);
+  rpc MovePath(MovePathRequest) returns (MovePathResponse);
+}
+
+message ReadFileRequest {
+  string path = 1;
+  // Line number to start from, 1-based. Zero means the beginning of the file.
+  uint64 offset_lines = 2;
+  // Maximum lines to return. Zero means the agent default.
+  uint64 limit_lines = 3;
+  // Return raw bytes instead of text. Required for binary files.
+  bool raw = 4;
+  // Maximum bytes to return before truncating.
+  uint64 max_bytes = 5;
+}
+
+message ReadFileResponse {
+  oneof event {
+    FileMetadata metadata = 1;
+    bytes chunk = 2;
+    ReadResult result = 3;
+  }
+}
+
+message ReadResult {
+  uint64 lines_returned = 1;
+  uint64 total_lines = 2;
+  Truncation truncation = 3;
+}
+
+message FileMetadata {
+  string path = 1;
+  uint64 size_bytes = 2;
+  // Unix permission bits. Zero on platforms that do not report them.
+  uint32 mode = 3;
+  google.protobuf.Timestamp modified_at = 4;
+  bool is_dir = 5;
+  bool is_symlink = 6;
+  // Target of the symlink, when is_symlink is true.
+  string symlink_target = 7;
+  // True when the agent's content sniffing decided this is not text. Reading a
+  // binary file as text is almost always a mistake worth reporting rather than
+  // silently mangling.
+  bool is_binary = 8;
+}
+
+message WriteFileRequest {
+  oneof event {
+    // Must be the first message on the stream.
+    WriteFileHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message WriteFileHeader {
+  string path = 1;
+  // Unix permission bits for newly created files. Zero means the agent
+  // default. Ignored on Windows.
+  uint32 mode = 2;
+  // Create parent directories as needed.
+  bool create_parents = 3;
+  // Refuse to overwrite an existing file.
+  bool fail_if_exists = 4;
+  // Append rather than replace.
+  bool append = 5;
+}
+
+message WriteFileResponse {
+  string path = 1;
+  uint64 bytes_written = 2;
+  bool created = 3;
+}
+
+message EditFileRequest {
+  string path = 1;
+  // Exact text to find. Whitespace is significant.
+  string old_string = 2;
+  // Replacement text.
+  string new_string = 3;
+  // Replace every occurrence. When false, the edit fails unless old_string
+  // matches exactly once. This mirrors the uniqueness contract of the agent's
+  // built-in edit tool, which is what makes the remote tool feel native and
+  // keeps an ambiguous match from silently editing the wrong line.
+  bool replace_all = 4;
+}
+
+message EditFileResponse {
+  string path = 1;
+  uint32 replacements = 2;
+  // Unified diff of the change, for the model to confirm what it did.
+  string diff = 3;
+}
+
+message ListDirectoryRequest {
+  string path = 1;
+  bool recursive = 2;
+  // Maximum entries to return. Zero means the agent default.
+  uint32 limit = 3;
+  // Include entries whose names begin with a dot.
+  bool include_hidden = 4;
+}
+
+message ListDirectoryResponse {
+  string path = 1;
+  repeated FileMetadata entries = 2;
+  Truncation truncation = 3;
+}
+
+message StatPathRequest {
+  string path = 1;
+}
+
+message StatPathResponse {
+  bool exists = 1;
+  FileMetadata metadata = 2;
+}
+
+message GlobRequest {
+  // Glob pattern, for example "**/*.go".
+  string pattern = 1;
+  // Directory to search from. Empty means the agent default working directory.
+  string root = 2;
+  uint32 limit = 3;
+  // Honour .gitignore rules while walking.
+  bool respect_gitignore = 4;
+}
+
+message GlobResponse {
+  repeated string paths = 1;
+  Truncation truncation = 2;
+}
+
+message GrepRequest {
+  // Regular expression, RE2 syntax.
+  string pattern = 1;
+  string root = 2;
+  // Restrict the search to paths matching this glob.
+  string include_glob = 3;
+  bool case_insensitive = 4;
+  // Lines of context to include on each side of a match.
+  uint32 context_lines = 5;
+  uint32 max_matches = 6;
+  bool respect_gitignore = 7;
+  // Return only the names of matching files, not the matching lines.
+  bool files_only = 8;
+}
+
+message GrepResponse {
+  oneof event {
+    GrepMatch match = 1;
+    GrepSummary summary = 2;
+  }
+}
+
+message GrepMatch {
+  string path = 1;
+  uint64 line_number = 2;
+  string line = 3;
+  repeated string before_context = 4;
+  repeated string after_context = 5;
+}
+
+message GrepSummary {
+  uint64 files_searched = 1;
+  uint64 matches_found = 2;
+  Truncation truncation = 3;
+}
+
+message MakeDirectoryRequest {
+  string path = 1;
+  uint32 mode = 2;
+  bool create_parents = 3;
+}
+
+message MakeDirectoryResponse {
+  string path = 1;
+  bool created = 2;
+}
+
+message RemovePathRequest {
+  string path = 1;
+  // Remove directories and their contents. Without this a non-empty directory
+  // is an error rather than a silent recursive delete.
+  bool recursive = 2;
+}
+
+message RemovePathResponse {
+  string path = 1;
+  uint64 entries_removed = 2;
+}
+
+message MovePathRequest {
+  string source = 1;
+  string destination = 2;
+  bool overwrite = 3;
+}
+
+message MovePathResponse {
+  string source = 1;
+  string destination = 2;
+}

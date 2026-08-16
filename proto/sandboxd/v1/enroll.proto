@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package sandboxd.v1;
+
+import "google/protobuf/timestamp.proto";
+import "sandboxd/v1/common.proto";
+
+option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+
+// EnrollmentService is served by the control plane (sandboxctl serve), not by
+// sandboxd-agent. It is the one endpoint an unenrolled host may talk to.
+//
+// This is the only RPC path that is not mutually authenticated, because the
+// calling agent has no certificate yet. It is server-authenticated TLS plus a
+// single-use bearer token, and the caller is expected to pin the CA
+// fingerprint it was given out of band.
+service EnrollmentService {
+  // Enroll exchanges a single-use enrollment token and a certificate signing
+  // request for a signed leaf certificate and the CA bundle.
+  //
+  // The agent generates its own keypair and sends only the CSR: the private
+  // key never leaves the host being enrolled, so a compromised control plane
+  // or a leaked token cannot retroactively yield an agent's key.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+message EnrollRequest {
+  // Single-use token minted by "sandboxctl enroll mint".
+  string token = 1;
+  // PKCS#10 certificate signing request in DER form.
+  bytes csr_der = 2;
+  // Requested sandbox name. The control plane may override it, for example to
+  // resolve a collision with an existing fleet member.
+  string requested_name = 3;
+  // Host self-description, recorded in the fleet registry at enrollment time.
+  Platform platform = 4;
+  // Addresses the agent will listen on, so the control plane can record how to
+  // dial it back.
+  repeated string listen_addresses = 5;
+  string agent_version = 6;
+}
+
+message EnrollResponse {
+  // Signed leaf certificate for this agent, PEM encoded.
+  bytes certificate_pem = 1;
+  // CA certificate chain the agent must trust, PEM encoded.
+  bytes ca_bundle_pem = 2;
+  // Final name assigned to this sandbox in the fleet registry.
+  string assigned_name = 3;
+  google.protobuf.Timestamp not_after = 4;
+}

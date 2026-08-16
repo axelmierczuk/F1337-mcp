@@ -1,0 +1,21 @@
+# Build output
+/dist/
+/bin/
+/.tools/
+
+# Local state produced by running the toolchain
+*.test
+*.out
+coverage.*
+
+# Credentials and local fleet state; these must never be committed
+*.pem
+*.key
+*.crt
+/.sandboxd/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/

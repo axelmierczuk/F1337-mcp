@@ -1,0 +1,50 @@
+# sandboxd-agent configuration.
+#
+# Written to /etc/sandboxd/agent.yaml (Linux), /Library/Application
+# Support/sandboxd/agent.yaml (macOS), or %ProgramData%\sandboxd\agent.yaml
+# (Windows) by `sandboxd-agent enroll`.
+
+# Address the agent serves gRPC on. The MCP server dials this.
+listen: "0.0.0.0:8722"
+
+# Identity issued during enrollment. The private key is generated on this host
+# and never leaves it.
+tls:
+  certificate: "/etc/sandboxd/agent.crt"
+  private_key: "/etc/sandboxd/agent.key"
+  ca_bundle: "/etc/sandboxd/ca.crt"
+  # Client certificates must be issued by the CA above and carry this
+  # organisational unit. mTLS is mandatory; there is no plaintext mode.
+  require_client_ou: "sandboxd-control"
+
+# Filesystem confinement. Every path in every FileService call is resolved and
+# then checked for containment under one of these roots. An empty list disables
+# the jail, which the agent refuses to do unless explicitly forced.
+allowed_roots:
+  - "/home/build/workspace"
+  - "/tmp/sandboxd"
+
+exec:
+  # Default wall-clock limit for sandbox_exec.
+  default_timeout: "120s"
+  max_timeout: "3600s"
+  # Output beyond this is dropped, with the omission reported to the caller.
+  max_output_bytes: 2097152
+  # Optional command policy. Empty deny list means default-allow: treat this
+  # agent as a remote code execution service, because that is what it is.
+  deny_commands: []
+
+process:
+  max_concurrent: 32
+  # Per-process on-disk log cap before rotation.
+  max_log_bytes: 33554432
+  # In-memory ring buffer retained for fast tailing.
+  ring_buffer_lines: 2000
+  default_grace_period: "10s"
+  # Hard ceiling on sandbox_process_logs follow, so a tool call cannot hang.
+  max_follow_duration: "60s"
+
+audit:
+  # Append-only JSONL record of every exec and every write.
+  path: "/var/log/sandboxd/audit.jsonl"
+  enabled: true

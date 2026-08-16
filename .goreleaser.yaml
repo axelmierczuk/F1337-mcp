@@ -1,0 +1,100 @@
+version: 2
+
+project_name: sandboxd
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  # The agent is the widely-distributed component: it lands on every host in
+  # the fleet, so it gets the full platform matrix and static linking.
+  - id: sandboxd-agent
+    main: ./cmd/sandboxd-agent
+    binary: sandboxd-agent
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Version={{ .Version }}
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Date={{ .CommitDate }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  # The MCP server and control CLI only ever run on a developer workstation.
+  - id: sandboxd-mcp
+    main: ./cmd/sandboxd-mcp
+    binary: sandboxd-mcp
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Version={{ .Version }}
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Date={{ .CommitDate }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  - id: sandboxctl
+    main: ./cmd/sandboxctl
+    binary: sandboxctl
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Version={{ .Version }}
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Date={{ .CommitDate }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  # The agent ships as its own archive, named predictably, because install.sh
+  # constructs the download URL from OS and arch without consulting the API for
+  # an asset list.
+  - id: agent
+    ids: [sandboxd-agent]
+    name_template: "sandboxd-agent_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+  - id: tools
+    ids: [sandboxd-mcp, sandboxctl]
+    name_template: "sandboxd-tools_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Installing the agent
+
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
+      | sh -s -- --token <enrollment-token> --control <control-host:9443>
+    ```
+
+    Verify `checksums.txt` against the artifact you downloaded before running anything.

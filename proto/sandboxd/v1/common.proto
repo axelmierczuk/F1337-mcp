@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package sandboxd.v1;
+
+option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+
+// Stream identifies which output stream a chunk of process output came from.
+enum Stream {
+  STREAM_UNSPECIFIED = 0;
+  STREAM_STDOUT = 1;
+  STREAM_STDERR = 2;
+}
+
+// Platform describes the operating system and hardware of a sandbox host.
+message Platform {
+  // GOOS-style operating system identifier: "linux", "darwin", "windows".
+  string os = 1;
+  // GOARCH-style architecture identifier: "amd64", "arm64".
+  string arch = 2;
+  // Kernel or OS build version, best-effort and free-form.
+  string kernel_version = 3;
+  // Host-reported hostname.
+  string hostname = 4;
+  // Path separator used by this host, "/" or "\\". Lets the MCP server render
+  // paths correctly without hardcoding assumptions per platform.
+  string path_separator = 5;
+}
+
+// Resources summarizes the capacity of a sandbox host, so an agent can pick a
+// target that actually fits the job it wants to run.
+message Resources {
+  uint32 cpu_cores = 1;
+  uint64 memory_total_bytes = 2;
+  uint64 memory_available_bytes = 3;
+  uint64 disk_total_bytes = 4;
+  uint64 disk_available_bytes = 5;
+  // Fractional load average over the last minute, if the platform reports one.
+  double load_average_1m = 6;
+}
+
+// Toolchain reports a language runtime or build tool detected on the host, so
+// the model can choose a sandbox that can actually build the project.
+message Toolchain {
+  // Canonical name: "go", "node", "python3", "cargo", "docker".
+  string name = 1;
+  // Version string as reported by the tool.
+  string version = 2;
+  // Absolute path to the resolved executable.
+  string path = 3;
+}
+
+// Truncation records that output exceeded a cap and was cut short. It is
+// always surfaced to the model rather than silently dropping bytes: an agent
+// that cannot tell truncated output from complete output will draw wrong
+// conclusions from it.
+message Truncation {
+  bool truncated = 1;
+  uint64 bytes_omitted = 2;
+  uint64 lines_omitted = 3;
+}

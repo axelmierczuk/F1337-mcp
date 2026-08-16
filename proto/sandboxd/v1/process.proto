@@ -1,0 +1,278 @@
+syntax = "proto3";
+
+package sandboxd.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "sandboxd/v1/common.proto";
+
+option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+
+// ProcessService supervises long-running background processes: dev servers,
+// watchers, fuzzers, queue workers.
+//
+// Processes are owned by the agent, not by the MCP session that started them.
+// They deliberately outlive the MCP server, because agent CLIs restart
+// constantly and a dev server that dies whenever the editor reloads is useless.
+service ProcessService {
+  // StartProcess spawns a supervised process and optionally waits for it to
+  // become ready before returning.
+  rpc StartProcess(StartProcessRequest) returns (StartProcessResponse);
+
+  // ListProcesses returns every process the agent is tracking, including ones
+  // that have already exited but not yet been reaped.
+  rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+
+  // GetProcessLogs returns buffered output, optionally following new output up
+  // to a deadline.
+  rpc GetProcessLogs(GetProcessLogsRequest) returns (stream GetProcessLogsResponse);
+
+  // SignalProcess sends a signal, or performs a graceful stop.
+  rpc SignalProcess(SignalProcessRequest) returns (SignalProcessResponse);
+
+  // RestartProcess stops a process and starts it again from the same spec.
+  rpc RestartProcess(RestartProcessRequest) returns (RestartProcessResponse);
+
+  // RemoveProcess reaps an exited process's record and its logs.
+  rpc RemoveProcess(RemoveProcessRequest) returns (RemoveProcessResponse);
+}
+
+// ProcessState is the supervisor's view of a process.
+enum ProcessState {
+  PROCESS_STATE_UNSPECIFIED = 0;
+  // Spawned, but its readiness probe has not yet passed.
+  PROCESS_STATE_STARTING = 1;
+  // Readiness probe passed. Only reachable when a probe was configured.
+  PROCESS_STATE_READY = 2;
+  // Running, with no readiness probe configured.
+  PROCESS_STATE_RUNNING = 3;
+  // Exited with status zero.
+  PROCESS_STATE_EXITED = 4;
+  // Exited non-zero, was killed, or failed its readiness probe.
+  PROCESS_STATE_CRASHED = 5;
+  // Being restarted under its restart policy.
+  PROCESS_STATE_RESTARTING = 6;
+  // The agent restarted and could not prove this process survived. See
+  // ProcessStatus.adoption_note.
+  PROCESS_STATE_ORPHANED = 7;
+}
+
+// RestartPolicy controls whether the supervisor restarts a process that exits.
+enum RestartPolicy {
+  RESTART_POLICY_UNSPECIFIED = 0;
+  RESTART_POLICY_NEVER = 1;
+  RESTART_POLICY_ON_FAILURE = 2;
+  RESTART_POLICY_ALWAYS = 3;
+}
+
+// ReadyProbe defines how the supervisor decides a process is usable, as
+// opposed to merely spawned.
+//
+// This distinction is the difference between a working remote dev loop and a
+// broken one: a dev server may take ten seconds to bind its port, and an agent
+// that curls it immediately gets a connection refused and concludes the server
+// is broken.
+message ReadyProbe {
+  oneof probe {
+    // Ready when a line matching this RE2 pattern appears on stdout or stderr.
+    string log_pattern = 1;
+    // Ready when a TCP connection to this port on loopback succeeds.
+    uint32 tcp_port = 2;
+    // Ready when an HTTP GET of this URL returns a status below 500.
+    string http_get_url = 3;
+    // Ready once the process has stayed alive for this long.
+    google.protobuf.Duration uptime = 4;
+  }
+
+  // How long to wait for the probe to pass before declaring failure.
+  google.protobuf.Duration timeout = 5;
+  // How often to retry the probe.
+  google.protobuf.Duration interval = 6;
+}
+
+message StartProcessRequest {
+  // Command and arguments, exec'd directly. See ExecRequest.argv.
+  repeated string argv = 1;
+  // Human-meaningful label, for example "web-dev-server". The agent derives a
+  // unique process id from it. Reusing a label for a process that is still
+  // running is an error unless replace_existing is set.
+  string name = 2;
+  string working_dir = 3;
+  repeated string env = 4;
+  bool shell = 5;
+
+  ReadyProbe ready_probe = 6;
+  RestartPolicy restart_policy = 7;
+  // Maximum automatic restarts before the supervisor gives up and leaves the
+  // process CRASHED. Zero means the agent default.
+  uint32 max_restarts = 8;
+  // Backoff applied between automatic restarts, doubling up to a cap.
+  google.protobuf.Duration restart_backoff = 9;
+
+  // Block until the readiness probe passes, up to the probe timeout. When
+  // false, the call returns as soon as the process is spawned.
+  bool wait_for_ready = 10;
+
+  // Stop and replace an existing process with the same name.
+  bool replace_existing = 11;
+
+  // Cap on the on-disk log file before rotation. Zero means the agent default.
+  uint64 max_log_bytes = 12;
+}
+
+message StartProcessResponse {
+  ProcessStatus status = 1;
+  // Populated when wait_for_ready was set and the probe did not pass in time.
+  // The process is left running so its logs can be inspected; the caller
+  // decides whether to signal it.
+  string ready_error = 2;
+}
+
+message ProcessStatus {
+  // Stable identifier, unique for the lifetime of the agent's state directory.
+  string process_id = 1;
+  string name = 2;
+  repeated string argv = 3;
+  string working_dir = 4;
+  ProcessState state = 5;
+  // OS process id. Not stable across restarts.
+  int32 pid = 6;
+  google.protobuf.Timestamp started_at = 7;
+  google.protobuf.Timestamp exited_at = 8;
+  int32 exit_code = 9;
+  string signal = 10;
+  // Number of times the supervisor has restarted this process.
+  uint32 restart_count = 11;
+  RestartPolicy restart_policy = 12;
+  // Most recent output line, so sandbox_process_list is useful on its own
+  // without a follow-up logs call for every process.
+  string last_log_line = 13;
+  // Total bytes of output captured since the process last started.
+  uint64 log_bytes = 14;
+  // Set when the agent restarted and had to reason about whether this process
+  // survived. Explains the adoption decision, for example "pid 4211 reused by
+  // another process, marked orphaned".
+  string adoption_note = 15;
+  // Ports the process is listening on, best-effort.
+  repeated uint32 listening_ports = 16;
+}
+
+message ListProcessesRequest {
+  // Return only processes in these states. Empty means all.
+  repeated ProcessState states = 1;
+  // Return only processes whose name matches this RE2 pattern.
+  string name_pattern = 2;
+}
+
+message ListProcessesResponse {
+  repeated ProcessStatus processes = 1;
+}
+
+message GetProcessLogsRequest {
+  string process_id = 1;
+  // Which stream to return. STREAM_UNSPECIFIED means both, interleaved in the
+  // order the agent observed them.
+  Stream stream = 2;
+  // Return only the last N lines. Zero means the agent default.
+  uint32 tail_lines = 3;
+  // Return only output produced at or after this time.
+  google.protobuf.Timestamp since = 4;
+  // Return only lines matching this RE2 pattern.
+  string filter_pattern = 5;
+
+  // After replaying buffered output, keep the stream open and forward new
+  // output until follow_duration elapses.
+  bool follow = 6;
+  // Hard bound on how long to follow. The agent clamps this to its configured
+  // maximum. Following is always bounded: a tool call that never returns is
+  // indistinguishable from a hung agent, and the model cannot recover from it.
+  google.protobuf.Duration follow_duration = 7;
+}
+
+message GetProcessLogsResponse {
+  oneof event {
+    LogLine line = 1;
+    LogSummary summary = 2;
+  }
+}
+
+message LogLine {
+  Stream stream = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string text = 3;
+  // Number of lines dropped immediately before this one because the process
+  // outran the log buffer. Reported rather than hidden so the model knows its
+  // view of the log has a hole in it.
+  uint64 dropped_before = 4;
+}
+
+message LogSummary {
+  uint64 lines_returned = 1;
+  uint64 lines_dropped = 2;
+  // True when the stream ended because the follow deadline elapsed rather than
+  // because the process exited.
+  bool follow_deadline_reached = 3;
+  ProcessState state = 4;
+}
+
+message SignalProcessRequest {
+  string process_id = 1;
+
+  // Signal to send. Portable names are translated per platform; on Windows the
+  // agent terminates the job object rather than delivering a POSIX signal.
+  enum Signal {
+    SIGNAL_UNSPECIFIED = 0;
+    SIGNAL_TERM = 1;
+    SIGNAL_KILL = 2;
+    SIGNAL_INT = 3;
+    SIGNAL_HUP = 4;
+    SIGNAL_USR1 = 5;
+    SIGNAL_USR2 = 6;
+  }
+  Signal signal = 2;
+
+  // Perform a graceful stop instead of a bare signal: send SIGTERM, wait
+  // grace_period, then SIGKILL. Overrides the signal field.
+  bool graceful_stop = 3;
+  google.protobuf.Duration grace_period = 4;
+
+  // Signal the whole process group rather than just the leader. Defaults to
+  // true, because signalling only the leader routinely leaves orphaned
+  // children behind: killing "npm run dev" without its group leaves the
+  // bundler holding the port.
+  optional bool process_group = 5;
+
+  // Suppress the restart policy for this stop, so an intentional stop is not
+  // immediately undone by the supervisor.
+  bool disable_restart = 6;
+}
+
+message SignalProcessResponse {
+  ProcessStatus status = 1;
+  // True when a graceful stop had to escalate to SIGKILL.
+  bool escalated_to_kill = 2;
+}
+
+message RestartProcessRequest {
+  string process_id = 1;
+  google.protobuf.Duration grace_period = 2;
+  // Wait for the readiness probe to pass again before returning.
+  bool wait_for_ready = 3;
+}
+
+message RestartProcessResponse {
+  ProcessStatus status = 1;
+  string ready_error = 2;
+}
+
+message RemoveProcessRequest {
+  string process_id = 1;
+  // Stop the process first if it is still running.
+  bool force = 2;
+  // Also delete the process's on-disk log files.
+  bool delete_logs = 3;
+}
+
+message RemoveProcessResponse {
+  string process_id = 1;
+}

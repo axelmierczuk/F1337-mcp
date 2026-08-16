@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "sandboxd": {
+      "command": "sandboxd-mcp",
+      "args": ["serve"],
+      "env": {
+        "SANDBOXD_CONFIG_DIR": "${HOME}/.config/sandboxd"
+      }
+    }
+  }
+}

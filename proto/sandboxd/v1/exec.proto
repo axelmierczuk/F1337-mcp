@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package sandboxd.v1;
+
+import "google/protobuf/duration.proto";
+import "sandboxd/v1/common.proto";
+
+option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+
+// ExecService runs one-shot commands to completion.
+//
+// Long-running work belongs in ProcessService instead: Exec holds the RPC open
+// for the lifetime of the command, so a dev server started here would pin the
+// stream forever.
+service ExecService {
+  // Exec runs a command and streams its output back as it is produced.
+  //
+  // Output streams rather than buffering so that a slow command shows progress
+  // instead of looking hung, and so output caps can be applied incrementally
+  // rather than after the agent has already bought the memory.
+  rpc Exec(ExecRequest) returns (stream ExecResponse);
+}
+
+message ExecRequest {
+  // Command and arguments, passed directly to the OS without shell parsing.
+  // argv[0] is the executable. This is the default because it removes an
+  // entire class of quoting and injection bugs, and because Windows has no
+  // "sh -c" to fall back on.
+  repeated string argv = 1;
+
+  // Working directory. Must resolve inside an allowed root. Empty means the
+  // agent's configured default working directory.
+  string working_dir = 2;
+
+  // Environment variables to set, as KEY=VALUE. The agent does not inherit its
+  // own daemon environment wholesale; it starts from a documented base
+  // environment and applies these on top.
+  repeated string env = 3;
+
+  // Wall-clock limit. On expiry the agent sends SIGTERM to the process group,
+  // waits out the grace period, then SIGKILL. Zero means the agent default.
+  google.protobuf.Duration timeout = 4;
+
+  // Maximum bytes of combined output to return. Beyond this the agent stops
+  // buffering and reports the overflow in Truncation. Zero means the default.
+  uint64 max_output_bytes = 5;
+
+  // Run argv joined through the platform shell instead of exec'ing directly.
+  // Opt-in, because it reintroduces shell parsing of untrusted strings.
+  bool shell = 6;
+
+  // Data to write to the process's stdin before closing it.
+  bytes stdin = 7;
+}
+
+message ExecResponse {
+  oneof event {
+    // A chunk of output. Chunks are not guaranteed to align to line boundaries.
+    OutputChunk output = 1;
+    // Terminal event; always the last message on the stream.
+    ExecResult result = 2;
+  }
+}
+
+message OutputChunk {
+  Stream stream = 1;
+  bytes data = 2;
+}
+
+message ExecResult {
+  // Process exit code. Meaningful only when signaled is false and timed_out
+  // is false.
+  int32 exit_code = 1;
+  // True when the process was terminated by a signal rather than exiting.
+  bool signaled = 2;
+  // Signal name that terminated the process, for example "SIGKILL".
+  string signal = 3;
+  // True when the agent killed the command because it exceeded its timeout.
+  bool timed_out = 4;
+  google.protobuf.Duration duration = 5;
+  Truncation truncation = 6;
+}

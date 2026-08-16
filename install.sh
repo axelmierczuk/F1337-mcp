@@ -1,0 +1,270 @@
+#!/bin/sh
+# sandboxd-agent installer.
+#
+#   curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
+#     | sh -s -- --token <enrollment-token> --control <control-host:9443>
+#
+# Downloads the release binary for this platform, verifies its SHA-256 against
+# the release checksum file, installs it, and optionally enrolls the host and
+# registers a system service.
+#
+# Piping a script from the network into a shell is trust-on-first-use no matter
+# how careful the script is. This one at least refuses to install an artifact
+# whose checksum does not match the one published alongside it, and it pins the
+# control-plane CA when you give it a fingerprint.
+
+set -eu
+
+REPO="axelmierczuk/sandboxd-mcp"
+BASE_URL="https://github.com/${REPO}/releases"
+API_URL="https://api.github.com/repos/${REPO}/releases"
+
+VERSION="latest"
+INSTALL_DIR=""
+TOKEN=""
+CONTROL=""
+LISTEN="0.0.0.0:8722"
+NAME=""
+CA_FINGERPRINT=""
+INSTALL_SERVICE="auto"
+ALLOWED_ROOTS=""
+SKIP_CHECKSUM="no"
+
+log()  { printf '  %s\n' "$*" >&2; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: install.sh [options]
+
+Options:
+  --token <token>          Enrollment token from `sandboxctl enroll mint`.
+                           When set, the host enrolls after installation.
+  --control <host:port>    Control-plane enrollment endpoint.
+  --ca-fingerprint <hex>   SHA-256 fingerprint of the control-plane CA to pin.
+                           Strongly recommended: without it, enrollment trusts
+                           whatever certificate the control plane presents.
+  --listen <addr:port>     Address the agent serves gRPC on (default 0.0.0.0:8722).
+  --name <name>            Sandbox name to request (default: system hostname).
+  --root <path>            Filesystem root the agent may access. Repeatable.
+                           Without any, the agent starts with no path jail.
+  --version <vX.Y.Z>       Release to install (default: latest).
+  --install-dir <path>     Install prefix (default: /usr/local/bin, or
+                           ~/.local/bin for an unprivileged install).
+  --service <yes|no|auto>  Register a system service (default: auto, meaning
+                           yes when running as root).
+  --skip-checksum          Skip checksum verification. Do not use this.
+  -h, --help               Show this help.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --token)           TOKEN="${2:?--token needs a value}"; shift 2 ;;
+    --control)         CONTROL="${2:?--control needs a value}"; shift 2 ;;
+    --ca-fingerprint)  CA_FINGERPRINT="${2:?--ca-fingerprint needs a value}"; shift 2 ;;
+    --listen)          LISTEN="${2:?--listen needs a value}"; shift 2 ;;
+    --name)            NAME="${2:?--name needs a value}"; shift 2 ;;
+    --root)            ALLOWED_ROOTS="${ALLOWED_ROOTS} ${2:?--root needs a value}"; shift 2 ;;
+    --version)         VERSION="${2:?--version needs a value}"; shift 2 ;;
+    --install-dir)     INSTALL_DIR="${2:?--install-dir needs a value}"; shift 2 ;;
+    --service)         INSTALL_SERVICE="${2:?--service needs a value}"; shift 2 ;;
+    --skip-checksum)   SKIP_CHECKSUM="yes"; shift ;;
+    -h|--help)         usage; exit 0 ;;
+    *)                 die "unknown option: $1 (try --help)" ;;
+  esac
+done
+
+# ---------------------------------------------------------------- platform ---
+
+detect_os() {
+  os="$(uname -s)"
+  case "$os" in
+    Linux)  echo linux ;;
+    Darwin) echo darwin ;;
+    FreeBSD) echo freebsd ;;
+    *) die "unsupported operating system: $os (Windows hosts use install.ps1)" ;;
+  esac
+}
+
+detect_arch() {
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64)  echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) die "unsupported architecture: $arch" ;;
+  esac
+}
+
+# ------------------------------------------------------------------ fetch ----
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+fetch() {
+  # fetch <url> <output-path>
+  if have curl; then
+    curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1"
+  elif have wget; then
+    wget -q -O "$2" "$1"
+  else
+    die "neither curl nor wget is available"
+  fi
+}
+
+fetch_stdout() {
+  if have curl; then
+    curl -fsSL --retry 3 --retry-delay 2 "$1"
+  elif have wget; then
+    wget -q -O - "$1"
+  else
+    die "neither curl nor wget is available"
+  fi
+}
+
+sha256_of() {
+  if have sha256sum; then
+    sha256sum "$1" | awk '{print $1}'
+  elif have shasum; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo ""
+  fi
+}
+
+resolve_version() {
+  if [ "$VERSION" != "latest" ]; then
+    echo "$VERSION"
+    return
+  fi
+  # Ask the API for the latest tag. Parsed with sed rather than jq because a
+  # freshly imaged host frequently has neither jq nor python.
+  tag="$(fetch_stdout "${API_URL}/latest" \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1)"
+  [ -n "$tag" ] || die "could not resolve the latest release tag; pass --version explicitly"
+  echo "$tag"
+}
+
+# --------------------------------------------------------------- install -----
+
+OS="$(detect_os)"
+ARCH="$(detect_arch)"
+VERSION="$(resolve_version)"
+
+if [ -z "$INSTALL_DIR" ]; then
+  if [ "$(id -u)" -eq 0 ]; then
+    INSTALL_DIR="/usr/local/bin"
+  else
+    INSTALL_DIR="${HOME}/.local/bin"
+  fi
+fi
+
+if [ "$INSTALL_SERVICE" = "auto" ]; then
+  if [ "$(id -u)" -eq 0 ]; then INSTALL_SERVICE="yes"; else INSTALL_SERVICE="no"; fi
+fi
+
+ARCHIVE="sandboxd-agent_${OS}_${ARCH}.tar.gz"
+ARCHIVE_URL="${BASE_URL}/download/${VERSION}/${ARCHIVE}"
+CHECKSUM_URL="${BASE_URL}/download/${VERSION}/checksums.txt"
+
+log "sandboxd-agent ${VERSION} for ${OS}/${ARCH}"
+
+TMPDIR_="$(mktemp -d)"
+cleanup() { rm -rf "$TMPDIR_"; }
+trap cleanup EXIT INT TERM
+
+log "downloading ${ARCHIVE}"
+fetch "$ARCHIVE_URL" "${TMPDIR_}/${ARCHIVE}" \
+  || die "download failed: ${ARCHIVE_URL}"
+
+if [ "$SKIP_CHECKSUM" = "yes" ]; then
+  warn "checksum verification skipped at your request"
+else
+  log "verifying checksum"
+  fetch "$CHECKSUM_URL" "${TMPDIR_}/checksums.txt" \
+    || die "could not download checksums.txt; refusing to install unverified binary"
+
+  expected="$(grep " ${ARCHIVE}\$" "${TMPDIR_}/checksums.txt" | awk '{print $1}' | head -n 1)"
+  [ -n "$expected" ] || die "no checksum published for ${ARCHIVE}"
+
+  actual="$(sha256_of "${TMPDIR_}/${ARCHIVE}")"
+  [ -n "$actual" ] || die "no sha256 utility found; install coreutils or pass --skip-checksum"
+
+  if [ "$expected" != "$actual" ]; then
+    die "checksum mismatch for ${ARCHIVE}
+  expected ${expected}
+  actual   ${actual}
+This means the download was corrupted or tampered with. Not installing."
+  fi
+  log "checksum ok"
+fi
+
+log "extracting"
+tar -xzf "${TMPDIR_}/${ARCHIVE}" -C "$TMPDIR_" \
+  || die "could not extract ${ARCHIVE}"
+[ -f "${TMPDIR_}/sandboxd-agent" ] || die "archive did not contain sandboxd-agent"
+
+mkdir -p "$INSTALL_DIR"
+install -m 0755 "${TMPDIR_}/sandboxd-agent" "${INSTALL_DIR}/sandboxd-agent" 2>/dev/null \
+  || { cp "${TMPDIR_}/sandboxd-agent" "${INSTALL_DIR}/sandboxd-agent" && chmod 0755 "${INSTALL_DIR}/sandboxd-agent"; } \
+  || die "could not install to ${INSTALL_DIR} (try sudo, or --install-dir)"
+
+log "installed ${INSTALL_DIR}/sandboxd-agent"
+
+case ":${PATH}:" in
+  *":${INSTALL_DIR}:"*) ;;
+  *) warn "${INSTALL_DIR} is not on your PATH" ;;
+esac
+
+# --------------------------------------------------------------- enroll ------
+
+if [ -n "$TOKEN" ]; then
+  [ -n "$CONTROL" ] || die "--token requires --control"
+
+  set -- enroll --token "$TOKEN" --control "$CONTROL" --listen "$LISTEN"
+  if [ -n "$NAME" ]; then
+    set -- "$@" --name "$NAME"
+  fi
+  if [ -n "$CA_FINGERPRINT" ]; then
+    set -- "$@" --ca-fingerprint "$CA_FINGERPRINT"
+  fi
+  # Intentional word splitting: --root is repeatable and roots are collected
+  # into a single space-separated string above.
+  # shellcheck disable=SC2086
+  for root in $ALLOWED_ROOTS; do
+    set -- "$@" --root "$root"
+  done
+
+  if [ -z "$CA_FINGERPRINT" ]; then
+    warn "enrolling without --ca-fingerprint: the control plane's certificate is not pinned"
+  fi
+  if [ -z "$ALLOWED_ROOTS" ]; then
+    warn "no --root given: the agent will start without a filesystem jail"
+  fi
+
+  log "enrolling with ${CONTROL}"
+  "${INSTALL_DIR}/sandboxd-agent" "$@" || die "enrollment failed"
+
+  if [ "$INSTALL_SERVICE" = "yes" ]; then
+    log "registering system service"
+    "${INSTALL_DIR}/sandboxd-agent" service install \
+      || warn "service registration failed; run 'sandboxd-agent service install' manually"
+    "${INSTALL_DIR}/sandboxd-agent" service start \
+      || warn "service did not start; check 'sandboxd-agent service status'"
+  fi
+
+  log "done. This host should now appear in sandbox_list."
+else
+  cat >&2 <<EOF
+
+  Installed, but not enrolled. To join a fleet:
+
+    ${INSTALL_DIR}/sandboxd-agent enroll \\
+      --token <enrollment-token> \\
+      --control <control-host:9443> \\
+      --root /path/to/workspace
+
+  Mint a token on the control host with: sandboxctl enroll mint
+EOF
+fi
