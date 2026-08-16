@@ -28,10 +28,4 @@ import (
 
 	// Stable identifiers for sandboxes, processes, and selection handles.
 	_ "github.com/google/uuid"
-
-	// Assertions in tests.
-	_ "github.com/stretchr/testify/require"
-
-	// In-process gRPC transport for service tests without a real socket.
-	_ "google.golang.org/grpc/test/bufconn"
 )
