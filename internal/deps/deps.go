@@ -17,9 +17,6 @@ import (
 	// MCP server transport and tool registration (M2).
 	_ "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	// CLI surface for all three binaries.
-	_ "github.com/spf13/cobra"
-
 	// Cross-platform service installation: systemd, launchd, Windows SC (M1).
 	_ "github.com/kardianos/service"
 
@@ -28,10 +25,4 @@ import (
 
 	// Stable identifiers for sandboxes, processes, and selection handles.
 	_ "github.com/google/uuid"
-
-	// Assertions in tests.
-	_ "github.com/stretchr/testify/require"
-
-	// In-process gRPC transport for service tests without a real socket.
-	_ "google.golang.org/grpc/test/bufconn"
 )

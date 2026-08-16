@@ -38,9 +38,13 @@ help:
 .PHONY: tools
 tools:
 	@mkdir -p $(TOOLS_DIR)
-	GOBIN=$(TOOLS_DIR) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
-	GOBIN=$(TOOLS_DIR) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
-	GOBIN=$(TOOLS_DIR) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GRPC_VERSION)
+	# CI pins GOTOOLCHAIN=local to the exact version named in go.mod, so a
+	# tool whose own go.mod requires a newer point release (as buf's
+	# regularly does) fails to install unless we hand it a toolchain that
+	# satisfies it — same reasoning as the golangci-lint pin below.
+	GOBIN=$(TOOLS_DIR) GOTOOLCHAIN=$(GO_TOOLCHAIN) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+	GOBIN=$(TOOLS_DIR) GOTOOLCHAIN=$(GO_TOOLCHAIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	GOBIN=$(TOOLS_DIR) GOTOOLCHAIN=$(GO_TOOLCHAIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GRPC_VERSION)
 	# golangci-lint refuses to run against a module targeting a newer Go than
 	# the one it was built with, so pin the toolchain rather than inheriting
 	# whatever default the host happens to have.
@@ -60,7 +64,13 @@ proto-lint:
 ## proto-breaking: fail if proto changes break the wire contract on main
 .PHONY: proto-breaking
 proto-breaking:
-	$(TOOLS_DIR)/buf breaking --against '.git#branch=main'
+	# CI checks out a PR's merge commit as a detached HEAD via fetch-depth:0,
+	# which populates refs/remotes/origin/main but never a local branch
+	# literally named "main" — buf's git input needs a ref that actually
+	# resolves, so target the remote-tracking branch rather than assuming a
+	# local one exists (it also doesn't, and shouldn't have to, on a fresh
+	# CI checkout).
+	$(TOOLS_DIR)/buf breaking --against '.git#branch=origin/main'
 
 ## proto-check: verify committed codegen matches the .proto sources
 .PHONY: proto-check

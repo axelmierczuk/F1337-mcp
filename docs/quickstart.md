@@ -41,12 +41,18 @@ Only needed while enrolling hosts. Stop it afterwards.
 ## 4. Mint a token
 
 ```sh
-sandboxctl enroll mint --name build-box --ttl 15m
+sandboxctl enroll mint --name build-box --address build-box.internal:8722 --ttl 15m
 # token: sbx_ey...
 ```
 
 Single-use and short-lived. Getting it to the host is your job — the same way
 you would move any other bootstrap secret.
+
+`--name` and `--address` are what the token authorizes, and the certificate the
+host is issued carries exactly those. An enrolling host cannot widen either, so
+give the address you will actually dial the sandbox by: without it the leaf
+names only `build-box`, and a control plane connecting to
+`build-box.internal:8722` will reject it.
 
 ## 5. Install the agent
 
@@ -109,7 +115,8 @@ Repeat steps 4 and 5. `--name` distinguishes them; labels let the model choose
 by capability rather than hostname:
 
 ```sh
-sandboxctl enroll mint --name gpu-01 --label gpu=a100 --label arch=amd64
+sandboxctl enroll mint --name gpu-01 --address gpu-01.internal:8722 \
+  --label gpu=a100 --label arch=amd64
 ```
 
 ## Troubleshooting
