@@ -4,7 +4,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -13,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
 )
 
 const (
@@ -58,10 +59,17 @@ func Init(dir string, force bool) (*CA, error) {
 	certPath := filepath.Join(dir, certFileName)
 	keyPath := filepath.Join(dir, keyFileName)
 	if !force {
-		if _, err := os.Stat(certPath); err == nil {
-			return nil, fmt.Errorf("ca: %s already exists; use force to overwrite and orphan every certificate it issued", certPath)
-		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("ca: stat %s: %w", certPath, err)
+		// Both paths are checked, not just the certificate: a directory
+		// holding a key but no certificate is a half-restored backup or an
+		// interrupted init, and silently overwriting the key there destroys
+		// the only copy of the CA's identity just as thoroughly as
+		// overwriting a complete CA would.
+		for _, path := range []string{certPath, keyPath} {
+			if _, err := os.Stat(path); err == nil {
+				return nil, fmt.Errorf("ca: %s already exists; use force to overwrite and orphan every certificate it issued", path)
+			} else if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("ca: stat %s: %w", path, err)
+			}
 		}
 	}
 
@@ -160,17 +168,8 @@ func (c *CA) CertPEM() []byte {
 	return out
 }
 
-// TLSCertificate returns a tls.Certificate presenting the CA's own
-// certificate and key, for use by a server that terminates TLS as the CA
-// itself — namely the enrollment listener, which has no other identity to
-// present before any agent has been issued one.
-func (c *CA) TLSCertificate() tls.Certificate {
-	return tls.Certificate{
-		Certificate: [][]byte{c.cert.Raw},
-		PrivateKey:  c.key,
-		Leaf:        c.cert,
-	}
-}
+// Dir returns the directory this CA is persisted under.
+func (c *CA) Dir() string { return c.dir }
 
 func randomSerial() (*big.Int, error) {
 	limit := new(big.Int).Lsh(big.NewInt(1), 128)
@@ -185,27 +184,8 @@ func randomSerial() (*big.Int, error) {
 // followed by a rename, so a reader never observes a partially written
 // certificate or key.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".ca-*.tmp")
-	if err != nil {
-		return fmt.Errorf("ca: create temp file in %s: %w", dir, err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("ca: write %s: %w", tmpPath, err)
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("ca: chmod %s: %w", tmpPath, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("ca: close %s: %w", tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("ca: rename %s to %s: %w", tmpPath, path, err)
+	if err := fsutil.WriteAtomic(path, data, mode); err != nil {
+		return fmt.Errorf("ca: write %s: %w", path, err)
 	}
 	return nil
 }

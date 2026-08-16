@@ -125,6 +125,10 @@ func TestPool_ServerCertFromDifferentCA_Rejected(t *testing.T) {
 	defer cancel()
 	_, err = hostClient.Health(ctx, &sandboxdv1.HealthRequest{})
 	require.Error(t, err)
+	// Assert on *why* it failed. A bare require.Error here would pass if the
+	// RPC broke for any unrelated reason, which is exactly the way a
+	// certificate check regresses without anyone noticing.
+	assertTLSFailure(t, err)
 }
 
 func TestPool_AgentLeafAsClientCert_RejectedByServer(t *testing.T) {
@@ -151,6 +155,14 @@ func TestPool_AgentLeafAsClientCert_RejectedByServer(t *testing.T) {
 	defer cancel()
 	_, err = hostClient.Health(ctx, &sandboxdv1.HealthRequest{})
 	require.Error(t, err)
+
+	// The agent rejects the client certificate during the handshake, so the
+	// client sees a generic transport failure rather than a TLS alert —
+	// under TLS 1.3 the client finishes its side before the server validates
+	// the certificate. What matters, and what this asserts, is that the
+	// request never reached the service.
+	assert.Zero(t, agent.servedCount(),
+		"a request bearing an agent leaf as its client certificate must never reach the service")
 }
 
 func TestPool_HealthCache_TransitionsToUnreachableWithinOneInterval(t *testing.T) {

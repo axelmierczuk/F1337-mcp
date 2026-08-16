@@ -17,9 +17,6 @@ import (
 	// MCP server transport and tool registration (M2).
 	_ "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	// CLI surface for all three binaries.
-	_ "github.com/spf13/cobra"
-
 	// Cross-platform service installation: systemd, launchd, Windows SC (M1).
 	_ "github.com/kardianos/service"
 

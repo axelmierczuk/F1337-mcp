@@ -33,6 +33,9 @@ type fakeAgent struct {
 	mu      sync.Mutex
 	status  sandboxdv1.HealthResponse_Status
 	message string
+	// served counts requests that reached the service, so a test can assert
+	// that a rejected connection never got past the handshake.
+	served int
 }
 
 func newFakeAgent() *fakeAgent {
@@ -42,11 +45,19 @@ func newFakeAgent() *fakeAgent {
 func (f *fakeAgent) Health(context.Context, *sandboxdv1.HealthRequest) (*sandboxdv1.HealthResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.served++
 	return &sandboxdv1.HealthResponse{
 		Status:       f.status,
 		Message:      f.message,
 		AgentVersion: "0.1.0-test",
 	}, nil
+}
+
+// servedCount reports how many requests reached the service.
+func (f *fakeAgent) servedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.served
 }
 
 func (f *fakeAgent) GetHostInfo(context.Context, *sandboxdv1.GetHostInfoRequest) (*sandboxdv1.GetHostInfoResponse, error) {

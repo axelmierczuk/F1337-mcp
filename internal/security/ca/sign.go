@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,10 @@ const (
 	ProfileAgent Profile = iota
 	// ProfileControl issues a client-auth leaf for sandboxd-mcp.
 	ProfileControl
+	// ProfileControlPlane issues a server-auth leaf for the control plane's
+	// own enrollment listener, so that listener terminates TLS with a leaf
+	// rather than with the CA key itself.
+	ProfileControlPlane
 )
 
 // OrganizationalUnit for a profile is baked into the subject, and is also
@@ -37,6 +42,8 @@ func (p Profile) OrganizationalUnit() string {
 		return "sandboxd-agent"
 	case ProfileControl:
 		return "sandboxd-control"
+	case ProfileControlPlane:
+		return "sandboxd-control-plane"
 	default:
 		return ""
 	}
@@ -49,6 +56,11 @@ const minRSAKeyBits = 2048
 
 // minECDSAKeyBits is the smallest ECDSA curve size SignCSR accepts.
 const minECDSAKeyBits = 256
+
+// MaxSANs bounds how many subject alternative names a single leaf may carry.
+// A fleet member listens on a handful of addresses; a request for hundreds is
+// either a mistake or an attempt to blanket the namespace.
+const MaxSANs = 16
 
 // SignOptions configures the leaf certificate SignCSR produces.
 type SignOptions struct {
@@ -85,6 +97,14 @@ func (c *CA) SignCSR(csrDER []byte, opts SignOptions) (*x509.Certificate, []byte
 	if err := checkKeyStrength(csr.PublicKey); err != nil {
 		return nil, nil, err
 	}
+	// SANs decide which identity a leaf may answer to, so they are validated
+	// here — at the only place that signs — rather than trusted from whatever
+	// assembled them. The caller is expected to have already decided *which*
+	// names are permissible for this subject; this is the check that they are
+	// well-formed names at all, and that none of them is a wildcard.
+	if err := checkSANs(opts.DNSNames, opts.IPAddresses); err != nil {
+		return nil, nil, err
+	}
 
 	ttl := opts.TTL
 	if ttl <= 0 {
@@ -111,7 +131,7 @@ func (c *CA) SignCSR(csrDER []byte, opts SignOptions) (*x509.Certificate, []byte
 	}
 
 	switch opts.Profile {
-	case ProfileAgent:
+	case ProfileAgent, ProfileControlPlane:
 		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 		tmpl.DNSNames = opts.DNSNames
 		tmpl.IPAddresses = opts.IPAddresses
@@ -131,6 +151,82 @@ func (c *CA) SignCSR(csrDER []byte, opts SignOptions) (*x509.Certificate, []byte
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	return cert, certPEM, nil
+}
+
+// DecodeCSR accepts a certificate signing request as either PEM or raw DER
+// and returns its DER encoding, so a caller reading one off disk does not
+// have to care which form the tool that produced it wrote.
+func DecodeCSR(data []byte) ([]byte, error) {
+	if block, _ := pem.Decode(data); block != nil {
+		if block.Type != "CERTIFICATE REQUEST" && block.Type != "NEW CERTIFICATE REQUEST" {
+			return nil, fmt.Errorf("ca: expected a CERTIFICATE REQUEST PEM block, got %q", block.Type)
+		}
+		return block.Bytes, nil
+	}
+	if _, err := x509.ParseCertificateRequest(data); err != nil {
+		return nil, fmt.Errorf("ca: input is neither a PEM nor a DER certificate signing request: %w", err)
+	}
+	return data, nil
+}
+
+// checkSANs rejects subject alternative names that are malformed, wildcarded,
+// or too numerous.
+//
+// The wildcard rule is the important one: a leaf bearing "*.internal" answers
+// to every name in the domain, which turns a single issued certificate into
+// blanket authority over the fleet's namespace. Nothing in sandboxd needs a
+// wildcard — a sandbox is dialled by its own name and addresses — so refusing
+// to sign one costs nothing and removes the whole class.
+func checkSANs(dnsNames []string, ips []net.IP) error {
+	if len(dnsNames)+len(ips) > MaxSANs {
+		return fmt.Errorf("ca: too many subject alternative names: %d, limit is %d", len(dnsNames)+len(ips), MaxSANs)
+	}
+	for _, name := range dnsNames {
+		if err := checkDNSName(name); err != nil {
+			return err
+		}
+	}
+	for _, ip := range ips {
+		if len(ip) == 0 {
+			return fmt.Errorf("ca: empty IP subject alternative name")
+		}
+		if ip.IsUnspecified() {
+			return fmt.Errorf("ca: refusing to sign unspecified IP subject alternative name %s", ip)
+		}
+	}
+	return nil
+}
+
+// checkDNSName enforces the shape of a hostname as RFC 1123 defines it, with
+// wildcards excluded.
+func checkDNSName(name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("ca: empty DNS subject alternative name")
+	case len(name) > 253:
+		return fmt.Errorf("ca: DNS subject alternative name %q is longer than 253 characters", name)
+	case strings.Contains(name, "*"):
+		return fmt.Errorf("ca: refusing to sign wildcard DNS subject alternative name %q", name)
+	}
+
+	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		if label == "" {
+			return fmt.Errorf("ca: DNS subject alternative name %q has an empty label", name)
+		}
+		if len(label) > 63 {
+			return fmt.Errorf("ca: DNS subject alternative name %q has a label longer than 63 characters", name)
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("ca: DNS subject alternative name %q has a label starting or ending with '-'", name)
+		}
+		for _, r := range label {
+			isAlphanumeric := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+			if !isAlphanumeric && r != '-' && r != '_' {
+				return fmt.Errorf("ca: DNS subject alternative name %q contains an invalid character %q", name, r)
+			}
+		}
+	}
+	return nil
 }
 
 // checkKeyStrength rejects public keys too weak to be worth signing.

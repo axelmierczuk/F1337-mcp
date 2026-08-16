@@ -16,6 +16,8 @@ var ErrNotFound = errors.New("registry: not found")
 // registered.
 var ErrExists = errors.New("registry: sandbox already exists")
 
+func isNotFound(err error) bool { return errors.Is(err, ErrNotFound) }
+
 // Platform is a cached, best-effort description of a sandbox host, filled in
 // from the most recent HostService.GetHostInfo call. It intentionally
 // duplicates the shape of sandboxd.v1.Platform rather than importing the

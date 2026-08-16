@@ -93,10 +93,20 @@ func (p *Pool) Conn(name, address string) (*grpc.ClientConn, error) {
 // dial creates a new channel and starts its background health loop. Callers
 // must hold p.mu.
 func (p *Pool) dial(name, address string) (*entry, error) {
-	tlsConf := p.tlsConf.Clone()
-	if host, _, err := net.SplitHostPort(address); err == nil && host != "" {
-		tlsConf.ServerName = host
+	// The server name is what the agent's leaf is verified against, so an
+	// address we cannot parse a host out of is rejected here. Left to the
+	// TLS stack it surfaces as "either ServerName or InsecureSkipVerify must
+	// be specified in the config" on the first RPC, which names neither the
+	// sandbox nor the malformed address that caused it.
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("client: sandbox %s has address %q, which is not host:port: %w", name, address, err)
 	}
+	if host == "" {
+		return nil, fmt.Errorf("client: sandbox %s has address %q, which names no host", name, address)
+	}
+	tlsConf := p.tlsConf.Clone()
+	tlsConf.ServerName = host
 
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConf)),

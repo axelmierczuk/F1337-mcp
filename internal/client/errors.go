@@ -19,8 +19,14 @@ var (
 	// sandbox responded.
 	ErrDeadlineExceeded = errors.New("client: deadline exceeded")
 	// ErrCertificateRejected means mTLS authentication failed: wrong CA,
-	// wrong certificate profile, or expired leaf.
+	// wrong certificate profile, or expired leaf. It is about *who the
+	// caller is*, and the fix is always a certificate.
 	ErrCertificateRejected = errors.New("client: certificate rejected")
+	// ErrPermissionDenied means the agent authenticated the caller and then
+	// refused the operation: a path outside the allowed roots, a command the
+	// policy forbids. It is about *what was asked for*, and the fix is never
+	// a certificate — which is why it does not share ErrCertificateRejected.
+	ErrPermissionDenied = errors.New("client: permission denied by sandbox policy")
 	// ErrMessageTooLarge means the call exceeded the configured max message
 	// size. See Config.MaxRecvMsgSize / MaxSendMsgSize.
 	ErrMessageTooLarge = errors.New("client: message exceeds configured size limit")
@@ -48,8 +54,10 @@ func MapError(err error) error {
 		return fmt.Errorf("%w: %s: %w", ErrUnreachable, st.Message(), err)
 	case codes.DeadlineExceeded:
 		return fmt.Errorf("%w: %s: %w", ErrDeadlineExceeded, st.Message(), err)
-	case codes.Unauthenticated, codes.PermissionDenied:
+	case codes.Unauthenticated:
 		return fmt.Errorf("%w: %s: %w", ErrCertificateRejected, st.Message(), err)
+	case codes.PermissionDenied:
+		return fmt.Errorf("%w: %s: %w", ErrPermissionDenied, st.Message(), err)
 	case codes.ResourceExhausted:
 		return fmt.Errorf("%w: %s: %w", ErrMessageTooLarge, st.Message(), err)
 	default:

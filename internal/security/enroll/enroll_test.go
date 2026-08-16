@@ -36,14 +36,17 @@ func newTestCA(t *testing.T) *ca.CA {
 }
 
 // startControlPlane serves an enroll.Service over an in-memory bufconn
-// listener, presenting the CA's own certificate as its server identity —
-// exactly as sandboxctl serve will, since the enrolling host has nothing
-// else to verify against yet.
+// listener, presenting a CA-signed leaf as its server identity — exactly as
+// sandboxctl serve does, keeping the CA private key out of the process that
+// terminates TLS for unauthenticated callers.
 func startControlPlane(t *testing.T, svc *enroll.Service, caObj *ca.CA) *bufconn.Listener {
 	t.Helper()
+	serverCert, err := caObj.ServerCertificate([]string{controlPlaneHost}, 0)
+	require.NoError(t, err)
+
 	lis := bufconn.Listen(1024 * 1024)
 	creds := credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{caObj.TLSCertificate()},
+		Certificates: []tls.Certificate{serverCert},
 		MinVersion:   tls.VersionTLS12,
 	})
 	s := grpc.NewServer(grpc.Creds(creds))
@@ -59,13 +62,17 @@ func bufDialer(lis *bufconn.Listener) func(context.Context, string) (net.Conn, e
 	}
 }
 
+// controlPlaneHost is the name the test control plane's serving certificate
+// is issued for, and the name the client verifies it against.
+const controlPlaneHost = "control.test"
+
 func dialControlPlane(lis *bufconn.Listener, fingerprint [32]byte, extra ...grpc.DialOption) (*grpc.ClientConn, error) {
 	opts := append([]grpc.DialOption{grpc.WithContextDialer(bufDialer(lis))}, extra...)
 	return enroll.Dial(enroll.DialOptions{
 		// "passthrough:///" forces grpc to hand the dialer the literal
 		// target rather than resolving it via DNS, which is what lets a
 		// bufconn address (not a real, resolvable host) work here.
-		Address:          "passthrough:///bufnet",
+		Address:          "passthrough:///" + controlPlaneHost + ":9443",
 		CAFingerprint:    fingerprint,
 		ExtraDialOptions: opts,
 	})
@@ -91,7 +98,11 @@ func TestFullLoop_MintEnrollValidatesAgainstCA(t *testing.T) {
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
 	lis := startControlPlane(t, svc, caObj)
 
-	token, rec, err := tokens.Mint("build-box", map[string]string{"role": "build"}, 0)
+	token, rec, err := tokens.Mint(enroll.MintOptions{
+		Name:      "build-box",
+		Labels:    map[string]string{"role": "build"},
+		Addresses: []string{"10.0.0.5:8722"},
+	})
 	require.NoError(t, err)
 	assert.False(t, rec.Used)
 
@@ -123,7 +134,7 @@ func TestFullLoop_MintEnrollValidatesAgainstCA(t *testing.T) {
 
 func TestRedeem_UsedTwiceSequentially(t *testing.T) {
 	store := enroll.NewTokenStore()
-	token, _, err := store.Mint("build-box", nil, 0)
+	token, _, err := store.Mint(enroll.MintOptions{Name: "build-box"})
 	require.NoError(t, err)
 
 	_, err = store.Redeem(token)
@@ -136,10 +147,13 @@ func TestRedeem_UsedTwiceSequentially(t *testing.T) {
 func TestRedeem_ConcurrentRedemption_ExactlyOneSucceeds(t *testing.T) {
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
-	svc := &enroll.Service{Tokens: tokens, CA: caObj}
+	// Rate limiting is disabled here so that what this test measures is the
+	// redemption race and nothing else: with the default limiter, most of the
+	// 25 attempts would be turned away before reaching the token store.
+	svc := &enroll.Service{Tokens: tokens, CA: caObj, Limiter: enroll.NewRateLimiter(time.Minute, 0, 0)}
 	lis := startControlPlane(t, svc, caObj)
 
-	token, _, err := tokens.Mint("build-box", nil, 0)
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box"})
 	require.NoError(t, err)
 
 	const n = 25
@@ -177,7 +191,7 @@ func TestRedeem_ConcurrentRedemption_ExactlyOneSucceeds(t *testing.T) {
 				atomic.AddInt32(&successes, 1)
 				return
 			}
-			if st, ok := status.FromError(err); ok && st.Code() == codes.PermissionDenied {
+			if st, ok := status.FromError(err); ok && st.Code() == codes.Unauthenticated {
 				atomic.AddInt32(&usedRejections, 1)
 			}
 		}()
@@ -190,7 +204,7 @@ func TestRedeem_ConcurrentRedemption_ExactlyOneSucceeds(t *testing.T) {
 
 func TestRedeem_Expired(t *testing.T) {
 	store := enroll.NewTokenStore()
-	token, _, err := store.Mint("build-box", nil, 10*time.Millisecond)
+	token, _, err := store.Mint(enroll.MintOptions{Name: "build-box", TTL: 10 * time.Millisecond})
 	require.NoError(t, err)
 
 	time.Sleep(30 * time.Millisecond)
@@ -205,7 +219,7 @@ func TestEnroll_ExpiredTokenRejectedOverRPC(t *testing.T) {
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
 	lis := startControlPlane(t, svc, caObj)
 
-	token, _, err := tokens.Mint("build-box", nil, 10*time.Millisecond)
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box", TTL: 10 * time.Millisecond})
 	require.NoError(t, err)
 	time.Sleep(30 * time.Millisecond)
 
@@ -221,7 +235,10 @@ func TestEnroll_ExpiredTokenRejectedOverRPC(t *testing.T) {
 	require.Error(t, err)
 	st, ok := status.FromError(err)
 	require.True(t, ok)
-	assert.Equal(t, codes.DeadlineExceeded, st.Code())
+	// Expired, already-used, and never-minted tokens are all reported the
+	// same way, so the response cannot be used to probe the token store.
+	assert.Equal(t, codes.Unauthenticated, st.Code())
+	assert.NotContains(t, st.Message(), "expired")
 }
 
 func TestEnroll_InvalidTokenRejected(t *testing.T) {
@@ -251,7 +268,7 @@ func TestDial_WrongFingerprintAbortsBeforeTokenSent(t *testing.T) {
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
 	lis := startControlPlane(t, svc, caObj)
 
-	token, _, err := tokens.Mint("build-box", nil, 0)
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box"})
 	require.NoError(t, err)
 
 	wrongFingerprint := sha256.Sum256([]byte("not the real CA"))
@@ -295,7 +312,7 @@ func TestEnroll_NameCollisionAssignsDistinctName(t *testing.T) {
 	}
 	lis := startControlPlane(t, svc, caObj)
 
-	token, _, err := tokens.Mint("", nil, 0)
+	token, _, err := tokens.Mint(enroll.MintOptions{})
 	require.NoError(t, err)
 
 	cc := requireDialControlPlane(t, lis, caObj.Fingerprint())
@@ -323,7 +340,7 @@ func TestPrivateKeyNeverAppearsOnWire(t *testing.T) {
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
 	lis := startControlPlane(t, svc, caObj)
 
-	token, _, err := tokens.Mint("build-box", nil, 0)
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box"})
 	require.NoError(t, err)
 
 	key, err := enroll.GenerateKey()
@@ -370,7 +387,7 @@ func TestEnroll_RejectsInvalidCSR(t *testing.T) {
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
 	lis := startControlPlane(t, svc, caObj)
 
-	token, _, err := tokens.Mint("build-box", nil, 0)
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box"})
 	require.NoError(t, err)
 
 	cc := requireDialControlPlane(t, lis, caObj.Fingerprint())

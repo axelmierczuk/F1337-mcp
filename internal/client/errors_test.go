@@ -28,7 +28,7 @@ func TestMapError_MapsKnownCodes(t *testing.T) {
 		{codes.Unavailable, client.ErrUnreachable},
 		{codes.DeadlineExceeded, client.ErrDeadlineExceeded},
 		{codes.Unauthenticated, client.ErrCertificateRejected},
-		{codes.PermissionDenied, client.ErrCertificateRejected},
+		{codes.PermissionDenied, client.ErrPermissionDenied},
 		{codes.ResourceExhausted, client.ErrMessageTooLarge},
 	}
 	for _, tc := range cases {
@@ -43,4 +43,18 @@ func TestMapError_MapsKnownCodes(t *testing.T) {
 func TestMapError_UnmappedCode_ReturnedAsIs(t *testing.T) {
 	err := status.Error(codes.NotFound, "detail")
 	assert.Equal(t, err, client.MapError(err))
+}
+
+// A policy denial from the agent and a rejected client certificate arrive as
+// different gRPC codes and must stay distinguishable: one is fixed by editing
+// the sandbox's policy, the other by re-issuing a certificate, and an
+// operator told the wrong one debugs the wrong system.
+func TestMapError_PolicyDenialIsNotACertificateProblem(t *testing.T) {
+	denied := client.MapError(status.Error(codes.PermissionDenied, "path /etc is outside the allowed roots"))
+	assert.ErrorIs(t, denied, client.ErrPermissionDenied)
+	assert.NotErrorIs(t, denied, client.ErrCertificateRejected)
+
+	rejected := client.MapError(status.Error(codes.Unauthenticated, "bad certificate"))
+	assert.ErrorIs(t, rejected, client.ErrCertificateRejected)
+	assert.NotErrorIs(t, rejected, client.ErrPermissionDenied)
 }
