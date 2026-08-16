@@ -12,6 +12,12 @@ designate instead of your laptop.
 > not a caveat. Read [docs/security.md](docs/security.md) before installing
 > it anywhere.
 
+
+> [!NOTE]
+> _**AI;DR:**_ This software was entirely developed using LLMs. Please use 
+> IP-based allow-listing to prevent unauthorized parties from gaining remote
+> code execution on the machine running the sandbox agent. 
+
 ## What it is
 
 Three binaries, one Go module:
