@@ -2,87 +2,41 @@
 
 **Let your coding agent choose which machine it runs on.**
 
-An MCP server plus a small cross-platform daemon that give an agent CLI a fleet
-of execution targets, with `exec`, `read`, `write`, `edit`, and process
-supervision that behave like the tools it already has — except they run over
-there.
+An MCP server plus a small cross-platform daemon that give an agent CLI a
+fleet of execution targets — `exec`, file ops, and process supervision that
+work like the tools it already has, except they run on a machine you
+designate instead of your laptop.
 
 > [!WARNING]
-> `sandboxd-agent` is a remote code execution service. That is its purpose, not
-> a caveat. Read [docs/security.md](docs/security.md) before installing it
-> anywhere.
+> `sandboxd-agent` is a remote code execution service. That is its purpose,
+> not a caveat. Read [docs/security.md](docs/security.md) before installing
+> it anywhere.
 
----
-
-## Why
-
-Your agent runs on your laptop, so your laptop is the only place it can execute.
-Every way around that is unsatisfying:
-
-| Approach | Why it falls short |
-| --- | --- |
-| **Just run it locally** | No isolation. Dependency installs, runaway builds, and the occasional `rm -rf` land on your daily driver. |
-| **Tell the agent to SSH** | Agents are bad at interactive SSH. No structured exit codes, ad-hoc output truncation, fragile session state, no file primitives, and credentials smeared across command lines. |
-| **Docker / devcontainers** | One machine. Cannot express "build on the ARM mac, fuzz on the big Linux box, reproduce on the Windows rig." |
-| **Hosted sandbox SaaS** | You rent someone else's compute, ship your source to it, and still cannot point it at the hardware sitting under your desk. |
-
-The gap is specific: **there is no simple, off-the-shelf way for an agent to
-select a host from a fleet you control and then work on it.** Selection and
-execution are separate problems, and nothing solves both.
-
-`sandboxd` solves both. Register the machines you already own. The agent calls
-`sandbox_select`, then uses a toolset that mirrors its native one.
-
-```
-you: run the integration suite on the GPU box, and start the dev server on the mac
-
-agent: sandbox_select(name="gpu-01")
-       sandbox_exec(argv=["go","test","./...","-tags=integration"])   → exit 0, 41s
-       sandbox_select(name="mac-mini")
-       sandbox_process_start(name="dev", argv=["npm","run","dev"],
-                             ready_probe={tcp_port: 5173}, wait_for_ready=true)
-                                                                     → state: ready
-       sandbox_forward(remote_port=5173)                             → localhost:5173
-```
-
-## How it fits together
-
-```
-   Claude Code / Cursor / any MCP client
-              │  stdio, via mcp.json
-              ▼
-        sandboxd-mcp ──────── registry + selection  (~/.config/sandboxd)
-              │
-              │  gRPC over mTLS
-              ├──────────────► sandboxd-agent   linux/amd64    build box
-              ├──────────────► sandboxd-agent   darwin/arm64   mac mini
-              └──────────────► sandboxd-agent   windows/amd64  test rig
-
-        sandboxctl ────────── CA, enrollment tokens, fleet inspection
-```
+## What it is
 
 Three binaries, one Go module:
 
-| Binary | Runs on | Job |
-| --- | --- | --- |
-| `sandboxd-mcp` | your workstation | MCP server over stdio; owns the registry and the current selection |
-| `sandboxd-agent` | every sandbox host | gRPC services over mTLS; supervises background processes |
-| `sandboxctl` | your workstation | CA setup, enrollment tokens, fleet inspection |
+- **`sandboxd-mcp`** — runs on your workstation. The MCP server your agent
+  talks to. Owns the registry of known sandboxes and the current selection.
+- **`sandboxd-agent`** — runs on every sandbox host. Listens over gRPC/mTLS,
+  runs commands, and supervises background processes.
+- **`sandboxctl`** — runs on your workstation. Sets up the CA, mints
+  enrollment tokens, and inspects the fleet.
 
-The agent never imports the MCP SDK, and the MCP server never touches the CA
-signing key. Minting credentials is an operator action, deliberately kept out of
-reach of anything a model can call.
+The agent CLI (Claude Code, Cursor, etc.) calls `sandbox_select` to pick a
+host, then uses the same exec/file/process tools it already knows — they
+just execute wherever you pointed them.
 
-## Quickstart
+## Install
 
-**1. Install the workstation tools.**
+**1. Get the workstation tools:**
 
 ```sh
 go install github.com/axelmierczuk/sandboxd-mcp/cmd/sandboxd-mcp@latest
 go install github.com/axelmierczuk/sandboxd-mcp/cmd/sandboxctl@latest
 ```
 
-**2. Create a CA and mint an enrollment token.**
+**2. Create a CA and mint an enrollment token:**
 
 ```sh
 sandboxctl ca init
@@ -91,7 +45,7 @@ sandboxctl enroll mint --name build-box
 # → token: sbx_ey...   ca fingerprint: 9f2c...
 ```
 
-**3. Turn a machine into a sandbox — one command.**
+**3. Enroll a machine as a sandbox:**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
@@ -101,11 +55,11 @@ curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/inst
              --root /home/build/workspace
 ```
 
-The installer detects the platform, verifies the release checksum, enrolls the
-host — generating its keypair locally, so **the private key never crosses the
-network** — and registers a system service. Windows hosts use `install.ps1`.
+This detects the platform, verifies the release checksum, enrolls the host
+(the private key is generated locally and never leaves the machine), and
+installs a system service. Use `install.ps1` on Windows.
 
-**4. Point your agent at it.**
+**4. Point your agent at the MCP server:**
 
 ```json
 {
@@ -118,87 +72,35 @@ network** — and registers a system service. Windows hosts use `install.ps1`.
 }
 ```
 
-That's it. `sandbox_list` should show `build-box`.
+Done. `sandbox_list` should show `build-box`.
 
 ## Tools
 
-Nineteen tools across five groups. See [docs/tools.md](docs/tools.md) for full
-schemas.
+Nineteen tools across five groups — see [docs/tools.md](docs/tools.md) for
+full schemas.
 
-**Fleet** — `sandbox_list` · `sandbox_select` · `sandbox_add` · `sandbox_remove` · `sandbox_info`
+- **Fleet** — `sandbox_list`, `sandbox_select`, `sandbox_add`, `sandbox_remove`, `sandbox_info`
+- **Execute** — `sandbox_exec`
+- **Background processes** — `sandbox_process_start`, `sandbox_process_list`, `sandbox_process_logs`, `sandbox_process_signal`, `sandbox_process_restart`
+- **Files** — `sandbox_read`, `sandbox_write`, `sandbox_edit`, `sandbox_ls`, `sandbox_glob`, `sandbox_grep`
+- **Bridge** — `sandbox_transfer`, `sandbox_forward`
 
-**Execute** — `sandbox_exec`
-
-**Background processes** — `sandbox_process_start` · `sandbox_process_list` · `sandbox_process_logs` · `sandbox_process_signal` · `sandbox_process_restart`
-
-**Files** — `sandbox_read` · `sandbox_write` · `sandbox_edit` · `sandbox_ls` · `sandbox_glob` · `sandbox_grep`
-
-**Bridge** — `sandbox_transfer` · `sandbox_forward`
-
-### How selection works
-
-MCP `2026-07-28` made the protocol stateless: no session handshake, no
-`Mcp-Session-Id`. So "the selected sandbox" cannot live in transport state. The
-spec's own guidance is to mint an explicit handle and have the model pass it
-back — but making the model thread a handle through forty consecutive calls is
-miserable, and it will drop it.
-
-So `sandbox_select` does both:
-
-1. It returns an opaque **handle**.
-2. It writes a **sticky default**, persisted per client, surviving restarts.
-3. **Every** targeted tool takes an optional `sandbox` argument that overrides
-   the default.
-4. With no argument and no default, tools fail with a structured error listing
-   what is available — never a silent guess.
-5. **Every result echoes the sandbox that served it.**
-
-That last rule is the one that matters most. An agent that believes it is on
-host A while executing on host B is the worst failure this project can produce,
-and it is the kind of bug that stays invisible until it destroys something.
-
-### Why background processes get their own service
-
-Running `npm run dev` is not "a command that takes a long time" — it is a
-different lifecycle, and treating it like a slow `exec` breaks in specific ways
-that `sandboxd` handles explicitly:
-
-- **Processes outlive the MCP session.** They are owned by the agent daemon.
-  Agent CLIs restart constantly; a dev server that dies with the editor is
-  useless.
-- **Readiness is not the same as spawned.** A dev server takes seconds to bind
-  its port. Without a probe, the model curls immediately, gets a connection
-  refused, and concludes the server is broken. `ready_probe` waits for a log
-  pattern, a TCP port, or an HTTP response.
-- **Killing means killing the tree.** Signalling only the leader leaves the
-  bundler holding the port. On Unix each process gets its own group; on Windows
-  a job object with `KILL_ON_JOB_CLOSE`.
-- **Logs survive the crash.** A bounded ring buffer for fast tailing, plus a
-  rotating file on disk, so a failure twenty minutes ago is still diagnosable.
-  Dropped lines are reported, never silently swallowed.
-- **Following is always bounded.** A tool call that never returns is
-  indistinguishable from a hung agent, and the model cannot recover from it.
-- **PID reuse is handled.** After an agent restart, a process is re-adopted only
-  if its PID *and* start time both match.
+`sandbox_select` sets a sticky default sandbox (persisted per client), and
+every targeted tool can override it with an optional `sandbox` argument.
+Every result echoes back which sandbox actually served it, so the agent
+never silently acts on the wrong host.
 
 ## Security
 
-The short version:
-
 - **mTLS everywhere.** No plaintext mode, not even on loopback.
 - **Keys never move.** Enrollment is a CSR exchange against a single-use token.
-- **Path jail.** Symlinks are resolved *before* containment is checked —
-  rejecting `..` up front is the classic way to build a jail a symlink walks
-  straight out of.
-- **No shell by default.** Commands take an argv, not a string. Opt in with
-  `shell: true`.
-- **Caps and audit.** Wall-clock timeouts, output limits, and an append-only
-  JSONL record of every exec and every write.
+- **No shell by default.** Commands take an argv, not a string.
+- **Caps and audit.** Wall-clock timeouts, output limits, append-only JSONL
+  log of every exec and write.
 
-**`sandboxd` does not sandbox.** It is remote execution against a host you
-designate. The isolation is whatever that host already provides — a VM, a
-container, a dedicated machine. Full threat model in
-[docs/security.md](docs/security.md).
+`sandboxd` does not sandbox — it's remote execution against a host you
+designate. Isolation is whatever that host already provides (VM, container,
+dedicated machine). Full threat model in [docs/security.md](docs/security.md).
 
 ## Development
 
@@ -209,27 +111,14 @@ make build     # all three binaries
 make check     # everything CI runs
 ```
 
-The wire contract lives in [`proto/sandboxd/v1`](proto/sandboxd/v1). Generated
-code is committed under `gen/`, so consuming the module needs no proto
-toolchain; `make proto-check` fails CI if it drifts from the sources.
-
-| Layer | Choice |
-| --- | --- |
-| Language | Go 1.25 |
-| MCP | [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk) v1.7.0 (protocol `2026-07-28`) |
-| RPC | gRPC v1.83 · protobuf v1.36 |
-| Proto tooling | buf (lint, format, breaking-change detection) |
-| PTY | `aymanbagabas/go-pty` (Unix PTY and Windows ConPTY) |
-| Service install | `kardianos/service` (systemd, launchd, Windows SC) |
-| Release | GoReleaser, six platform pairs, checksums and build provenance |
+Go 1.25, [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk),
+gRPC/protobuf, buf for proto tooling, GoReleaser for release builds.
 
 ## Status
 
-Early. The protocol schema, scaffolding, and build pipeline are in place; the
-implementation is tracked in
-[#29](https://github.com/axelmierczuk/sandboxd-mcp/issues/29) across four
-milestones — M0 foundation, M1 agent, M2 MCP server, M3 distribution. See
-[docs/architecture.md](docs/architecture.md) for the design in full.
+Early. Protocol schema and build pipeline are in place; implementation is
+tracked in [#29](https://github.com/axelmierczuk/sandboxd-mcp/issues/29).
+See [docs/architecture.md](docs/architecture.md) for the full design.
 
 ## License
 
