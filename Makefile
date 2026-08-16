@@ -64,7 +64,13 @@ proto-lint:
 ## proto-breaking: fail if proto changes break the wire contract on main
 .PHONY: proto-breaking
 proto-breaking:
-	$(TOOLS_DIR)/buf breaking --against '.git#branch=main'
+	# CI checks out a PR's merge commit as a detached HEAD via fetch-depth:0,
+	# which populates refs/remotes/origin/main but never a local branch
+	# literally named "main" — buf's git input needs a ref that actually
+	# resolves, so target the remote-tracking branch rather than assuming a
+	# local one exists (it also doesn't, and shouldn't have to, on a fresh
+	# CI checkout).
+	$(TOOLS_DIR)/buf breaking --against '.git#branch=origin/main'
 
 ## proto-check: verify committed codegen matches the .proto sources
 .PHONY: proto-check
