@@ -87,14 +87,8 @@ type SignOptions struct {
 // before expiry is just calling SignCSR again with a fresh CSR from the same
 // host, with no dependency on a new enrollment token.
 func (c *CA) SignCSR(csrDER []byte, opts SignOptions) (*x509.Certificate, []byte, error) {
-	csr, err := x509.ParseCertificateRequest(csrDER)
+	csr, err := CheckCSR(csrDER)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ca: parse CSR: %w", err)
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return nil, nil, fmt.Errorf("ca: CSR signature does not verify: %w", err)
-	}
-	if err := checkKeyStrength(csr.PublicKey); err != nil {
 		return nil, nil, err
 	}
 	// SANs decide which identity a leaf may answer to, so they are validated
@@ -151,6 +145,28 @@ func (c *CA) SignCSR(csrDER []byte, opts SignOptions) (*x509.Certificate, []byte
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	return cert, certPEM, nil
+}
+
+// CheckCSR parses csrDER and verifies that it is a signing request worth
+// acting on: it decodes, its self-signature verifies under the key it carries,
+// and that key is strong enough to sign.
+//
+// SignCSR runs this itself. It is exported so that a caller who must take some
+// other action first — the enrollment service reserves a fleet name before it
+// signs — can reject a bad request before taking an action it would then have
+// to undo.
+func CheckCSR(csrDER []byte) (*x509.CertificateRequest, error) {
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return nil, fmt.Errorf("ca: parse CSR: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("ca: CSR signature does not verify: %w", err)
+	}
+	if err := checkKeyStrength(csr.PublicKey); err != nil {
+		return nil, err
+	}
+	return csr, nil
 }
 
 // DecodeCSR accepts a certificate signing request as either PEM or raw DER

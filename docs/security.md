@@ -54,6 +54,11 @@ operator                control plane              new host
 ```
 
 - Tokens are **single-use** and short-lived.
+- **A token authorizes an identity, not just admission.** The name and addresses
+  given to `enroll mint` are the only ones the issued certificate carries. An
+  enrolling host may decline to use them; it cannot widen them, and asking to be
+  enrolled under a different name is refused. Otherwise one valid token yields a
+  CA-signed leaf for any name in the fleet, and mTLS stops meaning anything.
 - The host generates its own keypair and sends only a CSR. **The private key
   never crosses the network**, so neither a leaked token nor a compromised
   control plane yields an existing agent's key.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -56,9 +57,27 @@ type EnrolledSandbox struct {
 // Recorder persists a newly enrolled sandbox. The control plane wires this to
 // the fleet registry; a nil Recorder skips recording, which is what the
 // package's own tests use.
+//
+// A Recorder that is asked to record a name another fleet member already holds
+// must report it as ErrNameTaken. That is what lets Enroll hand the loser of a
+// race the next free name instead of failing it: the record, not the
+// NameChecker consulted beforehand, is what actually reserves a name.
 type Recorder interface {
 	Record(sb EnrolledSandbox) error
 }
+
+// ErrNameTaken is the error a Recorder returns when the name it was asked to
+// record is already held.
+var ErrNameTaken = errors.New("enroll: sandbox name already taken")
+
+// maxNameAttempts bounds collision resolution.
+//
+// The bound is not paranoia about a fleet with sixty-four "build-box"es. A
+// NameChecker may report every name as taken — registry.Exists deliberately
+// does exactly that when it cannot read the registry at all, because refusing a
+// name it cannot rule out is the safe direction — and an unbounded search then
+// spins forever inside an RPC any unauthenticated host can start.
+const maxNameAttempts = 64
 
 // Service implements sandboxdv1.EnrollmentServiceServer: it is the only RPC
 // surface an unenrolled host may reach, so every step here runs before that
@@ -68,9 +87,9 @@ type Service struct {
 
 	Tokens *TokenStore
 	CA     Signer
-	// Names is consulted for collisions between RequestedName (or the
-	// token's reserved name) and the existing fleet. A nil Names performs no
-	// collision checking.
+	// Names is consulted for collisions between the name this enrollment
+	// settles on and the existing fleet. A nil Names performs no collision
+	// checking, leaving the Recorder to reject a duplicate.
 	Names NameChecker
 	// Fleet records each successful enrollment. A nil Fleet skips recording.
 	Fleet Recorder
@@ -85,9 +104,10 @@ type Service struct {
 
 	limiterOnce     sync.Once
 	fallbackLimiter *RateLimiter
-	// Log receives the reason a token was rejected. The reason is
-	// deliberately not returned to the caller, so this is the only place it
-	// is visible. A nil Log discards it.
+	// Log receives the detail behind a rejection: which of invalid, expired or
+	// used a token was, and why a fleet registry write failed. None of it is
+	// returned to the caller — the caller is unauthenticated — so this is the
+	// only place it is visible. A nil Log discards it.
 	Log *slog.Logger
 }
 
@@ -113,33 +133,65 @@ func (s *Service) Enroll(ctx context.Context, req *sandboxdv1.EnrollRequest) (*s
 		return nil, status.Error(codes.Unauthenticated, "enroll: enrollment token rejected")
 	}
 
-	name := req.GetRequestedName()
-	if name == "" {
-		name = rec.Name
+	// A token authorizes an identity, not merely admission. The name is half
+	// of that identity — it is what the leaf's SANs are built from — so a
+	// request to be enrolled under some other name is refused rather than
+	// quietly honoured. Without this, one valid token yields a CA-signed leaf
+	// for any name its holder cares to type, which is precisely the
+	// impersonation mTLS is here to prevent.
+	requested := req.GetRequestedName()
+	if err := checkRequestedName(requested); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if name == "" {
+	switch {
+	case rec.Name != "" && requested != "" && requested != rec.Name:
+		return nil, status.Errorf(codes.InvalidArgument,
+			"enroll: this token reserves the name %q and cannot be used to enroll as %q", rec.Name, requested)
+	case rec.Name == "" && requested == "":
 		return nil, status.Error(codes.InvalidArgument, "enroll: no sandbox name requested and token reserved none")
 	}
-	name = s.resolveCollision(name)
+	// certName is the name the leaf may be certified for: the one the operator
+	// reserved at mint time. A token that reserved none lets its holder pick a
+	// name — a legitimate choice for bulk enrollment — but a name this side did
+	// not choose is a registry label and nothing more, so it stays out of the
+	// certificate.
+	name, certName := requested, ""
+	if rec.Name != "" {
+		name, certName = rec.Name, rec.Name
+	}
 
-	// The SANs come from what the operator authorized when minting, never
-	// from the request. Without this, a host holding one valid token could
-	// ask for — and be handed — a CA-signed leaf bearing another sandbox's
-	// name, which is precisely the impersonation mTLS is here to prevent.
-	dnsNames, ips, err := authorizedSANs(name, rec.Addresses, req.GetListenAddresses())
+	// Everything that can reject this request runs before the registry write
+	// below, so a request that cannot be signed leaves no fleet member behind.
+	extraHosts, err := checkRequestedAddresses(certName, rec.Addresses, req.GetListenAddresses())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	if _, err := ca.CheckCSR(req.GetCsrDer()); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "enroll: %v", err)
+	}
 
 	// Record before signing: the registry entry is what reserves the name, so
-	// taking it first closes the window where two hosts enrolling at once
-	// both pass the collision check. A failure here means no certificate is
-	// issued at all, which is the safe direction.
-	if s.Fleet != nil {
-		if err := s.Fleet.Record(enrolledSandbox(name, rec, req)); err != nil {
-			return nil, status.Errorf(codes.Internal, "enroll: record sandbox: %v", err)
-		}
+	// taking it first closes the window where two hosts enrolling at once both
+	// pass the collision check. A failure here means no certificate is issued
+	// at all, which is the safe direction.
+	name, err = s.reserve(name, enrolledSandbox(rec, req))
+	if err != nil {
+		// The caller is unauthenticated and a registry failure is the control
+		// plane's own problem, described in the control plane's own terms —
+		// down to absolute paths on its filesystem. It goes to the log.
+		s.log().Error("enrollment could not reserve a sandbox name",
+			slog.String("peer", peerAddr(ctx)),
+			slog.String("name", name),
+			slog.String("error", err.Error()),
+		)
+		return nil, status.Error(codes.Internal, "enroll: could not record this sandbox in the fleet registry")
 	}
+	if certName != "" {
+		// Collision resolution may have moved the name; certify what was
+		// actually created, never the name it collided with.
+		certName = name
+	}
+	dnsNames, ips := sanSet(certName, rec.Addresses, extraHosts)
 
 	cert, certPEM, err := s.CA.SignCSR(req.GetCsrDer(), ca.SignOptions{
 		Profile:     ca.ProfileAgent,
@@ -177,61 +229,127 @@ func (s *Service) log() *slog.Logger {
 	return s.Log
 }
 
-// resolveCollision appends a short, deterministic-enough suffix until name
-// is free. The response's AssignedName tells the caller which name it
-// actually got, so a collision is visible rather than silently masked.
-func (s *Service) resolveCollision(name string) string {
-	if s.Names == nil || !s.Names.Exists(name) {
-		return name
-	}
-	for i := 2; ; i++ {
-		candidate := fmt.Sprintf("%s-%d", name, i)
-		if !s.Names.Exists(candidate) {
-			return candidate
+// reserve records sb under base, or under the first free "base-N" when base is
+// taken, and returns the name it settled on. The response's AssignedName tells
+// the caller which name it actually got, so a collision is visible rather than
+// silently masked.
+//
+// The NameChecker is consulted first because it makes the common case one
+// write, but it is not trusted: between the check and the record, another host
+// enrolling concurrently can take the name. The record is the reservation, so
+// an ErrNameTaken from it simply moves the search on.
+func (s *Service) reserve(base string, sb EnrolledSandbox) (string, error) {
+	for i := 0; i < maxNameAttempts; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s-%d", base, i+1)
+		}
+		if s.Names != nil && s.Names.Exists(candidate) {
+			continue
+		}
+		if s.Fleet == nil {
+			return candidate, nil
+		}
+		sb.Name = candidate
+		switch err := s.Fleet.Record(sb); {
+		case err == nil:
+			return candidate, nil
+		case errors.Is(err, ErrNameTaken):
+			continue
+		default:
+			return candidate, err
 		}
 	}
+	return base, fmt.Errorf("enroll: no name free for %q after %d attempts", base, maxNameAttempts)
 }
 
-// authorizedSANs computes the subject alternative names the leaf may carry:
-// the assigned name, plus the hosts the operator authorized when minting the
-// token. Addresses the agent asks for are checked against that set rather
-// than added to it.
+// maxNameLength bounds a caller-supplied sandbox name. The name reaches the
+// leaf's subject and the fleet registry, and neither has any use for a
+// kilobyte of it. Names the operator chose at mint time are not checked: those
+// are the operator's business, and an operator holding the CA can already ask
+// `ca sign` for any subject at all.
+const maxNameLength = 128
+
+// checkRequestedName bounds the one identifier an unauthenticated caller can
+// put into a certificate's subject and a registry entry's key.
+func checkRequestedName(name string) error {
+	if len(name) > maxNameLength {
+		return fmt.Errorf("enroll: requested sandbox name is %d bytes, limit is %d", len(name), maxNameLength)
+	}
+	for _, r := range name {
+		// Printable, non-space ASCII. A sandbox name is typed on a command
+		// line and printed in a table; anything else in it is a mistake at
+		// best and something crafted for a log or a terminal at worst.
+		if r <= ' ' || r > '~' {
+			return fmt.Errorf("enroll: requested sandbox name contains an invalid character %q", r)
+		}
+	}
+	return nil
+}
+
+// checkRequestedAddresses verifies that every address the enrolling host asked
+// to be certified for is one the operator authorized when minting the token,
+// and returns the extra hosts the request is allowed to add on its own.
 //
-// A loopback address is allowed unconditionally. It names the enrolling host
-// and nothing else, so it cannot be used to impersonate another fleet member,
-// and requiring an operator to pre-authorize 127.0.0.1 to run a sandbox
-// locally would be friction with no security return.
-func authorizedSANs(name string, authorized, requested []string) (dnsNames []string, ips []net.IP, err error) {
-	allowedHosts := map[string]bool{name: true}
+// Addresses the agent asks for are checked against the authorized set rather
+// than added to it. A loopback address is the one exception, allowed
+// unconditionally: it names the enrolling host and nothing else, so it cannot
+// be used to impersonate another fleet member, and requiring an operator to
+// pre-authorize 127.0.0.1 to run a sandbox locally would be friction with no
+// security return.
+func checkRequestedAddresses(certName string, authorized, requested []string) ([]string, error) {
+	allowedHosts := map[string]bool{}
+	if certName != "" {
+		allowedHosts[certName] = true
+	}
 	for _, addr := range authorized {
 		if host := hostOf(addr); host != "" {
 			allowedHosts[host] = true
 		}
 	}
 
+	var extra []string
 	for _, addr := range requested {
 		host := hostOf(addr)
-		if host == "" {
-			continue
-		}
-		if allowedHosts[host] {
+		if host == "" || allowedHosts[host] {
 			continue
 		}
 		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 			allowedHosts[host] = true
+			extra = append(extra, host)
 			continue
 		}
 		if len(authorized) == 0 {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"enroll: this token authorizes no addresses, so %q cannot be certified; re-mint the token with --address %s",
 				host, addr)
 		}
-		return nil, nil, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"enroll: address %q is not authorized by this token (authorized: %s)",
 			host, strings.Join(authorized, ", "))
 	}
+	return extra, nil
+}
 
-	for host := range allowedHosts {
+// sanSet assembles the subject alternative names the leaf carries: the name the
+// operator reserved for this token, the addresses the operator authorized with
+// it, and the loopback addresses checkRequestedAddresses cleared. Nothing the
+// enrolling host chose for itself reaches this set.
+func sanSet(certName string, authorized, extra []string) (dnsNames []string, ips []net.IP) {
+	hosts := map[string]bool{}
+	if certName != "" {
+		hosts[certName] = true
+	}
+	for _, addr := range authorized {
+		if host := hostOf(addr); host != "" {
+			hosts[host] = true
+		}
+	}
+	for _, host := range extra {
+		hosts[host] = true
+	}
+
+	for host := range hosts {
 		if ip := net.ParseIP(host); ip != nil {
 			ips = append(ips, ip)
 			continue
@@ -241,7 +359,7 @@ func authorizedSANs(name string, authorized, requested []string) (dnsNames []str
 	// Map iteration order is random; a certificate's contents should not be.
 	slices.Sort(dnsNames)
 	slices.SortFunc(ips, func(a, b net.IP) int { return bytes.Compare(a, b) })
-	return dnsNames, ips, nil
+	return dnsNames, ips
 }
 
 // hostOf strips the port from a host:port address, tolerating a bare host and
@@ -257,7 +375,10 @@ func hostOf(addr string) string {
 	return host
 }
 
-func enrolledSandbox(name string, rec TokenRecord, req *sandboxdv1.EnrollRequest) EnrolledSandbox {
+// enrolledSandbox describes the host for the fleet registry. Name is left for
+// reserve to fill in, since which name this host ends up with is not settled
+// until the record that reserves it succeeds.
+func enrolledSandbox(rec TokenRecord, req *sandboxdv1.EnrollRequest) EnrolledSandbox {
 	address := ""
 	if len(rec.Addresses) > 0 {
 		address = rec.Addresses[0]
@@ -266,7 +387,6 @@ func enrolledSandbox(name string, rec TokenRecord, req *sandboxdv1.EnrollRequest
 	}
 	p := req.GetPlatform()
 	return EnrolledSandbox{
-		Name:          name,
 		Address:       address,
 		Labels:        rec.Labels,
 		AgentVersion:  req.GetAgentVersion(),

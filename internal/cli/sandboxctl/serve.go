@@ -2,6 +2,7 @@ package sandboxctl
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -162,7 +163,7 @@ type fleetRecorder struct {
 }
 
 func (f fleetRecorder) Record(sb enroll.EnrolledSandbox) error {
-	return f.registry.Add(registry.Sandbox{
+	err := f.registry.Add(registry.Sandbox{
 		Name:    sb.Name,
 		Address: sb.Address,
 		Labels:  sb.Labels,
@@ -176,6 +177,14 @@ func (f fleetRecorder) Record(sb enroll.EnrolledSandbox) error {
 		AgentVersion: sb.AgentVersion,
 		EnrolledAt:   time.Now().UTC(),
 	})
+	if errors.Is(err, registry.ErrExists) {
+		// Translate, so the service picks the next free name instead of
+		// failing the enrollment. Losing this race is ordinary: the registry
+		// add is what reserves a name, and the collision check that ran before
+		// it cannot see a host that enrolled in between.
+		return fmt.Errorf("%w: %s", enroll.ErrNameTaken, sb.Name)
+	}
+	return err
 }
 
 func newListCommand(out io.Writer) *cobra.Command {

@@ -94,7 +94,7 @@ func newEnrollCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&server, "server", "", "control plane's enrollment endpoint, as host:port")
 	cmd.Flags().StringVar(&token, "token", "", "single-use enrollment token from `sandboxctl enroll mint`")
 	cmd.Flags().StringVar(&fingerprint, "ca-fingerprint", "", "SHA-256 fingerprint of the fleet CA, from `sandboxctl ca fingerprint`")
-	cmd.Flags().StringVar(&name, "name", "", "requested sandbox name (default: this host's hostname)")
+	cmd.Flags().StringVar(&name, "name", "", "requested sandbox name; only for a token that reserved none (default: the token's name)")
 	cmd.Flags().StringVar(&listen, "listen", ":9443", "address this agent will serve on once enrolled")
 	cmd.Flags().StringVar(&dir, "dir", "", "directory to write the certificate, key, and config into (default: <config dir>/agent)")
 	cmd.Flags().StringArrayVar(&addresses, "address", nil, "host:port the control plane will dial this agent by; repeatable")
@@ -115,14 +115,11 @@ func runEnroll(out io.Writer, server, token, fingerprint, name, listen, dir stri
 		return err
 	}
 
+	// --name is sent only when the operator gave one. The token normally
+	// reserves the sandbox's name, and a host that fills the field in from its
+	// own hostname is asking the control plane to enroll it as something other
+	// than what the token authorizes — which the control plane refuses.
 	requestedName := name
-	if requestedName == "" {
-		hostname, err := os.Hostname()
-		if err != nil {
-			return fmt.Errorf("determine hostname for the requested sandbox name: %w (pass --name)", err)
-		}
-		requestedName = hostname
-	}
 
 	agentDir, err := resolveAgentDir(dir)
 	if err != nil {
@@ -204,7 +201,7 @@ func runEnroll(out io.Writer, server, token, fingerprint, name, listen, dir stri
 
 	p := cli.NewPrinter(out)
 	p.Printf("enrolled as %q\n", resp.GetAssignedName())
-	if resp.GetAssignedName() != requestedName {
+	if requestedName != "" && resp.GetAssignedName() != requestedName {
 		// The control plane resolves collisions rather than refusing, so say
 		// plainly that the name is not the one that was asked for.
 		p.Printf("note: requested %q, but that name was taken\n", requestedName)

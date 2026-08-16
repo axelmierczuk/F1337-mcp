@@ -212,6 +212,65 @@ func TestEnroll_WrongFingerprintAbortsBeforeTokenIsSent(t *testing.T) {
 	assert.NoError(t, err, "the token must not have been transmitted to an unverified control plane")
 }
 
+// The name is the other half of the identity a token authorizes. A host that
+// asks to be enrolled under a different one is asking for a CA-signed leaf
+// naming another fleet member, so it is refused rather than quietly honoured.
+func TestEnroll_CannotEnrollUnderAnotherName(t *testing.T) {
+	dir := t.TempDir()
+	cp := startControlPlane(t, dir)
+	token, _, err := cp.tokens.Mint(enroll.MintOptions{
+		Name:      "dev-box",
+		Addresses: []string{"127.0.0.1:8722"},
+	})
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	code := sandboxdagent.Main([]string{"enroll",
+		"--server", cp.address,
+		"--token", token,
+		"--ca-fingerprint", ca.FormatFingerprint(cp.ca.Fingerprint()),
+		"--name", "prod-db.internal",
+		"--dir", filepath.Join(dir, "agent"),
+	}, &out)
+	assert.NotEqual(t, 0, code, "a token reserving dev-box must not enroll a host as prod-db.internal")
+	assert.NoFileExists(t, filepath.Join(dir, "agent", "agent.crt"))
+
+	// And nothing was recorded under the name it tried to claim.
+	_, err = cp.registry.Get("prod-db.internal")
+	require.Error(t, err)
+}
+
+// Omitting --name is the normal path: the token already names the sandbox, and
+// a host that substituted its own hostname there would be refused by the check
+// above for no reason.
+func TestEnroll_WithoutNameUsesTheTokensReservation(t *testing.T) {
+	dir := t.TempDir()
+	cp := startControlPlane(t, dir)
+	token, _, err := cp.tokens.Mint(enroll.MintOptions{
+		Name:      "build-box",
+		Addresses: []string{"127.0.0.1:8722"},
+	})
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	code := sandboxdagent.Main([]string{"enroll",
+		"--server", cp.address,
+		"--token", token,
+		"--ca-fingerprint", ca.FormatFingerprint(cp.ca.Fingerprint()),
+		"--address", "127.0.0.1:8722",
+		"--dir", filepath.Join(dir, "agent"),
+	}, &out)
+	require.Equal(t, 0, code, out.String())
+	assert.Contains(t, out.String(), "enrolled as \"build-box\"")
+
+	certPEM, err := os.ReadFile(filepath.Join(dir, "agent", "agent.crt"))
+	require.NoError(t, err)
+	leaf, err := cp.ca.VerifyLeaf(certPEM, x509.ExtKeyUsageServerAuth)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"build-box"}, leaf.DNSNames)
+	require.NoError(t, leaf.VerifyHostname("127.0.0.1"))
+}
+
 // The agent asks for what it was told to listen on; the control plane decides
 // what it is certified for. Asking is not receiving.
 func TestEnroll_AgentCannotWidenItsOwnCertificate(t *testing.T) {
