@@ -226,8 +226,9 @@ toolchain; `make proto-check` fails CI if it drifts from the sources.
 ## Status
 
 Early. The protocol schema, scaffolding, and build pipeline are in place; the
-implementation is tracked as issues across four milestones — M0 foundation, M1
-agent, M2 MCP server, M3 distribution. See
+implementation is tracked in
+[#29](https://github.com/axelmierczuk/sandboxd-mcp/issues/29) across four
+milestones — M0 foundation, M1 agent, M2 MCP server, M3 distribution. See
 [docs/architecture.md](docs/architecture.md) for the design in full.
 
 ## License
