@@ -17,8 +17,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // newRawSupervisor builds a supervisor that does not stop its processes when the

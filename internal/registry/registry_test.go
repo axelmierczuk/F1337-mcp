@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 func newTestRegistry(t *testing.T) (*registry.Registry, string) {

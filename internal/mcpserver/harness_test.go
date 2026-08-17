@@ -18,11 +18,11 @@ import (
 	protobuf "google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // fakeHost stands in for one sandboxd-agent's HostService. The agent itself

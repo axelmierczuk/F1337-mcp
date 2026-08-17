@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // pathLocks hands out one mutex per path, so two RPCs that read-modify-write

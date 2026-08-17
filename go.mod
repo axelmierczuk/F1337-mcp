@@ -1,4 +1,4 @@
-module github.com/axelmierczuk/sandboxd-mcp
+module github.com/axelmierczuk/fleet-mcp
 
 go 1.25.0
 

@@ -5,7 +5,7 @@ package sandboxd.v1;
 import "google/protobuf/timestamp.proto";
 import "sandboxd/v1/common.proto";
 
-option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
 
 // FileService provides the filesystem primitives that back sandbox_read,
 // sandbox_write, sandbox_edit, sandbox_ls, sandbox_glob and sandbox_grep.

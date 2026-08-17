@@ -10,8 +10,8 @@
 ## 1. Workstation tools
 
 ```sh
-go install github.com/axelmierczuk/sandboxd-mcp/cmd/sandboxd-mcp@latest
-go install github.com/axelmierczuk/sandboxd-mcp/cmd/sandboxctl@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/sandboxd-mcp@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/sandboxctl@latest
 ```
 
 ## 2. Create a fleet CA
@@ -59,7 +59,7 @@ names only `build-box`, and a control plane connecting to
 On the sandbox host:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
   | sh -s -- --token sbx_ey... \
              --control your-workstation:9443 \
              --ca-fingerprint 9f2c8a1e... \
@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/inst
 Windows, in an elevated PowerShell:
 
 ```powershell
-$s = irm https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.ps1
+$s = irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.ps1
 & ([scriptblock]::Create($s)) -Token sbx_ey... `
     -Control your-workstation:9443 `
     -CaFingerprint 9f2c8a1e... `

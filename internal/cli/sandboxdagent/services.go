@@ -11,12 +11,12 @@ package sandboxdagent
 // Adding a service is one blank-import line, tagged with the issue it
 // implements:
 //
-//	_ "github.com/axelmierczuk/sandboxd-mcp/internal/agent/<package>" // #<issue>, <Service>
+//	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/<package>" // #<issue>, <Service>
 
 import (
-	_ "github.com/axelmierczuk/sandboxd-mcp/internal/agent/exec"    // #7, ExecService
-	_ "github.com/axelmierczuk/sandboxd-mcp/internal/agent/forward" // #26, ForwardService
-	_ "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"      // #8–#10, FileService
-	_ "github.com/axelmierczuk/sandboxd-mcp/internal/agent/host"    // #5, HostService
-	_ "github.com/axelmierczuk/sandboxd-mcp/internal/agent/process" // #11–#15, ProcessService
+	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/exec"    // #7, ExecService
+	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/forward" // #26, ForwardService
+	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"      // #8–#10, FileService
+	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/host"    // #5, HostService
+	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/process" // #11–#15, ProcessService
 )

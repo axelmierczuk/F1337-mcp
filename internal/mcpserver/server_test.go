@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
 )
 
 // negotiatedProtocolVersion is the version this server is built against.

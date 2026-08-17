@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 func newTestPool(t *testing.T, fleet *testFleet, dialOpts ...grpc.DialOption) *client.Pool {

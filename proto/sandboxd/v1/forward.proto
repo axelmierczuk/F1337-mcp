@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package sandboxd.v1;
 
-option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
 
 // ForwardService tunnels TCP connections from the MCP server host to a port on
 // the sandbox.

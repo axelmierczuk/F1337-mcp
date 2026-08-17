@@ -15,12 +15,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdagent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli/sandboxdagent"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
 )
 
 // controlPlane stands up a real TCP enrollment listener, as `sandboxctl serve`

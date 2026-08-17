@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // Two Registry handles on one path stand in for two processes: separate

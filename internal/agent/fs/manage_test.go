@@ -14,9 +14,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	agentfs "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
 )
 
 // --- MakeDirectory ---------------------------------------------------------

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // HealthStatus is the most recent result of probing a sandbox's

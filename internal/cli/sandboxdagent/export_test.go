@@ -1,6 +1,6 @@
 package sandboxdagent
 
-import "github.com/axelmierczuk/sandboxd-mcp/internal/agent"
+import "github.com/axelmierczuk/fleet-mcp/internal/agent"
 
 // EnrollmentMaterialForTest is the set of files `service install` has to hand
 // to the account the daemon will run as.

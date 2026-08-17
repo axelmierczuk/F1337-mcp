@@ -17,9 +17,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // init registers ForwardService with every sandboxd-agent daemon that links

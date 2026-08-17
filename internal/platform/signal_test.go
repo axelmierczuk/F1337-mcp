@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 func TestSignalString(t *testing.T) {

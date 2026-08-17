@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 )
 
 // TestSelection_ExplicitArgumentOverridesTheStickyDefault: rule 1 beats

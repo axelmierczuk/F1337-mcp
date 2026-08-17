@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
 )
 
 // TestConcurrent_SelectionsDoNotInterfere drives the whole stack from several

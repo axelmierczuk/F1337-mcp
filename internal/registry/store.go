@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 )
 
 // schemaVersion is bumped when the on-disk shape changes incompatibly.

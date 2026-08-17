@@ -7,10 +7,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
 )
 
 func newEnrollCommand(out io.Writer) *cobra.Command {

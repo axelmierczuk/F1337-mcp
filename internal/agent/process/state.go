@@ -3,7 +3,7 @@ package process
 import (
 	"fmt"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // The supervisor's state machine lives here and nowhere else.

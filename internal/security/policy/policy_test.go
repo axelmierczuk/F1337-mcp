@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 func TestNew_DefaultIsAllowAll(t *testing.T) {

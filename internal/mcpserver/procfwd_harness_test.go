@@ -23,15 +23,15 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	agentforward "github.com/axelmierczuk/sandboxd-mcp/internal/agent/forward"
-	agentprocess "github.com/axelmierczuk/sandboxd-mcp/internal/agent/process"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	agentforward "github.com/axelmierczuk/fleet-mcp/internal/agent/forward"
+	agentprocess "github.com/axelmierczuk/fleet-mcp/internal/agent/process"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // The process and forward tools are tested against the real agent services,

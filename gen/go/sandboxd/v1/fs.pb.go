@@ -1912,8 +1912,8 @@ const file_sandboxd_v1_fs_proto_rawDesc = "" +
 	"\rMakeDirectory\x12!.sandboxd.v1.MakeDirectoryRequest\x1a\".sandboxd.v1.MakeDirectoryResponse\x12M\n" +
 	"\n" +
 	"RemovePath\x12\x1e.sandboxd.v1.RemovePathRequest\x1a\x1f.sandboxd.v1.RemovePathResponse\x12G\n" +
-	"\bMovePath\x12\x1c.sandboxd.v1.MovePathRequest\x1a\x1d.sandboxd.v1.MovePathResponseB\xab\x01\n" +
-	"\x0fcom.sandboxd.v1B\aFsProtoP\x01ZBgithub.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
+	"\bMovePath\x12\x1c.sandboxd.v1.MovePathRequest\x1a\x1d.sandboxd.v1.MovePathResponseB\xa8\x01\n" +
+	"\x0fcom.sandboxd.v1B\aFsProtoP\x01Z?github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
 
 var (
 	file_sandboxd_v1_fs_proto_rawDescOnce sync.Once

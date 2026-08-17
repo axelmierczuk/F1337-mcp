@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdagent"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli/sandboxdagent"
 )
 
 // `install` is the step that decides the daemon will run as somebody other than

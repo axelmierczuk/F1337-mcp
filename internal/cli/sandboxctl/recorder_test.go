@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
 )
 
 // enroll.Service retries with the next free name when a Recorder reports

@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
 )
 
 func TestMap_NilPassesThrough(t *testing.T) {

@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxctl"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli/sandboxctl"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
 )
 
 // run executes sandboxctl with args against a config directory scoped to this

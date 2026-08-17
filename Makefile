@@ -1,7 +1,7 @@
 # sandboxd — build, codegen, and verification targets.
 
 SHELL      := /bin/bash
-MODULE     := github.com/axelmierczuk/sandboxd-mcp
+MODULE     := github.com/axelmierczuk/fleet-mcp
 TOOLS_DIR  := $(CURDIR)/.tools
 BIN_DIR    := $(CURDIR)/bin
 export PATH := $(TOOLS_DIR):$(PATH)

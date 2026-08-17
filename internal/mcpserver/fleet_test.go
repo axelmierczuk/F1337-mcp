@@ -12,9 +12,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // listResult mirrors the sandbox_list output shape.

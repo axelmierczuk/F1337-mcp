@@ -18,8 +18,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // Main runs sandboxd-mcp and returns the process exit code.

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // ConfigFileName is the agent config's basename in every location it is

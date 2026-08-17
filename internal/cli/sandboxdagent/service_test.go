@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdagent"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli/sandboxdagent"
 )
 
 // Installing and uninstalling a service needs root, so CI cannot run those

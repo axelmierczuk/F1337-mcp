@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 )
 
 func TestWriteAtomic_CreatesAndReplaces(t *testing.T) {

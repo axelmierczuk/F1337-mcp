@@ -19,11 +19,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdagent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli/sandboxdagent"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 // enrolledAgent writes a complete, startable agent installation to a temp

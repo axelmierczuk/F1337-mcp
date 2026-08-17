@@ -21,9 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // The tests supervise the test binary itself.

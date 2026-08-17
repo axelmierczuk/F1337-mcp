@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdagent"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli/sandboxdagent"
 )
 
 // The failure this closes: `enroll` writes agent.yaml and agent.key at 0600

@@ -3,7 +3,7 @@ package agent
 import (
 	"sync/atomic"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // Status is the daemon's shared liveness state, read by HostService.Health and

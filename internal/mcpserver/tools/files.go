@@ -13,9 +13,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 )
 
 // Bounds the file tools apply to their own side of a call. The agent has its

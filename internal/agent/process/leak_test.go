@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // A supervisor with a log tailer and a probe loop per process is exactly where

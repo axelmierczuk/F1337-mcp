@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // TestReadResources exercises the real host read on every runner. The

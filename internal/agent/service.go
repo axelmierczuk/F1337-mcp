@@ -10,8 +10,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // Deps is everything the daemon hands a service implementation. It is passed

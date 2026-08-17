@@ -24,7 +24,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 )
 
 // Call describes the call an error came out of, so the mapped message can

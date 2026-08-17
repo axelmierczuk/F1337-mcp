@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 func csrFor(t *testing.T, cn string) []byte {

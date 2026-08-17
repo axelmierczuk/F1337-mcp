@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"sync"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // maxChunkBytes bounds one OutputChunk.

@@ -15,7 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // Main runs sandboxctl and returns the process exit code.

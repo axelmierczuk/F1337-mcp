@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
 )
 
 // atomicFile is a file being built beside its target, to be renamed over it

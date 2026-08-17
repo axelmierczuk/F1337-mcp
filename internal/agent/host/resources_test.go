@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent/host"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent/host"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // What internal/platform measures is its own business and its own tests. What

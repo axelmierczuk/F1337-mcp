@@ -22,9 +22,9 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
 )
 
 func newTestCA(t *testing.T) *ca.CA {

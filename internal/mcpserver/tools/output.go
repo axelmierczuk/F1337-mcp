@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // Truncation reports output that was cut short, and by how much.

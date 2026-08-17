@@ -18,9 +18,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Version={{ .Version }}
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Commit={{ .FullCommit }}
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Date={{ .CommitDate }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Version={{ .Version }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Date={{ .CommitDate }}
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
 
@@ -32,9 +32,9 @@ builds:
     flags: [-trimpath]
     ldflags:
       - -s -w
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Version={{ .Version }}
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Commit={{ .FullCommit }}
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Date={{ .CommitDate }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Version={{ .Version }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Date={{ .CommitDate }}
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
 
@@ -45,9 +45,9 @@ builds:
     flags: [-trimpath]
     ldflags:
       - -s -w
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Version={{ .Version }}
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Commit={{ .FullCommit }}
-      - -X github.com/axelmierczuk/sandboxd-mcp/internal/version.Date={{ .CommitDate }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Version={{ .Version }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Date={{ .CommitDate }}
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
 
@@ -93,7 +93,7 @@ release:
     ## Installing the agent
 
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
+    curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
       | sh -s -- --token <enrollment-token> --control <control-host:9443> \
           --ca-fingerprint <sha256-of-the-fleet-CA>
     ```

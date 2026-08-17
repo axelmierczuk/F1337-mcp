@@ -27,10 +27,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/version"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/version"
 )
 
 // ServerName is the implementation name reported at initialize.

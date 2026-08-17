@@ -52,6 +52,6 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/axelmierczuk/sandboxd-mcp
+        - github.com/axelmierczuk/fleet-mcp
   exclusions:
     generated: lax

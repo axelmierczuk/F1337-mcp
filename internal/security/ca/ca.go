@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 )
 
 const (

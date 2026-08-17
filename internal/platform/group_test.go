@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // jobName builds a job object name unique to this test binary. Job names are

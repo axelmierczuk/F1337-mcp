@@ -411,8 +411,8 @@ const file_sandboxd_v1_forward_proto_rawDesc = "" +
 	"\fForwardClose\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason2Z\n" +
 	"\x0eForwardService\x12H\n" +
-	"\aForward\x12\x1b.sandboxd.v1.ForwardRequest\x1a\x1c.sandboxd.v1.ForwardResponse(\x010\x01B\xb0\x01\n" +
-	"\x0fcom.sandboxd.v1B\fForwardProtoP\x01ZBgithub.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
+	"\aForward\x12\x1b.sandboxd.v1.ForwardRequest\x1a\x1c.sandboxd.v1.ForwardResponse(\x010\x01B\xad\x01\n" +
+	"\x0fcom.sandboxd.v1B\fForwardProtoP\x01Z?github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
 
 var (
 	file_sandboxd_v1_forward_proto_rawDescOnce sync.Once

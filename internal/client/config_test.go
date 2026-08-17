@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 )
 
 func TestNewPool_RequiresCACert(t *testing.T) {

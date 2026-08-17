@@ -5,7 +5,7 @@ package sandboxd.v1;
 import "google/protobuf/timestamp.proto";
 import "sandboxd/v1/common.proto";
 
-option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
 
 // EnrollmentService is served by the control plane (sandboxctl serve), not by
 // sandboxd-agent. It is the one endpoint an unenrolled host may talk to.

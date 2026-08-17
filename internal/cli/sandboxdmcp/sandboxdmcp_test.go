@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdmcp"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli/sandboxdmcp"
 )
 
 func TestRoot_HelpNamesServeAndItsFlags(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 )
 
 // DefaultListen is the address the agent serves gRPC on when the config names

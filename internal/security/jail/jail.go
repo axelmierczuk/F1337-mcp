@@ -8,7 +8,7 @@ import (
 	"slices"
 	"syscall"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // mode records how a Jail was built. The zero value is deliberately neither

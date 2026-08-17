@@ -16,15 +16,15 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	agentexec "github.com/axelmierczuk/sandboxd-mcp/internal/agent/exec"
-	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	agentexec "github.com/axelmierczuk/fleet-mcp/internal/agent/exec"
+	agentfs "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // The exec, file and transfer tools are mostly glue and rendering, and glue

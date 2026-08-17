@@ -42,8 +42,8 @@ just execute wherever you pointed them.
 **1. Get the workstation tools:**
 
 ```sh
-go install github.com/axelmierczuk/sandboxd-mcp/cmd/sandboxd-mcp@latest
-go install github.com/axelmierczuk/sandboxd-mcp/cmd/sandboxctl@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/sandboxd-mcp@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/sandboxctl@latest
 ```
 
 **2. Create a CA and mint an enrollment token:**
@@ -58,7 +58,7 @@ sandboxctl enroll mint --name build-box
 **3. Enroll a machine as a sandbox:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
   | sh -s -- --token sbx_ey... \
              --control your-workstation:9443 \
              --ca-fingerprint 9f2c... \
@@ -127,7 +127,7 @@ gRPC/protobuf, buf for proto tooling, GoReleaser for release builds.
 ## Status
 
 Early. Protocol schema and build pipeline are in place; implementation is
-tracked in [#29](https://github.com/axelmierczuk/sandboxd-mcp/issues/29).
+tracked in [#29](https://github.com/axelmierczuk/fleet-mcp/issues/29).
 See [docs/architecture.md](docs/architecture.md) for the full design.
 
 ## License

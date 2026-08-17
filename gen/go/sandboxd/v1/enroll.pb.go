@@ -202,8 +202,8 @@ const file_sandboxd_v1_enroll_proto_rawDesc = "" +
 	"\rassigned_name\x18\x03 \x01(\tR\fassignedName\x127\n" +
 	"\tnot_after\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\bnotAfter2V\n" +
 	"\x11EnrollmentService\x12A\n" +
-	"\x06Enroll\x12\x1a.sandboxd.v1.EnrollRequest\x1a\x1b.sandboxd.v1.EnrollResponseB\xaf\x01\n" +
-	"\x0fcom.sandboxd.v1B\vEnrollProtoP\x01ZBgithub.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
+	"\x06Enroll\x12\x1a.sandboxd.v1.EnrollRequest\x1a\x1b.sandboxd.v1.EnrollResponseB\xac\x01\n" +
+	"\x0fcom.sandboxd.v1B\vEnrollProtoP\x01Z?github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
 
 var (
 	file_sandboxd_v1_enroll_proto_rawDescOnce sync.Once

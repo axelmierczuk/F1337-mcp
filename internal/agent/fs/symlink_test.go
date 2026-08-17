@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	agentfs "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"
 )
 
 // A write commits by renaming a sibling over the target, and a rename over a

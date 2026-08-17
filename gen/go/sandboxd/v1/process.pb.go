@@ -1675,8 +1675,8 @@ const file_sandboxd_v1_process_proto_rawDesc = "" +
 	"\x0eGetProcessLogs\x12\".sandboxd.v1.GetProcessLogsRequest\x1a#.sandboxd.v1.GetProcessLogsResponse0\x01\x12V\n" +
 	"\rSignalProcess\x12!.sandboxd.v1.SignalProcessRequest\x1a\".sandboxd.v1.SignalProcessResponse\x12Y\n" +
 	"\x0eRestartProcess\x12\".sandboxd.v1.RestartProcessRequest\x1a#.sandboxd.v1.RestartProcessResponse\x12V\n" +
-	"\rRemoveProcess\x12!.sandboxd.v1.RemoveProcessRequest\x1a\".sandboxd.v1.RemoveProcessResponseB\xb0\x01\n" +
-	"\x0fcom.sandboxd.v1B\fProcessProtoP\x01ZBgithub.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
+	"\rRemoveProcess\x12!.sandboxd.v1.RemoveProcessRequest\x1a\".sandboxd.v1.RemoveProcessResponseB\xad\x01\n" +
+	"\x0fcom.sandboxd.v1B\fProcessProtoP\x01Z?github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
 
 var (
 	file_sandboxd_v1_process_proto_rawDescOnce sync.Once

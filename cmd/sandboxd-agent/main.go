@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdagent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/version"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli/sandboxdagent"
+	"github.com/axelmierczuk/fleet-mcp/internal/version"
 )
 
 func main() {

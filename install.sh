@@ -1,7 +1,7 @@
 #!/bin/sh
 # sandboxd-agent installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
 #     | sh -s -- --token <enrollment-token> --control <control-host:9443> \
 #         --ca-fingerprint <sha256-of-the-fleet-CA> --root /path/to/workspace
 #
@@ -16,7 +16,7 @@
 
 set -eu
 
-REPO="axelmierczuk/sandboxd-mcp"
+REPO="axelmierczuk/fleet-mcp"
 BASE_URL="https://github.com/${REPO}/releases"
 API_URL="https://api.github.com/repos/${REPO}/releases"
 

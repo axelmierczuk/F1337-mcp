@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // Readiness probing exists because "spawned" is not "usable". A dev server can

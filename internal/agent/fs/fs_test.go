@@ -16,9 +16,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	agentfs "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
 )
 
 // tempRoot returns a temp directory with its symlinks resolved.

@@ -11,8 +11,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 // TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines is the running

@@ -355,8 +355,8 @@ const file_sandboxd_v1_host_proto_rawDesc = "" +
 	"\x0fSTATUS_DRAINING\x10\x032\xa2\x01\n" +
 	"\vHostService\x12P\n" +
 	"\vGetHostInfo\x12\x1f.sandboxd.v1.GetHostInfoRequest\x1a .sandboxd.v1.GetHostInfoResponse\x12A\n" +
-	"\x06Health\x12\x1a.sandboxd.v1.HealthRequest\x1a\x1b.sandboxd.v1.HealthResponseB\xad\x01\n" +
-	"\x0fcom.sandboxd.v1B\tHostProtoP\x01ZBgithub.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
+	"\x06Health\x12\x1a.sandboxd.v1.HealthRequest\x1a\x1b.sandboxd.v1.HealthResponseB\xaa\x01\n" +
+	"\x0fcom.sandboxd.v1B\tHostProtoP\x01Z?github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
 
 var (
 	file_sandboxd_v1_host_proto_rawDescOnce sync.Once

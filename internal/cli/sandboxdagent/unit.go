@@ -108,7 +108,7 @@ func (p UnitParams) SystemdUnit() string {
 
 	b.WriteString("[Unit]\n")
 	b.WriteString("Description=sandboxd agent\n")
-	b.WriteString("Documentation=https://github.com/axelmierczuk/sandboxd-mcp\n")
+	b.WriteString("Documentation=https://github.com/axelmierczuk/fleet-mcp\n")
 	b.WriteString("After=network-online.target\n")
 	b.WriteString("Wants=network-online.target\n")
 	b.WriteString("ConditionFileIsExecutable=" + p.Executable + "\n")

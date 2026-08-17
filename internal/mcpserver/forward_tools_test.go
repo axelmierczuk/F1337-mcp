@@ -23,8 +23,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // The agent under test runs in this process, so "the sandbox's loopback" is

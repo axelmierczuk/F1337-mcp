@@ -14,10 +14,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // maxSandboxNameLength bounds a name accepted by sandbox_add. It matches the

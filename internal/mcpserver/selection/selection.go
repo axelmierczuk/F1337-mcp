@@ -33,8 +33,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // MetaKeyClientID is the _meta key a client sets to name itself explicitly.

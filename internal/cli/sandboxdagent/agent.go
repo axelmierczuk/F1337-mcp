@@ -16,13 +16,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/cli"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/version"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
+	"github.com/axelmierczuk/fleet-mcp/internal/version"
 )
 
 // enrollTimeout bounds the whole exchange. Enrollment is one round trip

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // Health values reported by sandbox_list and sandbox_info. They are short

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"time"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // Re-adoption is why the supervisor persists anything at all.

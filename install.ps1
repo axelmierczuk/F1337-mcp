@@ -14,10 +14,10 @@
     fingerprint.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.ps1 | iex
 
 .EXAMPLE
-    $s = irm https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.ps1
+    $s = irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.ps1
     & ([scriptblock]::Create($s)) -Token abc123 -Control control.local:9443 `
         -CaFingerprint 9f86d0...  -Root C:\workspace
 #>
@@ -66,7 +66,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Repo    = 'axelmierczuk/sandboxd-mcp'
+$Repo    = 'axelmierczuk/fleet-mcp'
 $BaseUrl = "https://github.com/$Repo/releases"
 $ApiUrl  = "https://api.github.com/repos/$Repo/releases"
 

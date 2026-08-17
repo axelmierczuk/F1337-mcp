@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 )
 
 func TestMapError_Nil(t *testing.T) {

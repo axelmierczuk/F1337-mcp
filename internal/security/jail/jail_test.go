@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
 )
 
 // tree is a fixture filesystem shared by most tests here:

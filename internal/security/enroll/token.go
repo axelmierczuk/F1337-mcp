@@ -14,7 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 )
 
 // TokenPrefix marks a string as a sandboxd enrollment token, so one is

@@ -3,7 +3,7 @@ package host
 import (
 	"time"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // SetProberForTest replaces the toolchain prober, so a test can assert that
