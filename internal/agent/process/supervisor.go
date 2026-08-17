@@ -54,6 +54,19 @@ type supervisorConfig struct {
 	defaultRestartBackoff time.Duration
 	maxRestartBackoff     time.Duration
 
+	// waitBackoff waits out a restart delay, reporting whether it elapsed;
+	// false means the supervisor is shutting down and the restart is off.
+	//
+	// It is a field so a test can read the duration the supervisor decided on
+	// instead of timing how long the wait took. Timing it cannot work: the only
+	// clock a test can reach is wall-clock, the gap it measures also contains a
+	// process spawn, and on a loaded runner a spawn costs more than the
+	// difference between two consecutive backoffs — so a correct supervisor
+	// produces intervals in the wrong order. The decision is the property; this
+	// is where a test observes it. nil means realBackoffWait, which is what the
+	// agent runs.
+	waitBackoff func(ctx context.Context, d time.Duration) bool
+
 	tailPollMin time.Duration
 	tailPollMax time.Duration
 	// drainWindow bounds how long the tailers keep reading after the process
@@ -165,6 +178,9 @@ func newSupervisor(cfg supervisorConfig, slots *policy.Policy, log *slog.Logger)
 	st, err := newStore(cfg.stateDir)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.waitBackoff == nil {
+		cfg.waitBackoff = realBackoffWait
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Supervisor{
@@ -812,12 +828,8 @@ func (s *Supervisor) maybeRestart(r *record, crashed bool, ranFor time.Duration)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
-		select {
-		case <-s.ctx.Done():
+		if !s.cfg.waitBackoff(s.ctx, delay) {
 			return
-		case <-timer.C:
 		}
 
 		r.mu.Lock()
@@ -847,6 +859,20 @@ func (s *Supervisor) maybeRestart(r *record, crashed bool, ranFor time.Duration)
 			})
 		}
 	}()
+}
+
+// realBackoffWait is the wait the agent runs: a timer, and the supervisor's
+// shutdown. It reports false when the supervisor is closing, which is the
+// signal to abandon the restart rather than spawn into a shutdown.
+func realBackoffWait(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // backoffFor doubles the base delay per restart, capped. The cap matters more

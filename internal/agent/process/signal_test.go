@@ -4,8 +4,10 @@ import (
 	"context"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -264,24 +266,50 @@ func TestAlwaysRestartsACleanExitToo(t *testing.T) {
 	})
 }
 
-// TestBackoffGrowsBetweenRestarts asserts that each wait is longer than the one
-// before it.
+// TestBackoffGrowsBetweenRestarts asserts that each delay the supervisor waits
+// out is longer than the one before it.
 //
-// Not that any of them equals a wall-clock figure: the previous version of this
-// test required the first three restarts to take at least 700ms and failed on a
-// CI runner at 649ms, which is the test being wrong rather than the runner being
-// slow. Comparing the waits to each other is scale-free — it holds on a fast
-// machine and a starved one alike, and a supervisor that hot-loops fails it on
-// both.
+// It reads the delays rather than timing them. Two earlier versions timed them
+// and both were wrong. The first required the first three restarts to take at
+// least 700ms and failed on an ubuntu runner at 649ms — a hard-coded wall-clock
+// figure. The second compared the waits to each other, which is scale-free and
+// looked sound, and failed on a windows runner with wait 1 at 1.96s and wait 2
+// at 1.03s where the delays were 300ms and 600ms. Both readings were wrong, in
+// opposite directions, because neither was a measurement of the delay.
 //
-// The wait measured is exit-to-next-spawn, not spawn-to-spawn. Spawn-to-spawn
-// also contains the process's own startup and the log drain that follows its
-// exit, and on a loaded runner those vary by more than the difference between
-// two consecutive backoffs — which is how a correct supervisor gets a test
-// failure. Between the exit transition and the next spawn there is nothing but
-// the timer.
+// What that measurement contained: the gap it timed ran from the exit stamp,
+// which the monitor writes only after cmd.Wait returns, the tailers drain and
+// the process group closes, to the start stamp, which spawn writes only after
+// it has created the process group, called cmd.Start, adopted the child into
+// the group, read its start identity and opened the capture files. Everything
+// between those two stamps that is not the delay is process teardown and
+// process creation, and on a four-vCPU runner already running three other test
+// binaries those cost more than the 300ms that separates one backoff from the
+// next. No threshold fixes that; a threshold wide enough to absorb a spawn is
+// wider than the property.
+//
+// So the supervisor's wait is a seam, and the test takes the durations from it.
+// That is the decision itself — the same value the agent passes to its timer —
+// and it involves no clock at all. A supervisor that hot-loops fails on the
+// count, because a restart that does not wait never reaches the seam; one that
+// backs off by a constant fails on the comparison.
 func TestBackoffGrowsBetweenRestarts(t *testing.T) {
 	t.Parallel()
+
+	var (
+		mu       sync.Mutex
+		decided  []time.Duration
+		recorded = func(_ context.Context, d time.Duration) bool {
+			mu.Lock()
+			defer mu.Unlock()
+			decided = append(decided, d)
+			// Returning at once rather than sleeping. The property is the
+			// sequence of durations, and waiting them out would only add the
+			// runner's scheduling noise to numbers that are already known.
+			return true
+		}
+	)
+
 	ts := newTestSupervisor(t, func(c *testSupervisorOptions) {
 		// High enough that the cap is not what the test ends up measuring.
 		c.maxRestartBackoff = 10 * time.Second
@@ -293,6 +321,7 @@ func TestBackoffGrowsBetweenRestarts(t *testing.T) {
 		// and it waits out its deadline for a number it will never see. The
 		// reset has its own test; this one is about the backoff.
 		c.stabilityWindow = time.Hour
+		c.waitBackoff = recorded
 	})
 
 	spec := ts.helperSpec("backing-off", "exit", "1")
@@ -303,69 +332,32 @@ func TestBackoffGrowsBetweenRestarts(t *testing.T) {
 	r, err := ts.start(spec, false)
 	require.NoError(t, err)
 
-	waits := observeRestartWaits(t, r, 3, 60*time.Second)
-
-	waitFor(t, 30*time.Second, "the restart budget to be exhausted", func() bool {
+	waitFor(t, 60*time.Second, "the restart budget to be exhausted", func() bool {
 		return r.status().GetRestartCount() >= 3 &&
 			r.currentState() == sandboxdv1.ProcessState_PROCESS_STATE_CRASHED
 	})
 
-	// What the supervisor decided. Deterministic: no clock involved.
-	announced := announcedBackoffs(t, r)
-	require.Len(t, announced, 3, "one announcement per restart, got %v", announced)
-	for i := 1; i < len(announced); i++ {
-		require.Greater(t, announced[i], announced[i-1],
-			"announced backoff %d (%s) should exceed backoff %d (%s)",
-			i+1, announced[i], i, announced[i-1])
+	mu.Lock()
+	got := slices.Clone(decided)
+	mu.Unlock()
+
+	// A restart that skipped its backoff would never have reached the wait, so
+	// the count is what catches a hot loop.
+	require.Len(t, got, 3, "one backoff per restart, got %v", got)
+	for i := 1; i < len(got); i++ {
+		require.Greater(t, got[i], got[i-1],
+			"backoff %d (%s) should exceed backoff %d (%s); a supervisor that hot-loops has them all equal",
+			i+1, got[i], i, got[i-1])
 	}
+	// Growing from the base the caller asked for, not from some default the
+	// supervisor kept to itself. How it grows from there is backoffFor's own
+	// test.
+	require.Equal(t, spec.restartBackoff, got[0], "the first backoff is the configured base")
 
-	// What it actually waited.
-	require.Len(t, waits, 3, "waits: %v", waits)
-	for i := 1; i < len(waits); i++ {
-		require.Greater(t, waits[i], waits[i-1],
-			"wait %d (%s) should exceed wait %d (%s); a hot-looping supervisor has them all equal",
-			i+1, waits[i], i, waits[i-1])
-	}
-}
-
-// observeRestartWaits measures the gap between each run's exit and the next
-// run's spawn.
-//
-// Polling is the only way in: a spawn is not a state a waiter can block on,
-// because every restart reaches STARTING alike. exited_at is cleared by the
-// spawn that follows it, so the value from the poll before a new started_at
-// appeared is the one that belongs to the run that just ended.
-func observeRestartWaits(t *testing.T, r *record, want int, timeout time.Duration) []time.Duration {
-	t.Helper()
-
-	var (
-		waits     []time.Duration
-		lastStart time.Time
-		lastExit  time.Time
-	)
-	deadline := time.Now().Add(timeout)
-	for len(waits) < want && time.Now().Before(deadline) {
-		status := r.status()
-
-		var startedAt time.Time
-		if at := status.GetStartedAt(); at != nil {
-			startedAt = at.AsTime()
-		}
-		if !startedAt.IsZero() && !startedAt.Equal(lastStart) {
-			if !lastStart.IsZero() && !lastExit.IsZero() {
-				waits = append(waits, startedAt.Sub(lastExit))
-			}
-			lastStart = startedAt
-			lastExit = time.Time{}
-		}
-		if at := status.GetExitedAt(); at != nil {
-			if exitedAt := at.AsTime(); !exitedAt.IsZero() {
-				lastExit = exitedAt
-			}
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	return waits
+	// And the operator is told the number the supervisor is actually waiting,
+	// rather than a second one computed for the log.
+	require.Equal(t, got, announcedBackoffs(t, r),
+		"the announced delay must be the delay the supervisor waits")
 }
 
 // announcedBackoffs pulls the delays out of the supervisor's own notes, which
