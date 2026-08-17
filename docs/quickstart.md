@@ -150,7 +150,20 @@ If you set the environment variable anywhere — a shell profile, an `mcp.json`
 +  "FLEET_CONFIG_DIR": "${HOME}/.config/fleet"
 ```
 
-On each enrolled host, with the agent stopped (`fleet-agent service stop`):
+On each enrolled host, first stop and remove the old service. It is registered
+as `sandboxd-agent`, and the `service` subcommands only know the new name — so
+`fleet-agent service stop` will report it as not installed while it is running
+fine, and `fleet-agent service install` would register a *second* service beside
+it. Use the platform's own tools and the old name; the exact commands for all
+three platforms are in
+[service.md → A service installed before the fleet rebrand](service.md#a-service-installed-before-the-fleet-rebrand):
+
+```sh
+sudo systemctl disable --now sandboxd-agent
+sudo rm /etc/systemd/system/sandboxd-agent.service && sudo systemctl daemon-reload
+```
+
+Then move the directories:
 
 ```sh
 sudo mv /etc/sandboxd     /etc/fleet       # config, certificate, key, CA bundle
@@ -163,8 +176,8 @@ Windows uses `%ProgramData%\sandboxd`. Move each to its `fleet` equivalent.
 
 The agent's config names these paths explicitly, so edit `/etc/fleet/agent.yaml`
 after the move and update `tls.certificate`, `tls.private_key`, `tls.ca_bundle`,
-`audit.path` and `state_dir`. Then re-register the service, which rewrites the
-unit under the new name, and start it:
+`audit.path` and `state_dir`. Then register the service under the new name and
+start it:
 
 ```sh
 sudo fleet-agent service install
