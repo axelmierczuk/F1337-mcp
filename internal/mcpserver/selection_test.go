@@ -185,6 +185,20 @@ var echoFixtures = map[string]struct {
 	"sandbox_add":    {args: map[string]any{"name": "new-box", "address": "new-box.internal:8722"}, echoes: "new-box"},
 	"sandbox_remove": {args: map[string]any{"name": "gpu-01"}, echoes: "gpu-01"},
 	"sandbox_info":   {args: map[string]any{"sandbox": "build-box"}, echoes: "build-box", targeted: true},
+
+	"sandbox_exec":  {args: map[string]any{"sandbox": "build-box", "argv": []any{"echo", "hi"}}, echoes: "build-box", targeted: true},
+	"sandbox_read":  {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go"}, echoes: "build-box", targeted: true},
+	"sandbox_write": {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go", "content": "package main\n"}, echoes: "build-box", targeted: true},
+	"sandbox_edit":  {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go", "old_string": "old", "new_string": "new"}, echoes: "build-box", targeted: true},
+	"sandbox_ls":    {args: map[string]any{"sandbox": "build-box", "path": "/srv/app"}, echoes: "build-box", targeted: true},
+	"sandbox_glob":  {args: map[string]any{"sandbox": "build-box", "pattern": "**/*.go"}, echoes: "build-box", targeted: true},
+	"sandbox_grep":  {args: map[string]any{"sandbox": "build-box", "pattern": "func main"}, echoes: "build-box", targeted: true},
+	// A source that exists wherever the test binary runs: the package's own
+	// directory is the working directory of a `go test` process. Nothing is
+	// written on this side — the destination is on the (faked) sandbox.
+	"sandbox_transfer": {args: map[string]any{
+		"sandbox": "build-box", "direction": "push", "source": "server.go", "destination": "/srv/app/server.go",
+	}, echoes: "build-box", targeted: true},
 }
 
 // TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox is the walk the
@@ -333,7 +347,7 @@ func placeholderFor(property any) any {
 	if !ok {
 		return "placeholder"
 	}
-	switch p["type"] {
+	switch schemaType(p["type"]) {
 	case "integer", "number":
 		return 1
 	case "boolean":
@@ -345,4 +359,25 @@ func placeholderFor(property any) any {
 	default:
 		return "placeholder"
 	}
+}
+
+// schemaType picks the type to synthesise a value for.
+//
+// A slice or map argument is emitted as a *list* of types — ["null","array"]
+// — because a nil one is valid. Reading that as a plain string produced a
+// string placeholder for an array argument, which the schema validator then
+// rejected before resolution could fail, so the walk proved nothing about the
+// tool it thought it had covered.
+func schemaType(raw any) string {
+	switch t := raw.(type) {
+	case string:
+		return t
+	case []any:
+		for _, entry := range t {
+			if name, ok := entry.(string); ok && name != "null" {
+				return name
+			}
+		}
+	}
+	return ""
 }

@@ -187,6 +187,41 @@ func (d Deps) callTimeout() time.Duration {
 	return DefaultCallTimeout
 }
 
+// Bounds on a call that carries content rather than an answer.
+const (
+	// streamBytesPerSecond is the throughput [Deps.streamTimeout] budgets for.
+	//
+	// Deliberately pessimistic: it is not a prediction of the link, it is the
+	// speed below which waiting longer stops being worth it. A sandbox on the
+	// same LAN beats it by two orders of magnitude and never notices this
+	// number at all.
+	streamBytesPerSecond = 1 << 20 // 1 MiB/s
+
+	// maxStreamAllowance bounds the allowance whatever the size says, so a
+	// wrong size from the far side cannot turn a deadline into no deadline.
+	maxStreamAllowance = time.Hour
+)
+
+// streamTimeout bounds a call that moves size bytes of content.
+//
+// [Deps.callTimeout] is sized for a call that asks a question — a stat, a host
+// probe, a directory listing — and applying it to one that carries a file makes
+// the limits these tools advertise unreachable: sandbox_transfer will move
+// 256 MiB in one call, and 256 MiB inside the 15s unary default is 17 MB/s
+// sustained, which no link outside a lab delivers. The failure it produced was
+// not a slow transfer either; it was "transferred 40 of 200 files, then the
+// call timed out", halfway through a tree.
+//
+// The deadline still exists, and it is still what stops a hung agent from
+// holding a tool call open forever. It just scales with what was asked for.
+func (d Deps) streamTimeout(size uint64) time.Duration {
+	// Clamped in seconds, before the conversion: a size the far side made up
+	// would otherwise overflow the multiplication into a negative duration,
+	// which is a context that has already expired.
+	seconds := min(size/streamBytesPerSecond, uint64(maxStreamAllowance/time.Second))
+	return d.callTimeout() + time.Duration(seconds)*time.Second //nolint:gosec // clamped to an hour's worth of seconds above
+}
+
 func (d Deps) logger() *slog.Logger {
 	if d.Logger != nil {
 		return d.Logger
@@ -317,5 +352,8 @@ func AddFleet[In any, Out any, POut interface {
 func Register(server *mcp.Server, deps Deps) *Registrar {
 	r := NewRegistrar(server, deps)
 	registerFleet(r)
+	registerExec(r)
+	registerFiles(r)
+	registerTransfer(r)
 	return r
 }

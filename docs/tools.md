@@ -101,13 +101,17 @@ Run a command to completion.
 | `argv` | string[] | **Required.** Executable and arguments. Not shell-parsed. `argv[0]` is looked up in the effective `PATH` — the one the command will run with, not the daemon's — and never in the working directory. |
 | `working_dir` | string | An ordinary path: exec and the path jail are mutually exclusive, so there are no roots to resolve it against. Must exist and be a directory. Defaults to the agent account's home directory. |
 | `env` | string[] | `KEY=VALUE`. Applied over a documented base environment, not over the daemon's own. An entry replaces the base entry with the same name. |
-| `timeout_seconds` | int | SIGTERM to the process **group** on expiry, then SIGKILL after the grace period. On Windows there is no catchable equivalent, so the job object is terminated at the first step. Above the agent's `exec.max_timeout` the call is refused, naming the maximum, rather than quietly shortened. On a saturated agent the timeout bounds the wait for a free process slot and then the command itself, so a queued call can take up to twice it. |
-| `max_output_bytes` | int | Beyond this, output is truncated and marked. Above the agent's `exec.max_output_bytes` it is clamped to it — the truncation in the result is what reports that. |
+| `timeout_seconds` | int | SIGTERM to the process **group** on expiry, then SIGKILL after the grace period. On Windows there is no catchable equivalent, so the job object is terminated at the first step. Defaults to 120s, matching the agent's own default so that a timeout report names the limit that actually bit. Above the agent's `exec.max_timeout` the call is refused, naming the maximum, rather than quietly shortened. On a saturated agent the timeout bounds the wait for a free process slot and then the command itself, so a queued call can take up to twice it — the RPC deadline allows for that, so a hung agent still cannot hold the call open. Anything over a week is refused by the tool before the call is made: the deadline is derived from this number, and a large enough one wraps it into a deadline that has already passed. |
+| `max_output_bytes` | int | Beyond this, output is truncated and marked. Defaults to 128 KiB: the agent's ceiling is sized for a program reading output, this default for a model reading it in context. Above the agent's `exec.max_output_bytes` it is clamped to it — the truncation in the result is what reports that. The MCP server keeps its own 8 MiB ceiling on one result whatever this says, and when that is the cap that bit the truncation note says so rather than pointing at this argument. |
 | `shell` | bool | Run through the platform shell (`sh -c`, or `cmd /c` on Windows). Opt-in, because it reintroduces shell parsing of untrusted strings. The command policy then sees the shell, not the command inside it. |
 | `stdin` | string | Written to stdin, which is then closed. |
 
-Returns `exit_code`, `stdout`, `stderr`, `duration_ms`, `timed_out`,
-`truncation`.
+Returns `exit_code`, `stdout`, `stderr`, `duration_ms`, `timed_out`, `signal`,
+`truncation` and `note`. The exit code leads, before either stream, because it
+decides what the rest of the result means. stdout and stderr stay separate:
+merging them makes the model hunt for the one sentence that matters. A command
+that wrote to neither is reported as having produced no output, in words —
+a blank result is otherwise indistinguishable from a hung call.
 
 **A command that fails is a successful call.** A non-zero exit is reported in
 `exit_code`; the tool errors for a request the agent would not run at all — an
@@ -228,11 +232,12 @@ Stop and start again from the same spec, optionally waiting for readiness.
 | --- | --- | --- |
 | `path` | string | **Required.** |
 | `offset` | int | Starting line, 1-based. |
-| `limit` | int | Maximum lines. |
-| `raw` | bool | Return bytes rather than text. Required for binaries. |
+| `limit` | int | Maximum lines. Defaults to 2000, and the result says so whenever the file continues past the window. |
+| `raw` | bool | Return the bytes, base64-encoded, rather than text. Required for binaries. |
 
-Returns line-numbered content plus metadata. Binary files are detected and
-reported rather than mangled into text.
+Returns line-numbered content plus metadata, in the shape of the built-in Read:
+the line number right-aligned in six columns, a tab, then the line. Binary
+files are detected and reported rather than mangled into text.
 
 `total_lines` is exact only when `total_lines_exact` is set. Counting lines
 means reading every byte, so the agent stops at a size bound rather than reading
@@ -240,7 +245,10 @@ a gigabyte to answer a windowed read; past that bound the number reports how far
 the count got. Do not render "line 40 of N" without checking the flag.
 
 Line endings are never rewritten. A CRLF file reads back with its CRLF intact,
-on every platform.
+on every platform. The numbered rendering drops the carriage return, since a
+stray one mid-result is noise a model will either ignore or copy into its next
+argument, and the result says the file uses CRLF instead — which is what an
+exact-match `sandbox_edit` afterwards has to account for.
 
 ### `sandbox_write`
 | Argument | Type | Notes |
@@ -281,14 +289,19 @@ file's is refused rather than mixed in, and an `old_string` that fails to match
 only because of them says so.
 
 ### `sandbox_ls`
-`path`, `recursive`, `include_hidden`, `limit`.
+`path`, `recursive`, `include_hidden`, `limit` (default 500).
+
+Directories come back as a list of names and files as name, size and age, in
+that order — two short lists rather than one table of mostly-empty columns.
+Names are relative to the directory listed, which is named once.
 
 ### `sandbox_glob`
-`pattern` (e.g. `**/*.go`), `root`, `limit`, `respect_gitignore`,
+`pattern` (e.g. `**/*.go`), `root`, `limit` (default 300), `respect_gitignore`,
 `include_default_ignored`.
 
 The pattern is anchored at `root`: `*.go` does not recurse and `**/*.go` does.
-Results are files, sorted by modification time, newest first. `.git`,
+Results are files, sorted by modification time, newest first, and given as
+absolute paths so they can be passed straight to `sandbox_read`. `.git`,
 `node_modules`, `vendor` and `target` are skipped unless
 `include_default_ignored` is set.
 
@@ -296,10 +309,15 @@ Results are files, sorted by modification time, newest first. `.git`,
 `pattern` (RE2), `root`, `include_glob`, `case_insensitive`, `context_lines`,
 `max_matches`, `files_only`, `respect_gitignore`, `include_default_ignored`.
 
+Matches are rendered one per line in grep's own shape — `path:line: text` for a
+match, `path-line- text` for a context line, which is the only thing telling
+the two apart once they are in a flat list.
+
 `include_glob` uses gitignore semantics rather than the anchored ones of
-`sandbox_glob`: `*.go` matches at any depth. `max_matches` stops the walk rather
-than truncating a finished search, so the summary's `files_searched` reports how
-little of the tree was read.
+`sandbox_glob`: `*.go` matches at any depth. `max_matches` defaults to 100 and
+stops the walk rather than truncating a finished search, so the summary's
+`files_searched` reports how little of the tree was read, and the truncation
+note says so rather than letting "truncated" be read as "that is all of them".
 
 A matched line that is not valid UTF-8 comes back with the offending bytes shown
 as U+FFFD rather than failing the search: the binary check reads only the head of
@@ -318,12 +336,67 @@ Move files and directories between the workstation and a sandbox.
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `direction` | enum | **Required.** `push` (local → sandbox) or `pull`. |
-| `source` | string | **Required.** |
-| `destination` | string | **Required.** |
-| `recursive` | bool | |
-| `exclude` | string[] | Glob patterns to skip. |
+| `source` | string | **Required.** Local for `push`, on the sandbox for `pull`. |
+| `destination` | string | **Required.** An existing directory receives the source under its own name, as `cp` does. |
+| `recursive` | bool | Required to transfer a directory rather than a single file. |
+| `exclude` | string[] | Extra glob patterns, added to the defaults. Matched against each path segment and against the path relative to `source`. A pattern that cannot be evaluated is refused rather than silently matching nothing. |
+| `force` | bool | Re-send files the unchanged check would skip. |
+| `allow_outside_working_dir` | bool | Permit a `pull` to write outside this workstation's working directory. |
 
 This is how a local repository gets onto a sandbox in the first place.
+
+**The local side has no jail.** The sandbox has an agent deciding what a caller
+may touch; this side has nothing but the user's own filesystem, so a `pull`
+writes only under the working directory of the process serving these tools
+unless `allow_outside_working_dir` says otherwise. Containment is decided on
+the resolved path, so a symlink inside the working directory pointing at `/` is
+not a way out of it. A `push` **source** is not confined: a caller that can
+reach this tool can already read any local file with its own built-in tools, so
+confining reads would add friction and no safety.
+
+**Symlinks are never followed out of the tree.** On a push, a link resolving
+inside `source` is followed — a repository full of them would otherwise
+transfer as a tree of holes — and one resolving outside is skipped and named in
+the result. On a pull every link is skipped and named, because `ReadFile`
+follows links agent-side and deciding whether the target is inside the tree
+would mean resolving a remote path from here. A pull whose `source` *is* a link
+is refused for the same reason, naming what it points at: the metadata
+describing a link is the link's own, so following it would land the target's
+contents under the link's name, with the link's size and the link's mode.
+
+**A pulled name cannot leave the destination.** The names in a pulled tree come
+from the sandbox, and `..\..\x` is an ordinary filename on Linux — the
+normalisation that lets a Windows sandbox's `cmd\app\main.go` mean
+`cmd/app/main.go` would otherwise turn it into a way out of the directory the
+caller named, and past two levels out of the working directory. Every entry is
+checked three ways: the name **as written** must stay under the destination
+root, and the path it **resolves to** must stay under that root *and* under the
+working directory. So a subdirectory of the destination that is a symlink is not
+a way out either — neither one pointing out of the working directory, nor one
+pointing at a sibling inside it, which would otherwise land the file somewhere
+the result then reported it had not gone. Entries that fail any of the three are
+skipped and reported; the rest arrive.
+
+**Defaults, caps and repeats.** `.git`, `.hg`, `.svn`, `node_modules`,
+`vendor`, `target`, `dist`, `build`, virtualenv and cache directories are
+excluded by default, applied only *below* the source root so naming `.git` as
+the source still transfers it; the result reports how many entries were
+excluded, so it is never silent. One call moves at most 5000 files or 256 MiB,
+refused up front naming the limit rather than abandoned half way — including a
+single file over the byte cap, which is the shape with no walk to accumulate it.
+A file whose
+size matches and whose destination is no older is skipped as unchanged — rsync's
+quick check, minus the modification time this protocol has no field to preserve
+— which makes push, edit, push again cost only what changed. `force` overrides
+it. Executable bits are preserved in both directions. A pull writes through a
+temporary file and renames, so an interrupted transfer leaves nothing at the
+destination rather than a partial file every later reader treats as whole. A
+read the sandbox cut short, or one that ends without saying whether it finished,
+fails the transfer rather than committing the prefix under the real name.
+
+Each file's own RPC deadline scales with its size rather than using the deadline
+sized for a question, so the cap above is a size a transfer can actually reach
+on a link slower than a laboratory's. The same applies to `sandbox_write`.
 
 ### `sandbox_forward`
 Forward a sandbox port to the workstation.
