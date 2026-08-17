@@ -19,6 +19,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // init registers ForwardService with every sandboxd-agent daemon that links
@@ -39,12 +40,16 @@ const copyBufferSize = 32 * 1024
 // outcome a caller cannot diagnose.
 const defaultDialTimeout = 10 * time.Second
 
+// forwardMethod is the RPC name written into every audit record.
+const forwardMethod = "sandboxd.v1.ForwardService/Forward"
+
 // Service implements sandboxd.v1.ForwardService.
 type Service struct {
 	sandboxdv1.UnimplementedForwardServiceServer
 
-	cfg agent.ForwardConfig
-	log *slog.Logger
+	cfg   agent.ForwardConfig
+	log   *slog.Logger
+	audit *policy.Audit
 
 	// resolver is swapped by tests. It is the only way to exercise a host that
 	// resolves outward without depending on what the test machine's DNS says.
@@ -59,6 +64,14 @@ type Service struct {
 
 // New builds the forward service. It satisfies agent.Factory.
 func New(deps agent.Deps) (agent.Service, error) {
+	// The daemon's log, never one built here. Two Audit instances over one
+	// file rotate it out from under each other, and the loser appends to a
+	// segment nothing reads again — a defect this repository already found
+	// once on the exec path.
+	if deps.Audit == nil {
+		return nil, errors.New("forward: agent.Deps.Audit is required")
+	}
+
 	cfg := deps.Config.Forward
 	log := deps.Log.With("service", "forward")
 	if len(cfg.AllowedHosts) > 0 {
@@ -67,11 +80,22 @@ func New(deps agent.Deps) (agent.Service, error) {
 		// and an operator should be able to see it in the log rather than only
 		// in a file.
 		log.Info("forwarding to non-loopback hosts is permitted",
-			"allowed_hosts", strings.Join(cfg.AllowedHosts, ","))
+			"allowed_hosts", strings.Join(cfg.AllowedHosts, ","),
+			"audited", deps.Audit.Enabled())
+		if !deps.Audit.Enabled() {
+			// The two settings are only dangerous together. Reaching the
+			// network on request is a decision an operator may reasonably
+			// make; making it with no record of what was reached is one they
+			// should have to have made on purpose.
+			log.Warn("NON-LOOPBACK FORWARDING IS PERMITTED WITH NO AUDIT LOG",
+				"reason", "forward.allowed_hosts is set and audit.enabled is false",
+				"consequence", "this agent will connect to other hosts on a caller's behalf and record nothing about it")
+		}
 	}
 	return &Service{
-		cfg: cfg,
-		log: log,
+		cfg:   cfg,
+		log:   log,
+		audit: deps.Audit,
 		resolver: func(ctx context.Context, host string) ([]net.IPAddr, error) {
 			return net.DefaultResolver.LookupIPAddr(ctx, host)
 		},
@@ -93,14 +117,17 @@ func (s *Service) Register(r grpc.ServiceRegistrar) {
 // each direction independently. The first message must be the open, because
 // there is nowhere to send bytes until it has arrived.
 func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse]) error {
-	if !s.cfg.IsEnabled() {
-		return status.Error(codes.FailedPrecondition,
-			"port forwarding is disabled on this agent (forward.enabled is false in its configuration)")
+	ctx := stream.Context()
+	principal, _ := agent.PrincipalFromContext(ctx)
+	call := &call{
+		started:   time.Now(),
+		principal: principal,
 	}
 
-	ctx := stream.Context()
 	first, err := stream.Recv()
 	if err != nil {
+		// Nothing was asked for, so there is nothing to record: a stream that
+		// closed before naming a target reached nothing.
 		if errors.Is(err, io.EOF) {
 			return status.Error(codes.InvalidArgument, "the stream closed before sending a ForwardOpen")
 		}
@@ -110,42 +137,61 @@ func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequ
 	if open == nil {
 		return status.Error(codes.InvalidArgument, "the first message on a Forward stream must be a ForwardOpen")
 	}
-	port := open.GetRemotePort()
-	if port == 0 || port > 65535 {
-		return status.Errorf(codes.InvalidArgument, "remote_port %d is out of range; expected 1-65535", port)
+	call.requested, call.port = strings.TrimSpace(open.GetRemoteHost()), open.GetRemotePort()
+	// Until the host is resolved, the only thing known about the target is how
+	// it was spelled. That is enough to decide whether a refusal below is a
+	// refusal to reach off this machine, which is the class of event the
+	// record exists for.
+	call.offBox = !looksLoopback(call.requested)
+
+	if !s.cfg.IsEnabled() {
+		return s.deny(call, "forward.enabled: false", status.Error(codes.FailedPrecondition,
+			"port forwarding is disabled on this agent (forward.enabled is false in its configuration)"))
+	}
+	if call.port == 0 || call.port > 65535 {
+		return s.errored(call, status.Errorf(codes.InvalidArgument,
+			"remote_port %d is out of range; expected 1-65535", call.port))
 	}
 
 	// Resolve and authorise before anything is dialed, and dial the addresses
 	// that passed rather than the name that was asked for.
-	addresses, host, err := s.resolveTarget(ctx, open.GetRemoteHost(), port)
+	addresses, err := s.resolveTarget(ctx, call)
 	if err != nil {
-		return err
+		if call.rule != "" {
+			return s.deny(call, call.rule, err)
+		}
+		return s.errored(call, err)
 	}
 
 	if n := s.active.Add(1); s.cfg.MaxConnections > 0 && n > int64(s.cfg.MaxConnections) {
 		s.active.Add(-1)
-		return status.Errorf(codes.ResourceExhausted,
-			"this agent is already carrying %d forwarded connections, its configured maximum (forward.max_connections)", s.cfg.MaxConnections)
+		call.rule = "forward.max_connections"
+		return s.errored(call, status.Errorf(codes.ResourceExhausted,
+			"this agent is already carrying %d forwarded connections, its configured maximum (forward.max_connections)", s.cfg.MaxConnections))
 	}
 	defer s.active.Add(-1)
 
-	conn, err := s.connect(ctx, addresses)
+	conn, dialed, err := s.connect(ctx, addresses)
+	call.resolved = dialed
 	if err != nil {
 		// Not an RPC error. The stream worked; the sandbox-side port did not
 		// answer, and the caller needs to be told which of the two failed.
 		// Reporting it as an RPC failure would have the MCP server phrase it as
 		// "the sandbox is unreachable", which is the opposite of true.
 		s.log.Debug("forward dial failed", "addresses", strings.Join(addresses, ","), "error", err)
+		call.err = dialMessage(err)
 		sendErr := stream.Send(&sandboxdv1.ForwardResponse{
 			Event: &sandboxdv1.ForwardResponse_Opened{Opened: &sandboxdv1.ForwardOpened{
 				Success: false,
 				Error: fmt.Sprintf("could not connect to %s on the sandbox: %s. Check something is listening there — sandbox_process_list reports the ports each supervised process holds",
-					net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10)), dialMessage(err)),
+					net.JoinHostPort(call.reportedHost(), strconv.FormatUint(uint64(call.port), 10)), dialMessage(err)),
 			}},
 		})
-		return sendErr
+		return s.record(call, policy.OutcomeError, sendErr)
 	}
 	defer func() { _ = conn.Close() }()
+
+	call.local = conn.LocalAddr().String()
 
 	// The RPC ending has to close the socket, not merely cancel the context. A
 	// pump parked in conn.Read is not waiting on a context, so a caller that
@@ -159,14 +205,166 @@ func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequ
 	if err := stream.Send(&sandboxdv1.ForwardResponse{
 		Event: &sandboxdv1.ForwardResponse_Opened{Opened: &sandboxdv1.ForwardOpened{
 			Success:      true,
-			LocalAddress: conn.LocalAddr().String(),
+			LocalAddress: call.local,
 		}},
 	}); err != nil {
-		return err
+		call.err = err.Error()
+		return s.record(call, policy.OutcomeError, err)
 	}
 
-	s.log.Debug("forwarding", "address", conn.RemoteAddr().String(), "local", conn.LocalAddr().String())
-	return s.pump(stream, conn)
+	s.log.Debug("forwarding", "address", conn.RemoteAddr().String(), "local", call.local)
+
+	pumpErr := s.pump(stream, conn, call)
+
+	// A clean close is "ok" whatever the context says by the time this runs.
+	// The caller cancels the stream the moment its own two pumps finish, which
+	// is often before this handler has written its record — so reading
+	// ctx.Err() first would report a completed connection as cancelled, and
+	// every ordinary forward in the log would look aborted. The context is
+	// consulted only to explain a pump that actually failed.
+	outcome := policy.OutcomeOK
+	switch {
+	case pumpErr == nil:
+	case ctx.Err() != nil:
+		outcome = policy.OutcomeCancelled
+	default:
+		outcome = policy.OutcomeError
+		call.err = status.Convert(pumpErr).Message()
+	}
+	return s.record(call, outcome, pumpErr)
+}
+
+// call is one connection's worth of audit material, filled in as the handler
+// learns it.
+//
+// It exists so the record can be written from any of the six places this RPC
+// can end, without each of them assembling a Record by hand and one of them
+// forgetting a field.
+type call struct {
+	started   time.Time
+	principal string
+
+	// requested is the host as the caller spelled it, empty for the loopback
+	// default. resolved is the address actually dialed, empty when nothing was.
+	requested string
+	port      uint32
+	resolved  string
+	local     string
+
+	// offBox reports that the target is not this machine's own loopback, which
+	// is the whole test for whether this connection is recorded. See
+	// [Service.record].
+	offBox bool
+	// rule names the configuration that refused the connection, when one did.
+	rule string
+	// err is the failure, as the agent phrased it. Never anything the
+	// connection carried.
+	err string
+
+	toRemote   atomic.Int64
+	fromRemote atomic.Int64
+}
+
+// reportedHost is the host to name back to the caller: what it asked for, or
+// "localhost" when it asked for the default.
+func (c *call) reportedHost() string {
+	if c.requested == "" {
+		return "localhost"
+	}
+	return c.requested
+}
+
+// deny records a refusal by configuration and returns the caller's error.
+func (s *Service) deny(c *call, rule string, err error) error {
+	c.rule = rule
+	c.err = status.Convert(err).Message()
+	return s.record(c, policy.OutcomeDenied, err)
+}
+
+// errored records a request that failed before any bytes moved.
+func (s *Service) errored(c *call, err error) error {
+	c.err = status.Convert(err).Message()
+	return s.record(c, policy.OutcomeError, err)
+}
+
+// record writes the connection's audit record and returns the error this RPC
+// ends with.
+//
+// Only a connection whose target is off this machine is recorded. A forward to
+// the sandbox's own loopback reaches a port on a host the caller already has
+// full command execution on, so recording it would add volume without adding
+// an answer — and volume is not free: it is what makes the interesting lines
+// hard to find. A forward to anywhere else is the agent acting as a pivot into
+// the network it sits in, and that is the event this log exists for.
+//
+// audit.required is honoured on the same terms as the exec path: with it set, a
+// record that could not be written fails the call. Here that means a connection
+// which has already happened ends in an error rather than a clean close, which
+// is the honest report — the agent could not record what it did.
+func (s *Service) record(c *call, outcome policy.Outcome, rpcErr error) error {
+	if !c.offBox || !s.audit.Enabled() {
+		return rpcErr
+	}
+
+	writeErr := s.audit.Write(policy.Record{
+		Time:      c.started.UTC(),
+		Principal: c.principal,
+		RPC:       forwardMethod,
+		Outcome:   outcome,
+		Rule:      c.rule,
+		Error:     c.err,
+
+		RemoteHost:      c.requested,
+		RemotePort:      c.port,
+		ResolvedAddress: c.resolved,
+		LocalAddress:    c.local,
+		BytesToRemote:   c.toRemote.Load(),
+		BytesFromRemote: c.fromRemote.Load(),
+		DurationMS:      time.Since(c.started).Milliseconds(),
+	})
+	if writeErr == nil {
+		return rpcErr
+	}
+
+	s.log.Error("audit record was not written",
+		"path", s.audit.Path(),
+		"required", s.audit.Required(),
+		"rpc", forwardMethod,
+		"outcome", outcome,
+		"principal", c.principal,
+		"remote_host", c.requested,
+		"remote_port", c.port,
+		"error", writeErr)
+
+	if !s.audit.Required() {
+		return rpcErr
+	}
+	if rpcErr != nil {
+		return status.Errorf(codes.Internal,
+			"audit.required is set and this connection's record could not be written (%v); the call had already failed: %s",
+			writeErr, status.Convert(rpcErr).Message())
+	}
+	return status.Errorf(codes.Internal,
+		"audit.required is set and this connection's record could not be written, so the forward is reported as failed: %v", writeErr)
+}
+
+// looksLoopback reports whether a requested host is loopback on its face,
+// without asking a resolver.
+//
+// It is used only to decide whether a refusal that happens *before* resolution
+// is worth recording. It is deliberately not a security check — nothing is
+// permitted on the strength of it — so treating the name "localhost" as
+// loopback here cannot be turned into a way past the policy in
+// [Service.resolveTarget], which resolves before it decides.
+func looksLoopback(host string) bool {
+	if host == "" {
+		return true
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // pump runs both directions and joins them.
@@ -174,7 +372,7 @@ func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequ
 // Both goroutines are started and both are waited for. Returning while one is
 // still running would leak it — and would leak it per connection, on a
 // long-lived forward, which is precisely the accumulation this has to avoid.
-func (s *Service) pump(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], conn net.Conn) error {
+func (s *Service) pump(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], conn net.Conn, c *call) error {
 	var (
 		wg             sync.WaitGroup
 		toSandboxErr   error
@@ -187,7 +385,7 @@ func (s *Service) pump(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		toSandboxErr = streamToSocket(stream, conn)
+		toSandboxErr = streamToSocket(stream, conn, c)
 	}()
 
 	// Socket to stream. Ends when the sandbox-side server closes, which is
@@ -203,7 +401,7 @@ func (s *Service) pump(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		fromSandboxErr = socketToStream(stream, conn)
+		fromSandboxErr = socketToStream(stream, conn, c)
 	}()
 
 	wg.Wait()
@@ -214,8 +412,10 @@ func (s *Service) pump(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest
 	return toSandboxErr
 }
 
-// streamToSocket copies request messages onto the socket.
-func streamToSocket(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], conn net.Conn) error {
+// streamToSocket copies request messages onto the socket, counting them.
+//
+// It counts how much went through, never what it was. See policy.Record.
+func streamToSocket(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], conn net.Conn, c *call) error {
 	for {
 		req, err := stream.Recv()
 		switch {
@@ -237,18 +437,21 @@ func streamToSocket(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, s
 		if len(data) == 0 {
 			continue
 		}
-		if _, err := conn.Write(data); err != nil {
+		n, err := conn.Write(data)
+		c.toRemote.Add(int64(n))
+		if err != nil {
 			return nil //nolint:nilerr // the socket is gone; the other pump reports why, and this one has nothing to add
 		}
 	}
 }
 
-// socketToStream copies socket bytes back onto the stream.
-func socketToStream(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], conn net.Conn) error {
+// socketToStream copies socket bytes back onto the stream, counting them.
+func socketToStream(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], conn net.Conn, c *call) error {
 	buf := make([]byte, copyBufferSize)
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
+			c.fromRemote.Add(int64(n))
 			// The slice is reused, and gRPC marshals on Send, so the copy the
 			// wire sees is taken before the next Read overwrites it.
 			if sendErr := stream.Send(&sandboxdv1.ForwardResponse{
@@ -300,7 +503,10 @@ func isExpectedClose(err error) bool {
 // forward an IPv4-only server on any machine whose resolver answers with ::1
 // first — the standard dialer falls back for exactly this reason, and it
 // cannot be used here because it would re-resolve the name and undo the check.
-func (s *Service) connect(ctx context.Context, addresses []string) (net.Conn, error) {
+// It also reports the address it dialed, successfully or not, for the audit
+// record: an operator asking where a connection went needs the address rather
+// than the list it was chosen from.
+func (s *Service) connect(ctx context.Context, addresses []string) (net.Conn, string, error) {
 	timeout := s.cfg.DialTimeout.Duration()
 	if timeout <= 0 {
 		timeout = defaultDialTimeout
@@ -311,16 +517,19 @@ func (s *Service) connect(ctx context.Context, addresses []string) (net.Conn, er
 	// gets is "connection refused" — an answer about whether anything is
 	// listening — rather than "network unreachable", which is a fact about the
 	// stack and not the question that was asked.
-	var firstErr error
+	var (
+		firstErr     error
+		firstAddress string
+	)
 	for _, address := range addresses {
 		dialCtx, cancel := context.WithTimeout(ctx, timeout)
 		conn, err := s.dial(dialCtx, "tcp", address)
 		cancel()
 		if err == nil {
-			return conn, nil
+			return conn, address, nil
 		}
 		if firstErr == nil {
-			firstErr = err
+			firstErr, firstAddress = err, address
 		}
 		if ctx.Err() != nil {
 			break
@@ -329,7 +538,7 @@ func (s *Service) connect(ctx context.Context, addresses []string) (net.Conn, er
 	if firstErr == nil {
 		firstErr = errors.New("no address to connect to")
 	}
-	return nil, firstErr
+	return nil, firstAddress, firstErr
 }
 
 // dialMessage strips the layers a net.OpError wraps a refusal in, so the
@@ -348,18 +557,22 @@ func dialMessage(err error) string {
 // host name and letting the dialer re-resolve it would leave a window in which
 // the name resolves to something else — which for a name the caller chose is
 // not a theoretical window.
-func (s *Service) resolveTarget(ctx context.Context, host string, port uint32) (addresses []string, reported string, err error) {
-	host = strings.TrimSpace(host)
-	portStr := strconv.FormatUint(uint64(port), 10)
+// It refines c.offBox from the syntactic guess made before resolution to the
+// answer resolution gives, and names the rule in c.rule on a refusal, so the
+// caller can record the right kind of event without repeating the decision.
+func (s *Service) resolveTarget(ctx context.Context, c *call) (addresses []string, err error) {
+	host := c.requested
+	portStr := strconv.FormatUint(uint64(c.port), 10)
 
 	if host == "" {
 		// The documented default, and the only one that needs no policy: this
 		// reaches nothing but the sandbox's own machine. Both families,
 		// because a server bound to one of them is not reachable on the other.
+		c.offBox = false
 		return []string{
 			net.JoinHostPort("127.0.0.1", portStr),
 			net.JoinHostPort("::1", portStr),
-		}, "localhost", nil
+		}, nil
 	}
 
 	// An explicitly allowed host is dialed by name, because that is what the
@@ -367,24 +580,33 @@ func (s *Service) resolveTarget(ctx context.Context, host string, port uint32) (
 	// no window to close here: the operator has already accepted wherever this
 	// name points.
 	if s.cfg.HostAllowed(host) {
-		return []string{net.JoinHostPort(host, portStr)}, host, nil
+		// Recorded whatever it resolves to. The operator listed it precisely
+		// because it is meant to reach something, and a listed host that turns
+		// out to be loopback is a configuration worth seeing in the log too.
+		c.offBox = true
+		return []string{net.JoinHostPort(host, portStr)}, nil
 	}
 
 	if ip := net.ParseIP(host); ip != nil {
 		if !ip.IsLoopback() {
-			return nil, "", s.refuse(host)
+			c.rule = ruleAllowedHosts
+			return nil, s.refuse(host)
 		}
-		return []string{net.JoinHostPort(ip.String(), portStr)}, host, nil
+		c.offBox = false
+		return []string{net.JoinHostPort(ip.String(), portStr)}, nil
 	}
 
 	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	addrs, err := s.resolver(lookupCtx, host)
 	if err != nil {
-		return nil, "", status.Errorf(codes.InvalidArgument, "remote_host %q could not be resolved on the sandbox: %v", host, err)
+		// Recorded as an attempt to reach off this machine, because that is
+		// what it was: a name that did not resolve is a name whose target is
+		// unknown, and an unknown target is not a loopback one.
+		return nil, status.Errorf(codes.InvalidArgument, "remote_host %q could not be resolved on the sandbox: %v", host, err)
 	}
 	if len(addrs) == 0 {
-		return nil, "", status.Errorf(codes.InvalidArgument, "remote_host %q resolved to no addresses on the sandbox", host)
+		return nil, status.Errorf(codes.InvalidArgument, "remote_host %q resolved to no addresses on the sandbox", host)
 	}
 	// Every address, not the first one. A name resolving to both a loopback
 	// and a routable address must not pass on the strength of whichever came
@@ -396,7 +618,8 @@ func (s *Service) resolveTarget(ctx context.Context, host string, port uint32) (
 	var v4, v6 []string
 	for _, addr := range addrs {
 		if !addr.IP.IsLoopback() {
-			return nil, "", s.refuse(host)
+			c.rule = ruleAllowedHosts
+			return nil, s.refuse(host)
 		}
 		address := net.JoinHostPort(addr.IP.String(), portStr)
 		if addr.IP.To4() != nil {
@@ -405,8 +628,15 @@ func (s *Service) resolveTarget(ctx context.Context, host string, port uint32) (
 			v6 = append(v6, address)
 		}
 	}
-	return append(v4, v6...), host, nil
+	// Every address resolved to loopback, so this reaches nothing but the
+	// sandbox itself after all — whatever the name looked like.
+	c.offBox = false
+	return append(v4, v6...), nil
 }
+
+// ruleAllowedHosts is the configuration a refused non-loopback target is
+// recorded against.
+const ruleAllowedHosts = "forward.allowed_hosts"
 
 // refuse is the one message a denied non-loopback target gets. It names the
 // setting that would permit it, because an operator who genuinely wants this

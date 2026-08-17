@@ -201,11 +201,23 @@ cannot talk its way past.
   - **An allowed interpreter allows everything it can run.** `python3`, `perl`,
     `node` and `make` on an allow list are each a shell by another name.
 
-## Port forwarding
+## The pivot surface
+
+Everything else in this document is about what a caller can do **to** the host
+the agent runs on. This section is about what it can do **through** it.
 
 `sandbox_forward` is `ssh -L`: a local listener on the workstation, a socket on
-the sandbox, and bytes in between. Both ends are confined to loopback by
-default, and the two confinements answer different questions.
+the sandbox, and bytes in between. Forwarding to the sandbox's own loopback is
+a convenience — it reaches a port on a machine the caller already has full
+command execution on, and gives it nothing it did not already have. Forwarding
+anywhere else is different in kind: it makes the agent a relay into whatever
+network it sits in, usable by anyone who can reach the agent. On a fleet
+spanning a laptop, a home lab and a cloud VPC, "anywhere else" spans all three.
+
+So the pivot is off by default, and when an operator turns it on, it is
+recorded.
+
+### The default
 
 - **The local listener binds `127.0.0.1` only.** Binding every interface would
   publish a tunnel into the sandbox to everyone on the workstation's network,
@@ -213,11 +225,9 @@ default, and the two confinements answer different questions.
   not choose.
 - **`remote_host` defaults to the sandbox's own loopback**, and a non-loopback
   target is refused unless the operator listed it in `forward.allowed_hosts`.
-  This is the setting that decides whether the agent is a way to reach a dev
-  server or a general-purpose pivot into whatever network the host sits in.
-  Forwarding a dev server works identically without the capability, so an agent
-  that never needs it never notices it is missing — which is exactly why the
-  permissive version would go unnoticed too.
+  Forwarding a dev server works identically without that capability, so an
+  agent that never needs it never notices it is missing — which is exactly why
+  the permissive version would go unnoticed too.
 
   The check resolves the requested host and requires **every** address it
   resolves to to be loopback, then dials the address that passed. Judging the
@@ -226,18 +236,68 @@ default, and the two confinements answer different questions.
   time would leave a window between the check and the connection.
 
 An operator who lists a host has accepted that the agent will connect to it on
-any caller's request, and the agent says so in its log at every start.
+any caller's request. The agent says so in its log at every start, and warns
+separately if it was told to do that with the audit log switched off — the two
+settings are only dangerous together.
+
+### The record
+
+Every connection to a target that is **not** this machine's loopback appends a
+line to the [audit log](#audit), whether it succeeded, was refused, or failed.
+Loopback forwards are not recorded: they add volume without adding an answer,
+and volume is what makes the lines that matter hard to find.
+
+One line per connection, not per forward — a forward is a listener that carries
+many connections over hours, and "a forward was opened" answers nothing about
+what went through it. Each line carries the time, the authenticated principal
+from the client certificate, the sandbox's own name, the requested
+`remote_host` and `remote_port`, the address actually dialed, the local end of
+the agent's outbound socket, bytes in each direction, the duration, and how it
+ended.
+
+Two of those are worth stating on their own:
+
+- **The requested host and the resolved address are both recorded.** They are
+  different facts. The name is what appeared in the caller's request and what
+  an operator will search for; the address is where the packets went, and a
+  name that resolved somewhere unexpected is precisely the case worth seeing.
+  An empty resolved address means the connection never got that far.
+- **Refusals are recorded, not just successes.** A request to reach somewhere
+  the configuration does not permit is the single most useful line in this
+  file: it is the one that says somebody asked. The same argument applies to
+  denied commands on the exec path.
+
+The record counts bytes and never holds them. A tunnelled connection carries
+whatever the caller sends through it — a database password, a bearer token, a
+private key on its way to a deploy — and a log that captured that would be a
+credential store nobody meant to build, sitting on the least protected host in
+the fleet. See the contract on `policy.Record`.
+
+The line is written when the connection **ends**, because that is when the
+volume and the outcome exist. A connection still open is not yet in the log.
+
+`audit.required` applies here as it does to exec: with it set, a connection
+whose record could not be written is reported to the caller as failed rather
+than closing cleanly, because an agent configured to act only when it can
+record what it did must not report success for an unrecorded pivot.
 
 ## Audit
 
-Every exec — and, as they land, every write, edit, process start and signal —
-appends one JSONL record: timestamp, authenticated principal (the client
-certificate's common name), RPC, argv and the resolved executable, working
-directory, outcome, exit status, duration. Append-only, rotated by size with a
-configurable number of retained segments.
+Every exec, every forwarded connection that leaves the machine — and, as they
+land, every write, edit, process start and signal — appends one JSONL record:
+timestamp, authenticated principal (the client certificate's common name), the
+sandbox's own name, RPC, outcome, duration, and then whatever the operation
+has: argv and the resolved executable and working directory for a command, the
+requested and dialed addresses and the byte counts for a connection.
+Append-only, rotated by size with a configurable number of retained segments.
+
+Every record names the sandbox it came from. That is redundant on the host that
+wrote it and essential everywhere else: these files are shipped off-box and
+read together, and a line that does not name its machine cannot be acted on.
 
 **What it never contains.** There is no field for environment values, file
-contents, stdin, command output or the enrollment token, and none may be added.
+contents, stdin, command output, forwarded payload bytes or the enrollment
+token, and none may be added.
 An audit log that captures secrets is a new place to steal them from, and one
 with weaker handling than whatever it copied them out of: it gets shipped
 off-box, read by people debugging something unrelated, and kept long after the
@@ -256,6 +316,9 @@ writing it down would not cost more.
 whole point of an exec record and there is no reliable way to tell a password
 from a path, so this is a limitation to work with rather than a bug to fix: pass
 credentials in the environment, which is never recorded.
+
+See [the pivot surface](#the-pivot-surface) for which connections are recorded
+and why loopback ones are not.
 
 **`audit.required` is a real choice.** With it set, an RPC whose record could
 not be written fails — an agent that must not act unrecorded. Without it, the

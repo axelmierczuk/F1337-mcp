@@ -2,11 +2,15 @@ package forward
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +26,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // These drive ForwardService directly over a gRPC connection, which is the
@@ -29,7 +34,10 @@ import (
 // about what happens to one side of a bidirectional stream when the other side
 // ends, and a hand-rolled stream would be asserting on the fake.
 
-func newService(t *testing.T, cfg agent.ForwardConfig) *Service {
+// newService builds the service with a real audit log in a temp directory, so
+// every test can read back what was recorded — and so none of them can pass
+// while recording nothing.
+func newService(t *testing.T, cfg agent.ForwardConfig, tune ...func(*policy.AuditConfig)) *Service {
 	t.Helper()
 	enabled := cfg.Enabled
 	if enabled == nil {
@@ -41,14 +49,60 @@ func newService(t *testing.T, cfg agent.ForwardConfig) *Service {
 		cfg.DialTimeout = agent.Duration(3 * time.Second)
 	}
 
+	auditCfg := policy.AuditConfig{
+		Path:    filepath.Join(t.TempDir(), "audit.jsonl"),
+		Sandbox: "test-box",
+		Enabled: true,
+	}
+	for _, apply := range tune {
+		apply(&auditCfg)
+	}
+	auditLog := policy.NewAudit(auditCfg)
+	// Released before the temp directory goes: on Windows a directory holding
+	// an open handle does not delete, which has broken this suite's neighbours
+	// before.
+	t.Cleanup(func() { _ = auditLog.Close() })
+
 	svc, err := New(agent.Deps{
 		Config:  &agent.Config{Forward: cfg},
 		Log:     slog.New(slog.DiscardHandler),
 		Status:  agent.NewStatus(),
+		Audit:   auditLog,
 		Version: "test",
 	})
 	require.NoError(t, err)
 	return svc.(*Service)
+}
+
+// records returns everything the service has written to its audit log.
+func records(t *testing.T, svc *Service) []policy.Record {
+	t.Helper()
+	data, err := os.ReadFile(svc.audit.Path())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	require.NoError(t, err)
+
+	var out []policy.Record
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec policy.Record
+		require.NoErrorf(t, json.Unmarshal([]byte(line), &rec), "audit line is not JSON: %s", line)
+		out = append(out, rec)
+	}
+	return out
+}
+
+// onlyRecord requires exactly one audit record and returns it. One connection
+// is one record, and a test that accepted "at least one" would not notice a
+// duplicate on every path out of the handler.
+func onlyRecord(t *testing.T, svc *Service) policy.Record {
+	t.Helper()
+	got := records(t, svc)
+	require.Lenf(t, got, 1, "expected exactly one audit record, got %d: %+v", len(got), got)
+	return got[0]
 }
 
 // serve puts the service behind a real gRPC connection.
@@ -423,6 +477,400 @@ func TestForward_AllowsAnExplicitLoopbackAddress(t *testing.T) {
 	require.True(t, opened.GetSuccess(), opened.GetError())
 }
 
+// ----------------------------------------------------------- the record
+
+// A loopback forward reaches a port on a host the caller already has full
+// command execution on. Recording it would add volume without adding an
+// answer, and volume is what makes the interesting lines hard to find.
+func TestAudit_LoopbackForwardsAreNotRecorded(t *testing.T) {
+	svc := newService(t, agent.ForwardConfig{})
+	client := serve(t, svc)
+	port := echoServer(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	for _, host := range []string{"", "127.0.0.1", "localhost"} {
+		roundTripTo(ctx, t, client, port, host)
+	}
+	assert.Empty(t, records(t, svc),
+		"a forward to the sandbox's own loopback is a convenience, not a pivot")
+}
+
+// The one this exists for: the agent connected to something else on the
+// network, on a caller's behalf, and the record is what makes that answerable
+// afterwards.
+func TestAudit_PermittedNonLoopbackForwardIsRecorded(t *testing.T) {
+	port := echoServer(t)
+	svc := newService(t, agent.ForwardConfig{AllowedHosts: []string{"build-host.internal"}})
+	// The allow list matches on the name, so the dial goes to the name. It is
+	// pointed back at loopback here so the connection actually completes and
+	// the byte counts are real — the address the service chose is asserted on
+	// through the record's resolved_address rather than here.
+	svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	}
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	const payload = "forwarded through the agent"
+	stream, opened, err := open(ctx, t, client, 8080, "build-host.internal")
+	require.NoError(t, err)
+	require.True(t, opened.GetSuccess(), opened.GetError())
+	require.NoError(t, stream.Send(&sandboxdv1.ForwardRequest{
+		Event: &sandboxdv1.ForwardRequest_Data{Data: []byte(payload)},
+	}))
+	require.NoError(t, stream.Send(&sandboxdv1.ForwardRequest{
+		Event: &sandboxdv1.ForwardRequest_Close{Close: &sandboxdv1.ForwardClose{Reason: "done"}},
+	}))
+	require.NoError(t, stream.CloseSend())
+	var echoed []byte
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			break
+		}
+		echoed = append(echoed, resp.GetData()...)
+	}
+	require.Equal(t, payload, string(echoed))
+
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, forwardMethod, rec.RPC)
+	assert.Equal(t, policy.OutcomeOK, rec.Outcome)
+	assert.Equal(t, "test-box", rec.Sandbox, "a record shipped off-box must name the host it came from")
+	assert.False(t, rec.Time.IsZero())
+
+	// What was asked for, and what it became. Both, because they are different
+	// facts and an investigation needs each.
+	assert.Equal(t, "build-host.internal", rec.RemoteHost)
+	assert.Equal(t, uint32(8080), rec.RemotePort)
+	assert.Equal(t, "build-host.internal:8080", rec.ResolvedAddress)
+	assert.NotEmpty(t, rec.LocalAddress, "the local socket is what joins this to the host's own network logs")
+
+	// Volume, in both directions, and nothing else about it.
+	assert.Equal(t, int64(len(payload)), rec.BytesToRemote)
+	assert.Equal(t, int64(len(payload)), rec.BytesFromRemote)
+	assert.GreaterOrEqual(t, rec.DurationMS, int64(0))
+}
+
+// A refusal is the event most worth having a record of: it is the one that
+// says someone asked this agent to reach somewhere it was not configured to
+// go.
+func TestAudit_RefusedNonLoopbackForwardIsRecorded(t *testing.T) {
+	svc := newService(t, agent.ForwardConfig{})
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	_, _, err := open(ctx, t, client, 8080, "192.0.2.1")
+	require.Error(t, err)
+	require.Equal(t, codes.PermissionDenied, status.Code(err))
+
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, policy.OutcomeDenied, rec.Outcome)
+	assert.Equal(t, ruleAllowedHosts, rec.Rule, "the record must name the configuration that refused it")
+	assert.Equal(t, "192.0.2.1", rec.RemoteHost)
+	assert.Equal(t, uint32(8080), rec.RemotePort)
+	assert.Empty(t, rec.ResolvedAddress, "nothing was dialed, and an empty address is how a reader knows")
+	assert.Empty(t, rec.LocalAddress)
+	assert.Zero(t, rec.BytesToRemote)
+	assert.Zero(t, rec.BytesFromRemote)
+	assert.Contains(t, rec.Error, "loopback")
+}
+
+// A name that resolves outward is refused after resolution, and recorded with
+// the name the caller used — which is the string an operator will search for.
+func TestAudit_RefusedNameIsRecordedAsRequested(t *testing.T) {
+	svc := newService(t, agent.ForwardConfig{})
+	svc.resolver = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.1.2.3")}}, nil
+	}
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	_, _, err := open(ctx, t, client, 5432, "db.internal")
+	require.Error(t, err)
+
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, policy.OutcomeDenied, rec.Outcome)
+	assert.Equal(t, "db.internal", rec.RemoteHost,
+		"the requested name is what appears in the caller's configuration and what an operator will look for")
+	assert.Equal(t, uint32(5432), rec.RemotePort)
+}
+
+// A disabled service still records the attempt, for the same reason a refusal
+// does: the question "did anyone try" has an answer either way.
+func TestAudit_RefusalByDisabledServiceIsRecorded(t *testing.T) {
+	off := false
+	svc := newService(t, agent.ForwardConfig{Enabled: &off})
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	_, _, err := open(ctx, t, client, 8080, "192.0.2.1")
+	require.Error(t, err)
+
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, policy.OutcomeDenied, rec.Outcome)
+	assert.Equal(t, "forward.enabled: false", rec.Rule)
+
+	// And a loopback attempt on the same disabled agent is still not a pivot.
+	_, _, err = open(ctx, t, client, 8080, "")
+	require.Error(t, err)
+	assert.Len(t, records(t, svc), 1)
+}
+
+// A permitted target that does not answer is still a connection attempt off
+// this machine, and the record says so rather than omitting the attempt.
+func TestAudit_FailedDialToAPermittedHostIsRecorded(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	dead := lis.Addr().(*net.TCPAddr).Port
+	require.NoError(t, lis.Close())
+
+	svc := newService(t, agent.ForwardConfig{AllowedHosts: []string{"build-host.internal"}})
+	svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(dead)))
+	}
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	stream, opened, err := open(ctx, t, client, 8080, "build-host.internal")
+	require.NoError(t, err)
+	require.False(t, opened.GetSuccess())
+	// Drained to the end of the stream, not merely to the failed open: the
+	// record is written on the way out of the handler, and the stream ending
+	// is what proves the handler got there. Reading the file any earlier is a
+	// race, not an assertion.
+	for {
+		if _, err := stream.Recv(); err != nil {
+			break
+		}
+	}
+
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, policy.OutcomeError, rec.Outcome)
+	assert.Equal(t, "build-host.internal", rec.RemoteHost)
+	assert.Equal(t, "build-host.internal:8080", rec.ResolvedAddress)
+	assert.NotEmpty(t, rec.Error)
+}
+
+// The rule the whole design turns on: the record counts what went through and
+// never holds it. A tunnelled connection carries whatever the caller sends —
+// a database password, a bearer token, a key on its way to a deploy — and a
+// log that captured it would be a credential store nobody meant to build.
+func TestAudit_NeverRecordsForwardedPayload(t *testing.T) {
+	port := echoServer(t)
+	svc := newService(t, agent.ForwardConfig{AllowedHosts: []string{"build-host.internal"}})
+	svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	}
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	const secret = "PGPASSWORD=hunter2-should-never-be-written-down"
+	stream, opened, err := open(ctx, t, client, 5432, "build-host.internal")
+	require.NoError(t, err)
+	require.True(t, opened.GetSuccess())
+	require.NoError(t, stream.Send(&sandboxdv1.ForwardRequest{
+		Event: &sandboxdv1.ForwardRequest_Data{Data: []byte(secret)},
+	}))
+	require.NoError(t, stream.CloseSend())
+	for {
+		if _, err := stream.Recv(); err != nil {
+			break
+		}
+	}
+
+	// Asserted against the raw file, not the decoded record: a field added
+	// later that happened to carry payload would still be caught here.
+	raw, err := os.ReadFile(svc.audit.Path())
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "hunter2")
+	assert.NotContains(t, string(raw), secret)
+
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, int64(len(secret)), rec.BytesToRemote, "the volume is recorded, and only the volume")
+}
+
+// With audit.required set, a pivot the agent could not record is a pivot the
+// agent reports as failed. Without it, the connection stands and the failure
+// is logged — the same choice the exec path offers, for the same reason.
+func TestAudit_RequiredFailureFailsTheConnection(t *testing.T) {
+	port := echoServer(t)
+
+	newRefusing := func(t *testing.T, required bool) *Service {
+		t.Helper()
+		dir := t.TempDir()
+		svc := newService(t, agent.ForwardConfig{AllowedHosts: []string{"build-host.internal"}},
+			func(cfg *policy.AuditConfig) {
+				// A directory where the log file should be: every write fails,
+				// and no test has to race a permission bit to arrange it.
+				require.NoError(t, os.MkdirAll(filepath.Join(dir, "audit.jsonl"), 0o755))
+				cfg.Path = filepath.Join(dir, "audit.jsonl")
+				cfg.Required = required
+			})
+		svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		}
+		return svc
+	}
+
+	t.Run("required", func(t *testing.T) {
+		client := serve(t, newRefusing(t, true))
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+
+		stream, opened, err := open(ctx, t, client, 8080, "build-host.internal")
+		require.NoError(t, err)
+		require.True(t, opened.GetSuccess())
+		require.NoError(t, stream.CloseSend())
+
+		var recvErr error
+		for recvErr == nil {
+			_, recvErr = stream.Recv()
+		}
+		require.NotErrorIs(t, recvErr, io.EOF,
+			"a connection whose record could not be written must not end cleanly")
+		assert.Contains(t, status.Convert(recvErr).Message(), "audit.required")
+	})
+
+	t.Run("not required", func(t *testing.T) {
+		client := serve(t, newRefusing(t, false))
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+
+		stream, opened, err := open(ctx, t, client, 8080, "build-host.internal")
+		require.NoError(t, err)
+		require.True(t, opened.GetSuccess())
+		require.NoError(t, stream.CloseSend())
+
+		var recvErr error
+		for recvErr == nil {
+			_, recvErr = stream.Recv()
+		}
+		assert.ErrorIs(t, recvErr, io.EOF,
+			"an unwritable log must not take the fleet down with it")
+	})
+}
+
+// A caller that goes away mid-transfer is recorded as cancelled, not as a
+// clean close and not as an error. "How it ended" is one of the questions the
+// record answers, and a connection someone abandoned halfway is a different
+// answer from one that finished.
+func TestAudit_CancelledConnectionIsRecordedAsCancelled(t *testing.T) {
+	// A server that accepts, says nothing, and reports what it received, so the
+	// caller can walk away at a point where the agent has provably already
+	// forwarded and counted the request. Cancelling without waiting would make
+	// the byte count a race: bytes still in flight when the caller goes are
+	// bytes that may or may not have reached the socket.
+	received := make(chan int, 8)
+	port := tcpServer(t, func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 256)
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				received <- n
+			}
+			if err != nil {
+				return
+			}
+		}
+	})
+	svc := newService(t, agent.ForwardConfig{AllowedHosts: []string{"build-host.internal"}})
+	svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	}
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stream, opened, err := open(ctx, t, client, 8080, "build-host.internal")
+	require.NoError(t, err)
+	require.True(t, opened.GetSuccess())
+	const sent = "half a request"
+	require.NoError(t, stream.Send(&sandboxdv1.ForwardRequest{
+		Event: &sandboxdv1.ForwardRequest_Data{Data: []byte(sent)},
+	}))
+	select {
+	case n := <-received:
+		require.Equal(t, len(sent), n)
+	case <-time.After(20 * time.Second):
+		t.Fatal("the request never reached the server")
+	}
+	cancel()
+
+	rec := waitForRecord(t, svc)
+	assert.Equal(t, policy.OutcomeCancelled, rec.Outcome)
+	assert.Equal(t, "build-host.internal", rec.RemoteHost)
+	// Recorded even though the caller never came back for it: what went
+	// through before the caller left is exactly what an investigation wants.
+	assert.Equal(t, int64(len(sent)), rec.BytesToRemote)
+}
+
+// waitForRecord polls for exactly one record. The handler writes it on its way
+// out, and a caller that cancelled has no stream left to synchronise on.
+func waitForRecord(t *testing.T, svc *Service) policy.Record {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := records(t, svc); len(got) == 1 {
+			return got[0]
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no audit record was written within 20s; got %+v", records(t, svc))
+	return policy.Record{}
+}
+
+// A disabled audit log records nothing and refuses nothing.
+func TestAudit_DisabledLogStillForwards(t *testing.T) {
+	port := echoServer(t)
+	svc := newService(t, agent.ForwardConfig{AllowedHosts: []string{"build-host.internal"}},
+		func(cfg *policy.AuditConfig) { cfg.Enabled = false })
+	svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	}
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	_, opened, err := open(ctx, t, client, 8080, "build-host.internal")
+	require.NoError(t, err)
+	assert.True(t, opened.GetSuccess())
+	assert.Empty(t, records(t, svc))
+}
+
+// The service will not build without an audit log at all. An agent that can be
+// asked to reach another host must not be constructible with nowhere to record
+// that it did.
+func TestAudit_ServiceRefusesToBuildWithoutALog(t *testing.T) {
+	_, err := New(agent.Deps{
+		Config: &agent.Config{},
+		Log:    slog.New(slog.DiscardHandler),
+		Status: agent.NewStatus(),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Audit")
+}
+
 // --------------------------------------------------------------- goleak
 
 // One connection is two pump goroutines and a socket. The failure mode is an
@@ -459,10 +907,17 @@ func TestForward_NoGoroutineLeakAcrossManyStreams(t *testing.T) {
 	goleak.VerifyNone(t, baseline)
 }
 
-// roundTrip opens a stream, echoes a payload, half-closes, and drains.
+// roundTrip opens a stream to loopback, echoes a payload, half-closes, and
+// drains.
 func roundTrip(ctx context.Context, t *testing.T, client sandboxdv1.ForwardServiceClient, port int) {
 	t.Helper()
-	stream, opened, err := open(ctx, t, client, port, "")
+	roundTripTo(ctx, t, client, port, "")
+}
+
+// roundTripTo is roundTrip against a named host.
+func roundTripTo(ctx context.Context, t *testing.T, client sandboxdv1.ForwardServiceClient, port int, host string) {
+	t.Helper()
+	stream, opened, err := open(ctx, t, client, port, host)
 	require.NoError(t, err)
 	require.True(t, opened.GetSuccess(), opened.GetError())
 

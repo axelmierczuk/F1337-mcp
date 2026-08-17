@@ -94,6 +94,12 @@ forward:
   # here is how you decide that is what you want, per host:
   #
   #   allowed_hosts: ["db.internal", "10.0.4.7"]
+  #
+  # Every connection to a host that is not this machine's loopback is written
+  # to the audit log below — successful, refused, or failed — with the host
+  # asked for, the address dialed, and how many bytes went each way. Never the
+  # bytes themselves. Loopback forwards are not recorded: they reach a port on
+  # a machine the caller already has exec on.
   allowed_hosts: []
   # Concurrent forwarded connections this agent will carry.
   max_connections: 64
@@ -101,14 +107,18 @@ forward:
   dial_timeout: "10s"
 
 audit:
-  # Append-only JSONL record of every exec and every write: timestamp,
-  # authenticated principal, RPC, argv and resolved path, working directory,
-  # outcome, exit status, duration.
+  # Append-only JSONL record of every exec, every write, and every forwarded
+  # connection that leaves this machine: timestamp, authenticated principal,
+  # this sandbox's name, RPC, outcome, duration, and then what the operation
+  # has — argv and resolved path and working directory for a command, the
+  # requested and dialed addresses and the byte counts for a connection.
   #
-  # Never the environment, file contents, stdin or command output. It is a
-  # forensic record, not an enforcement mechanism — a caller who can run
-  # commands on this host can also reach this file. Ship it off-host if it
-  # needs to survive the host.
+  # Never the environment, file contents, stdin, command output, or the bytes
+  # a forward carried — a tunnel carries whatever the caller sends through it,
+  # and a log that captured that would be a credential store nobody meant to
+  # build. It is a forensic record, not an enforcement mechanism: a caller who
+  # can run commands on this host can also reach this file. Ship it off-host if
+  # it needs to survive the host.
   path: "/var/log/sandboxd/audit.jsonl"
   enabled: true
   # With this set, an RPC whose audit record could not be written fails.

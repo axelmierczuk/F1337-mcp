@@ -239,6 +239,7 @@ func policyFor(cfg *Config) (*policy.Policy, error) {
 func auditFor(cfg *Config, log *slog.Logger) *policy.Audit {
 	auditLog := policy.NewAudit(policy.AuditConfig{
 		Path:           cfg.Audit.Path,
+		Sandbox:        cfg.Name,
 		Enabled:        cfg.Audit.Enabled,
 		Required:       cfg.Audit.Required,
 		MaxBytes:       cfg.Audit.MaxBytes,

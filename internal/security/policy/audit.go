@@ -37,12 +37,18 @@ const (
 // # What is deliberately absent
 //
 // There is no field for environment values, file contents, stdin, command
-// output, or the enrollment token, and none may be added. An audit log that
-// captures secrets is a new place to steal them from, and it is a place with
-// weaker handling than the thing it copied them out of: it is world-readable
-// on some hosts by the time an operator has finished debugging it, it is
-// shipped off-box, and it is kept long after the credential it captured was
-// supposed to have been rotated.
+// output, forwarded payload bytes, or the enrollment token, and none may be
+// added. An audit log that captures secrets is a new place to steal them from,
+// and it is a place with weaker handling than the thing it copied them out of:
+// it is world-readable on some hosts by the time an operator has finished
+// debugging it, it is shipped off-box, and it is kept long after the
+// credential it captured was supposed to have been rotated.
+//
+// Forwarded traffic is the sharpest case. A tunnelled connection carries
+// whatever the caller sends through it — a database password, a bearer token,
+// a private key on its way to a deploy — so this record counts bytes and never
+// holds them. A log that captured them would be a credential store nobody
+// meant to build, sitting on the least protected host in the fleet.
 //
 // The rule is about the record and not only about its field list, because an
 // error string is a field too and a caller chooses much of what goes into one.
@@ -59,6 +65,13 @@ const (
 type Record struct {
 	Time      time.Time `json:"time"`
 	Principal string    `json:"principal"`
+	// Sandbox is the agent's own fleet name, stamped by [Audit.Write] from
+	// [AuditConfig.Sandbox] rather than filled in per record.
+	//
+	// It is redundant on the host that wrote it and essential everywhere else:
+	// these files are shipped off-box and read together, and a line that does
+	// not name the machine it came from cannot be acted on.
+	Sandbox string `json:"sandbox,omitempty"`
 	// RPC is the fully qualified method, e.g. "sandboxd.v1.ExecService/Exec".
 	RPC     string  `json:"rpc"`
 	Outcome Outcome `json:"outcome"`
@@ -92,12 +105,60 @@ type Record struct {
 	// #8–#10. Never its content.
 	Bytes int64 `json:"bytes,omitempty"`
 	Lines int64 `json:"lines,omitempty"`
+
+	// The network fields below describe one connection the agent opened on a
+	// caller's behalf.
+	//
+	// They are named for the operation and not for the service that performs
+	// it. ForwardService writes them today and the SOCKS proxy of #45 will
+	// write the same ones: both are the agent connecting somewhere on request,
+	// and an operator asking "what did this machine reach, for whom, and how
+	// much went through it" is asking one question, not two. A
+	// forward_remote_host would have made the answer depend on which feature
+	// happened to be used.
+	//
+	// One record per connection, not per listener. A forward is a listener
+	// that carries many connections over hours, and "a forward was opened"
+	// answers nothing about what went through it. The record is written when
+	// the connection ends, because that is when the volume and the outcome
+	// exist — a connection still open is not yet in the log.
+
+	// RemoteHost and RemotePort are the target as the caller asked for it.
+	//
+	// The requested host is recorded alongside ResolvedAddress because they
+	// are different facts and an investigation needs both. The name is what
+	// appeared in the caller's request and what an operator will search for;
+	// the address is what the packets actually went to, and a name that
+	// resolved somewhere unexpected is precisely the case worth seeing.
+	// RemoteHost is empty when the caller named no host, which means loopback.
+	RemoteHost string `json:"remote_host,omitempty"`
+	RemotePort uint32 `json:"remote_port,omitempty"`
+	// ResolvedAddress is the host:port the agent actually dialed. It is empty
+	// when the connection never got that far — refused by configuration, or a
+	// name that did not resolve — which is how a reader tells "resolved to
+	// this" apart from "never resolved".
+	ResolvedAddress string `json:"resolved_address,omitempty"`
+	// LocalAddress is the local end of the agent's own outbound socket. It is
+	// what joins this record to the host's netflow, conntrack or firewall log,
+	// which is the whole reason to keep it.
+	LocalAddress string `json:"local_address,omitempty"`
+	// BytesToRemote and BytesFromRemote are volumes, never content. They are
+	// named from the audited host's point of view, so they read the same way
+	// for a forwarded connection and a proxied one.
+	BytesToRemote   int64 `json:"bytes_to_remote,omitempty"`
+	BytesFromRemote int64 `json:"bytes_from_remote,omitempty"`
 }
 
 // AuditConfig configures the append-only log.
 type AuditConfig struct {
 	// Path is the JSONL file. Rotated segments live beside it as .1, .2, …
 	Path string
+	// Sandbox is the agent's own fleet name, stamped into every record.
+	//
+	// It is here rather than filled in by each call site so that no service
+	// can forget it, and so that adding one does not mean auditing which
+	// records name their host. See [Record.Sandbox].
+	Sandbox string
 	// Enabled turns recording on. A disabled log accepts writes and drops
 	// them, so no call site needs a nil check.
 	Enabled bool
@@ -184,6 +245,9 @@ func (a *Audit) Write(rec Record) error {
 	}
 	if rec.Time.IsZero() {
 		rec.Time = time.Now().UTC()
+	}
+	if rec.Sandbox == "" {
+		rec.Sandbox = a.cfg.Sandbox
 	}
 
 	line, err := json.Marshal(rec)

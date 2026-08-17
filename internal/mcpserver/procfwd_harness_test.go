@@ -31,6 +31,7 @@ import (
 	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // The process and forward tools are tested against the real agent services,
@@ -201,8 +202,9 @@ func helperEnviron() []string { return []string{helperEnv + "=1"} }
 
 // liveAgent is a real agent service set served over bufconn.
 type liveAgent struct {
-	conn     *grpc.ClientConn
-	stateDir string
+	conn      *grpc.ClientConn
+	stateDir  string
+	auditPath string
 }
 
 type liveAgentOptions struct {
@@ -259,11 +261,22 @@ func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
 		},
 	}
 
+	// A real audit log in the state directory. ForwardService refuses to build
+	// without one, deliberately: an agent that can be asked to reach another
+	// host must not be constructible with nowhere to record that it did.
+	auditLog := policy.NewAudit(policy.AuditConfig{
+		Path:    filepath.Join(stateDir, "audit.jsonl"),
+		Sandbox: liveSandboxName,
+		Enabled: true,
+	})
+	t.Cleanup(func() { _ = auditLog.Close() })
+
 	deps := agent.Deps{
 		Config:    cfg,
 		Jail:      jail.Unconfined(),
 		Log:       slog.New(slog.NewTextHandler(&testWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		Status:    agent.NewStatus(),
+		Audit:     auditLog,
 		Version:   "0.0.0-test",
 		StartedAt: time.Now(),
 	}
@@ -307,7 +320,7 @@ func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
 		}
 	})
 
-	return &liveAgent{conn: conn, stateDir: stateDir}
+	return &liveAgent{conn: conn, stateDir: stateDir, auditPath: auditLog.Path()}
 }
 
 // reapEverything force-removes every process the agent is tracking.

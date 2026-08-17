@@ -3,12 +3,16 @@ package mcpserver_test
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +22,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // The agent under test runs in this process, so "the sandbox's loopback" is
@@ -481,6 +486,115 @@ func TestForward_ReopeningOnADifferentLocalPortSaysWhatToDo(t *testing.T) {
 	})
 	assert.Contains(t, msg, first.LocalAddress)
 	assert.Contains(t, msg, "stop=true")
+}
+
+// ----------------------------------------------------------- the record
+
+// End to end: a forward the operator permitted to leave the machine produces
+// an audit record naming what was asked for, what it became, and how much went
+// through — and a forward to the sandbox's own loopback produces none.
+func TestForward_NonLoopbackForwardIsAudited(t *testing.T) {
+	// "localhost" on the allow list is the operator having listed a host by
+	// name. It takes the same path a real off-box target does — listed hosts
+	// are dialed by name and audited whatever they resolve to — while still
+	// reaching a server this test can stand up.
+	f := newLiveFixture(t, liveAgentOptions{forwardAllowedHosts: []string{"localhost"}})
+	const body = "audited response"
+	remote := startHTTPServer(t, body)
+
+	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+		"remote_port": remote.port,
+		"remote_host": "localhost",
+	})
+	require.Equal(t, body, httpGet(t, "http://"+out.LocalAddress+"/"))
+
+	var rec policy.Record
+	eventually(t, 10*time.Second, "the connection's audit record", func() bool {
+		for _, candidate := range auditRecords(t, f.agent.auditPath) {
+			if candidate.BytesToRemote > 0 {
+				rec = candidate
+				return true
+			}
+		}
+		return false
+	})
+
+	assert.Equal(t, "sandboxd.v1.ForwardService/Forward", rec.RPC)
+	assert.Equal(t, policy.OutcomeOK, rec.Outcome)
+	assert.Equal(t, liveSandboxName, rec.Sandbox)
+	assert.Equal(t, "localhost", rec.RemoteHost, "what the caller asked for")
+	assert.Equal(t, uint32(remote.port), rec.RemotePort) //nolint:gosec // a kernel-assigned port is in range
+	assert.NotEmpty(t, rec.ResolvedAddress, "what it became")
+	assert.NotEmpty(t, rec.LocalAddress)
+	assert.Positive(t, rec.BytesToRemote, "the request")
+	assert.Positive(t, rec.BytesFromRemote, "the response")
+
+	// The body went through the forward and is nowhere in the log.
+	raw, err := os.ReadFile(f.agent.auditPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), body)
+}
+
+// A refusal is recorded too, from the tool call that caused it.
+func TestForward_RefusedNonLoopbackForwardIsAudited(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{})
+
+	msg := f.liveFails("sandbox_forward", map[string]any{
+		"remote_port": 8080,
+		"remote_host": "192.0.2.1",
+	})
+	require.Contains(t, msg, "allowed_hosts")
+
+	var rec policy.Record
+	eventually(t, 10*time.Second, "the refusal's audit record", func() bool {
+		got := auditRecords(t, f.agent.auditPath)
+		if len(got) == 0 {
+			return false
+		}
+		rec = got[0]
+		return true
+	})
+	assert.Equal(t, policy.OutcomeDenied, rec.Outcome)
+	assert.Equal(t, "forward.allowed_hosts", rec.Rule)
+	assert.Equal(t, "192.0.2.1", rec.RemoteHost)
+	assert.Equal(t, uint32(8080), rec.RemotePort)
+}
+
+// A loopback forward is a convenience on a host the caller already has exec
+// on, and it stays out of the log so the pivots in it remain findable.
+func TestForward_LoopbackForwardIsNotAudited(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{})
+	remote := startHTTPServer(t, "not audited")
+
+	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	require.Equal(t, "not audited", httpGet(t, "http://"+out.LocalAddress+"/"))
+
+	// Given time to be wrong: the assertion is that nothing arrives, so it
+	// has to wait long enough for something to have arrived if it were going
+	// to.
+	time.Sleep(500 * time.Millisecond)
+	assert.Empty(t, auditRecords(t, f.agent.auditPath))
+}
+
+// auditRecords reads the agent's audit log.
+func auditRecords(t *testing.T, path string) []policy.Record {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	require.NoError(t, err)
+
+	var out []policy.Record
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec policy.Record
+		require.NoErrorf(t, json.Unmarshal([]byte(line), &rec), "audit line is not JSON: %s", line)
+		out = append(out, rec)
+	}
+	return out
 }
 
 // --------------------------------------------------------------- goleak

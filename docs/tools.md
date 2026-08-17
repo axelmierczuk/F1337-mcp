@@ -505,6 +505,13 @@ by a process that is gone.
   host and requires *every* address it resolves to to be loopback, then dials
   the address that passed.
 
+**Non-loopback connections are audited.** Every connection to a target that is
+not the sandbox's own loopback appends a line to the agent's audit log —
+succeeded, refused, or failed — carrying the principal, the requested host and
+port, the address actually dialed, and the bytes each way. Never the bytes
+themselves. Loopback forwards are not recorded. See
+[security.md](security.md#the-pivot-surface).
+
 The sandbox-side port is checked before a local listener is opened, so a
 forward pointed at a port nothing is serving fails with an error naming it,
 rather than leaving a local port that accepts connections and then drops them.
