@@ -86,11 +86,13 @@ func readWindowsPIDs(t *testing.T, path string) (first, second int) {
 
 // requireGoneWithin waits for a pid to stop existing.
 //
-// Only valid for a process this test holds no handle to. Windows keeps the
-// process object, and with it the pid, until every handle closes, so a
-// process the test itself started through os/exec keeps existing until Wait
-// runs no matter how thoroughly it has been terminated. For those, wait on
-// the channel from sleeperWithExit first.
+// Only valid for a process nothing in this test still holds a handle to.
+// Windows keeps the process object, and with it the pid, until every handle
+// closes, so a process the test itself started through os/exec keeps existing
+// until Wait runs no matter how thoroughly it has been terminated. For those,
+// wait on the channel from sleeperWithExit first — and if a ProcessGroup
+// adopted it, close the group too, because a group holds a handle to its leader
+// for exactly this reason.
 func requireGoneWithin(t *testing.T, pid int, within time.Duration) {
 	t.Helper()
 
@@ -179,6 +181,15 @@ func TestJobObject_ReopenWithUnknownNameDegrades(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatalf("pid %d did not exit after Kill", pid)
 	}
+
+	// os/exec's handle was not the last one. This group holds the other, and
+	// holds it on purpose: a group that can still be asked to signal its leader
+	// must keep that leader's pid out of circulation, or the next Signal names
+	// whatever the kernel handed the number to. Closing the group is what gives
+	// the pid back, and nothing before that does.
+	require.True(t, platform.ProcessExists(pid),
+		"an open group reserves its leader's pid, so pid %d cannot yet be reissued", pid)
+	require.NoError(t, reopened.Close())
 	requireGoneWithin(t, pid, 30*time.Second)
 }
 
