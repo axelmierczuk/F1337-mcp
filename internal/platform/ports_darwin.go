@@ -34,6 +34,12 @@ func listeningPorts(pid int) ([]uint32, error) {
 	// value is a pid formatted from an int.
 	cmd := exec.CommandContext(ctx, "lsof",
 		"-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", strconv.Itoa(pid), "-Fn")
+	// The context bounds the process, not the wait. Output reads the pipe to
+	// EOF, and a descriptor inherited by anything lsof left behind keeps that
+	// pipe open after lsof itself is killed — so without WaitDelay the timeout
+	// above bounds nothing the caller can observe, and a status RPC blocks for
+	// good. There is no deadline anywhere above this call to catch it.
+	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError

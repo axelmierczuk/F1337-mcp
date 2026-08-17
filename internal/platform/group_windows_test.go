@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -207,4 +208,102 @@ func TestOpenProcessGroup_MissingProcessWindows(t *testing.T) {
 
 	_, err := platform.OpenProcessGroup(deadPID(t), "")
 	require.ErrorIs(t, err, platform.ErrProcessNotFound)
+}
+
+// TestJobObject_ClosedGroupRefusesSignals is the Windows half of the rule the
+// Unix suite already pins: a closed group signals nothing, and closing a group
+// created without KillOnClose leaves the process running, because a supervised
+// process is meant to outlive the agent and Close is what the agent does on
+// the way out.
+func TestJobObject_ClosedGroupRefusesSignals(t *testing.T) {
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+
+	pid, _ := sleeperInGroup(t, group)
+	require.NoError(t, group.Close())
+	require.Error(t, group.Signal(platform.SignalTerm))
+	require.Error(t, group.Kill())
+	require.True(t, platform.ProcessExists(pid), "Close without KillOnClose must not kill anything")
+}
+
+// TestJobObject_KillRacingClose covers the job handle's lifetime.
+//
+// Kill and Close are both public, and `defer g.Close()` next to a Kill from a
+// timeout goroutine is the ordinary way to drive this type. Reading g.job out
+// from under the lock and using it afterwards lets Close release the handle
+// mid-Kill; Windows reissues handle values as soon as they are free, so the
+// stale value can name an unrelated object by the time TerminateJobObject
+// reaches it.
+//
+// The interleaving cannot be forced, so this is a stress test rather than a
+// deterministic one: what it pins is the invariant that survives any
+// interleaving. Every outcome must be either success or the closed-group
+// error. An invalid-handle error from TerminateJobObject can only come from a
+// handle that Close had already released, which is precisely the defect.
+func TestJobObject_KillRacingClose(t *testing.T) {
+	for i := range 40 {
+		group, err := platform.NewProcessGroup(platform.GroupConfig{})
+		require.NoError(t, err)
+
+		pid, exited := sleeperInGroup(t, group)
+
+		var wg sync.WaitGroup
+		results := make(chan error, 2)
+		wg.Add(2)
+		go func() { defer wg.Done(); results <- group.Kill() }()
+		go func() { defer wg.Done(); results <- group.Close() }()
+		wg.Wait()
+		close(results)
+
+		for err := range results {
+			if err == nil || strings.Contains(err.Error(), "process group is closed") {
+				continue
+			}
+			t.Fatalf("iteration %d: Kill racing Close returned %v; the only legitimate "+
+				"outcomes are success and the closed-group error, so an error from the "+
+				"job object here means the handle was used after Close released it", i, err)
+		}
+
+		// Close may have won the race, in which case nothing killed the child.
+		_ = group.Close()
+		terminatePID(pid)
+		select {
+		case <-exited:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("iteration %d: pid %d never exited", i, pid)
+		}
+	}
+}
+
+// sleeperInGroup starts a child inside group and returns its pid plus a
+// channel that closes once os/exec has waited on it. The wait matters on
+// Windows: the pid stays valid until the last handle to the process closes.
+func sleeperInGroup(t *testing.T, group *platform.ProcessGroup) (pid int, exited <-chan struct{}) {
+	t.Helper()
+
+	cmd := exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+	group.ConfigureCommand(cmd)
+	require.NoError(t, cmd.Start())
+
+	reaped := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(reaped)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-reaped
+	})
+
+	require.NoError(t, group.Adopt(cmd.Process))
+	return cmd.Process.Pid, reaped
+}
+
+// terminatePID kills a pid outright, without going through ProcessGroup, so a
+// test can clean up after a group that may already be closed. It is best
+// effort: the process may have been killed by the group a moment earlier.
+func terminatePID(pid int) {
+	if p, err := os.FindProcess(pid); err == nil {
+		_ = p.Kill()
+	}
 }

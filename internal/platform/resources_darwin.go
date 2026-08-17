@@ -74,7 +74,13 @@ func runVMStat() (pages, pageSize uint64, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), vmStatTimeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "/usr/bin/vm_stat").Output()
+	cmd := exec.CommandContext(ctx, "/usr/bin/vm_stat")
+	// Bound the wait on the pipe as well as the process: the context kills
+	// vm_stat but Output still reads to EOF, which anything holding the
+	// inherited descriptor can defer indefinitely. See ports_darwin.go.
+	cmd.WaitDelay = time.Second
+
+	out, err := cmd.Output()
 	if err != nil {
 		return 0, 0, false
 	}

@@ -23,7 +23,7 @@ func statProcess(pid int) (ProcessInfo, error) {
 
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid)) //nolint:gosec // pid is positive, checked above
 	if err != nil {
-		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		if processGone(err) {
 			return ProcessInfo{}, notFound(pid)
 		}
 		return ProcessInfo{}, fmt.Errorf("platform: opening pid %d: %w", pid, err)
@@ -41,4 +41,19 @@ func statProcess(pid int) (ProcessInfo, error) {
 		StartTime: time.Unix(0, creation.Nanoseconds()),
 		StartID:   fmt.Sprintf("windows:%d", raw),
 	}, nil
+}
+
+// processGone reports whether an OpenProcess failure means the pid names no
+// process, as opposed to naming one this agent is not allowed to open.
+//
+// The distinction is the one the supervisor's re-adoption logic turns on, and
+// the whole reason ErrProcessNotFound exists rather than a bare OS error.
+// ERROR_INVALID_PARAMETER is what Windows returns for a pid with nothing
+// behind it; ERROR_NOT_FOUND appears for the same condition on some versions.
+// ERROR_ACCESS_DENIED is the one that must never be folded in: it means the
+// process is running and out of reach, and answering "gone" there makes a
+// caller stop trying to stop something that is still going.
+func processGone(err error) bool {
+	return errors.Is(err, windows.ERROR_INVALID_PARAMETER) ||
+		errors.Is(err, windows.ERROR_NOT_FOUND)
 }

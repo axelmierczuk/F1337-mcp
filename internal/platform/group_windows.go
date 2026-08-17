@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -68,12 +69,19 @@ func newProcessGroup(cfg GroupConfig) (*ProcessGroup, error) {
 	if cfg.KillOnClose {
 		var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 		info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-		if _, err := windows.SetInformationJobObject(
+		// SetInformationJobObject takes the struct as a bare uintptr, so the
+		// compiler stops tracking it as a pointer at the conversion and nothing
+		// keeps info alive for the duration of the call. KeepAlive is what
+		// supplies the guarantee that the argument-list rule for unsafe.Pointer
+		// gives only to calls made directly to an assembly implementation.
+		_, err := windows.SetInformationJobObject(
 			job,
 			windows.JobObjectExtendedLimitInformation,
 			uintptr(unsafe.Pointer(&info)),
 			uint32(unsafe.Sizeof(info)),
-		); err != nil {
+		)
+		runtime.KeepAlive(&info)
+		if err != nil {
 			_ = windows.CloseHandle(job)
 			return nil, fmt.Errorf("platform: setting kill-on-close on job object: %w", err)
 		}
@@ -99,7 +107,13 @@ func openProcessGroup(pid int, name string) (*ProcessGroup, error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: invalid job object name %q: %w", name, err)
 	}
+	// LazyProc.Call is an ordinary Go function, so converting namePtr inside
+	// its argument list does not pin the string the way the same conversion
+	// would in a direct syscall.Syscall call. Nothing reads namePtr after this
+	// line, so without KeepAlive the collector is free to reclaim the UTF-16
+	// buffer while OpenJobObjectW is reading it.
 	handle, _, _ := procOpenJobObject.Call(uintptr(jobObjectAllAccess), 0, uintptr(unsafe.Pointer(namePtr)))
+	runtime.KeepAlive(namePtr)
 	if handle == 0 {
 		// The job is gone: every handle to it closed, which on a job created
 		// without kill-on-close leaves the processes running but unmanaged.
@@ -125,8 +139,11 @@ func processInJob(job windows.Handle, pid uint32) bool {
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
+	// result is written by the kernel, so it must still be where it was when
+	// its address was taken. See the KeepAlive note in openProcessGroup.
 	var result int32
 	r, _, _ := procIsProcessInJb.Call(uintptr(h), uintptr(job), uintptr(unsafe.Pointer(&result)))
+	runtime.KeepAlive(&result)
 	return r != 0 && result != 0
 }
 
@@ -223,26 +240,35 @@ func (g *ProcessGroup) GroupID() int { return 0 }
 // can only be sent to process group zero, which includes the agent.
 //
 // SignalHup, SignalUSR1 and SignalUSR2 return ErrSignalUnsupported.
+//
+// The lock is held across the whole call rather than only across the field
+// read. g.job is a kernel handle, and copying it out before releasing the lock
+// leaves a window in which Close can release it: the value then names nothing,
+// or — because Windows reissues handle values as soon as they are free — names
+// whatever object the process opened next. Terminating an unrelated job object
+// because a Kill and a deferred Close overlapped is a worse outcome than
+// either failing or blocking, and `defer g.Close()` beside a Kill from a
+// timeout goroutine is the ordinary way to use this type. The Unix
+// implementation needs no equivalent because it holds no OS resource.
 func (g *ProcessGroup) Signal(sig Signal) error {
 	g.mu.Lock()
-	job, pid, closed := g.job, g.pid, g.closed
-	g.mu.Unlock()
+	defer g.mu.Unlock()
 
-	if closed {
+	if g.closed {
 		return errors.New("platform: process group is closed")
 	}
-	if pid == 0 {
+	if g.pid == 0 {
 		return ErrNoProcess
 	}
 
 	switch sig {
 	case SignalInt:
-		if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, pid); err != nil {
-			return fmt.Errorf("platform: sending CTRL_BREAK_EVENT to pid %d: %w", pid, err)
+		if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, g.pid); err != nil {
+			return fmt.Errorf("platform: sending CTRL_BREAK_EVENT to pid %d: %w", g.pid, err)
 		}
 		return nil
 	case SignalTerm, SignalKill:
-		return terminate(job, pid)
+		return terminate(g.job, g.pid)
 	case SignalUnspecified, SignalHup, SignalUSR1, SignalUSR2:
 		return fmt.Errorf("%w: %s", ErrSignalUnsupported, sig)
 	default:
@@ -287,9 +313,16 @@ func terminateProcess(pid uint32) error {
 	h, err := windows.OpenProcess(
 		windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		// The pid is not openable at all, which means every handle to it has
-		// closed and it is well and truly gone.
-		return fmt.Errorf("platform: pid %d: %w", pid, ErrProcessNotFound)
+		// Only the errors that actually mean "no such process" may be reported
+		// as one. An OpenProcess that fails because this agent may not touch
+		// the process — the re-adoption path asks about pids it no longer owns
+		// — says the process is there and alive, and reporting that as
+		// ErrProcessNotFound tells the supervisor to stop trying and mark a
+		// running process dead. See processGone.
+		if processGone(err) {
+			return fmt.Errorf("platform: pid %d: %w", pid, ErrProcessNotFound)
+		}
+		return fmt.Errorf("platform: opening pid %d to terminate it: %w", pid, err)
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
