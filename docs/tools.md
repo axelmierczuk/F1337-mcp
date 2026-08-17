@@ -53,12 +53,21 @@ Does not enroll. Enrollment mints credentials and is an operator action via
 ### `sandbox_remove`
 Deregister a sandbox locally. Does not uninstall the agent.
 
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `name` | string | **Required.** Sandbox name or handle. |
+
+Clears the sticky selection of **every** client pointing at it, not just the
+caller's — a selection left aimed at a sandbox that no longer exists is worse
+than no selection.
+
 ### `sandbox_info`
 Full detail for one sandbox: platform, kernel, CPU and memory, disk, detected
 toolchains, allowed roots, agent version and uptime, running process count.
 
 | Argument | Type | Notes |
 | --- | --- | --- |
+| `sandbox` | string | Name or handle. Defaults to the current selection. |
 | `include_toolchains` | bool | Probes the filesystem; measurably slower. |
 
 ---

@@ -1,0 +1,115 @@
+package tools
+
+import (
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+)
+
+func TestHealthString(t *testing.T) {
+	for status, want := range map[sandboxdv1.HealthResponse_Status]string{
+		sandboxdv1.HealthResponse_STATUS_SERVING:     healthServing,
+		sandboxdv1.HealthResponse_STATUS_DEGRADED:    healthDegraded,
+		sandboxdv1.HealthResponse_STATUS_DRAINING:    healthDraining,
+		sandboxdv1.HealthResponse_STATUS_UNSPECIFIED: healthUnknown,
+	} {
+		assert.Equal(t, want, healthString(status))
+	}
+}
+
+// TestPlatformString: a sandbox that has never been probed has no platform,
+// and rendering "/" for it would read as a path.
+func TestPlatformString(t *testing.T) {
+	assert.Equal(t, "linux/amd64", platformString(registry.Platform{OS: "linux", Arch: "amd64"}))
+	assert.Equal(t, "linux", platformString(registry.Platform{OS: "linux"}))
+	assert.Equal(t, "amd64", platformString(registry.Platform{Arch: "amd64"}))
+	assert.Empty(t, platformString(registry.Platform{}))
+}
+
+func TestRelativeTime(t *testing.T) {
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+
+	assert.Equal(t, "never", relativeTime(time.Time{}, now))
+	assert.Equal(t, "30s ago", relativeTime(now.Add(-30*time.Second), now))
+	assert.Equal(t, "5m ago", relativeTime(now.Add(-5*time.Minute), now))
+	assert.Equal(t, "3h ago", relativeTime(now.Add(-3*time.Hour), now))
+	assert.Equal(t, "2d ago", relativeTime(now.Add(-48*time.Hour), now))
+
+	// A sandbox whose clock runs ahead of ours must not report a negative
+	// age, which reads as a bug in the tool rather than in the clock.
+	assert.Equal(t, "0s ago", relativeTime(now.Add(time.Minute), now))
+}
+
+func TestHumanBytes(t *testing.T) {
+	assert.Empty(t, humanBytes(0), "an unreported size is omitted, not rendered as zero")
+	assert.Equal(t, "512 B", humanBytes(512))
+	assert.Equal(t, "1.0 KiB", humanBytes(1024))
+	assert.Equal(t, "16.0 GiB", humanBytes(16<<30))
+	assert.Equal(t, "2.0 TiB", humanBytes(2<<40))
+}
+
+func TestHumanDuration(t *testing.T) {
+	assert.Empty(t, humanDuration(0))
+	assert.Empty(t, humanDuration(-time.Hour))
+	assert.Equal(t, "45s", humanDuration(45*time.Second))
+	assert.Equal(t, "5m30s", humanDuration(5*time.Minute+30*time.Second))
+	assert.Equal(t, "2h15m", humanDuration(2*time.Hour+15*time.Minute))
+	assert.Equal(t, "3d4h", humanDuration(76*time.Hour))
+}
+
+func TestParseLabelFilter(t *testing.T) {
+	key, value, err := parseLabelFilter(" arch = arm64 ")
+	require.NoError(t, err)
+	assert.Equal(t, "arch", key)
+	assert.Equal(t, "arm64", value)
+
+	// An empty value is a legitimate filter: "the label is set to nothing".
+	key, value, err = parseLabelFilter("gpu=")
+	require.NoError(t, err)
+	assert.Equal(t, "gpu", key)
+	assert.Empty(t, value)
+
+	for _, bad := range []string{"arm64", "", "=arm64"} {
+		_, _, err := parseLabelFilter(bad)
+		require.Errorf(t, err, "%q should be rejected", bad)
+		assert.Contains(t, err.Error(), "key=value")
+	}
+}
+
+// TestCheckAddress_RejectsWhatCannotBeDialed. The host half becomes the TLS
+// server name the agent's certificate is verified against, so an address that
+// is not host:port fails later as a handshake error naming neither.
+func TestCheckAddress_RejectsWhatCannotBeDialed(t *testing.T) {
+	for _, good := range []string{"build-box:8722", "build-box.internal:8722", "127.0.0.1:8722", "[::1]:8722", "host:65535"} {
+		assert.NoErrorf(t, checkAddress(good), "%q should be accepted", good)
+	}
+	for _, bad := range []string{"", "build-box", "build-box:", ":8722", "build-box:0", "build-box:65536", "build-box:-1", "https://build-box:8722", "build/box:8722", "build box:8722"} {
+		assert.Errorf(t, checkAddress(bad), "%q should be rejected", bad)
+	}
+}
+
+func TestCheckSandboxName(t *testing.T) {
+	for _, good := range []string{"build-box", "gpu_01", "a", "host.internal"} {
+		assert.NoErrorf(t, checkSandboxName(good), "%q should be accepted", good)
+	}
+	for _, bad := range []string{"", " ", "build box", "build\tbox", "café", "sbx_deadbeef"} {
+		assert.Errorf(t, checkSandboxName(bad), "%q should be rejected", bad)
+	}
+}
+
+// TestShortDetail keeps one unreachable sandbox from turning a twenty-machine
+// listing into a wall of text.
+func TestShortDetail(t *testing.T) {
+	assert.Equal(t, "connection refused", shortDetail(errors.New("connection refused")))
+
+	long := shortDetail(errors.New(strings.Repeat("x", 400)))
+	assert.LessOrEqual(t, len(long), 164)
+	assert.Contains(t, long, "…")
+}
