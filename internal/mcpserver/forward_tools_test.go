@@ -387,6 +387,38 @@ func TestForward_RemovingTheSandboxClosesItsForwards(t *testing.T) {
 	})
 }
 
+// And it closes them *before* it drops the channel they run over.
+//
+// The other order leaves a window in which the listener is still accepting and
+// every connection it takes opens a stream on a channel that has just closed:
+// the accepts-and-then-drops symptom, produced in the middle of the code that
+// exists to prevent it, and reached by every connection that arrives while
+// sandbox_remove is running. The window is small, which is exactly why it would
+// be found by a user and not by a test that only checks the end state.
+func TestForward_RemovingTheSandboxClosesForwardsBeforeTheChannel(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{})
+	remote := startHTTPServer(t, "ordering")
+
+	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	require.Equal(t, "ordering", httpGet(t, "http://"+out.LocalAddress+"/"))
+
+	// Asked at the moment the channel is dropped: is the port the forward was
+	// holding already free? It can only be if the listener was closed first.
+	var listenerClosedFirst bool
+	f.clients.onRemove = func(string) {
+		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(out.LocalPort)))
+		if err != nil {
+			return
+		}
+		_ = lis.Close()
+		listenerClosedFirst = true
+	}
+
+	liveOK[tools.RemoveResult](f, "sandbox_remove", map[string]any{"name": liveSandboxName})
+	assert.True(t, listenerClosedFirst,
+		"the forward's listener was still accepting when its channel was dropped, so a connection arriving then would be accepted onto a dead channel")
+}
+
 func TestForward_StopWithNoSuchForwardListsWhatIsOpen(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "open")

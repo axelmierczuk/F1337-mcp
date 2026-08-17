@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 )
@@ -153,6 +155,79 @@ func TestStreamToLocal_EndsOnStreamEOF(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------- the end of a connection
+
+// carriedStream is one gRPC stream's worth of scripted behaviour: an open, then
+// whatever Recv is told to end with. Send never fails, standing in for a
+// transport that has not noticed anything yet.
+type carriedStream struct {
+	grpc.ClientStream
+	opened bool
+	// endWith is returned by the second Recv. io.EOF is the agent's handler
+	// having returned; anything else is the RPC failing under the connection.
+	endWith error
+}
+
+func (s *carriedStream) Send(*sandboxdv1.ForwardRequest) error { return nil }
+func (s *carriedStream) CloseSend() error                      { return nil }
+
+func (s *carriedStream) Recv() (*sandboxdv1.ForwardResponse, error) {
+	if !s.opened {
+		s.opened = true
+		return &sandboxdv1.ForwardResponse{
+			Event: &sandboxdv1.ForwardResponse_Opened{Opened: &sandboxdv1.ForwardOpened{Success: true}},
+		}, nil
+	}
+	return nil, s.endWith
+}
+
+type carriedClient struct{ stream *carriedStream }
+
+func (c *carriedClient) Forward(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], error) {
+	return c.stream, nil
+}
+
+// A connection whose stream has ended must be released even when the local
+// client has nothing more to say.
+//
+// The local client here is idle, which is what a browser holding a keep-alive
+// connection through a forward is: it is parked waiting to be spoken to, and
+// the send pump is parked in conn.Read waiting for it. Nothing in that pair
+// ever unblocks on its own, so a carry that joins both without ending the
+// connection holds one goroutine, one descriptor and one stream for the life of
+// the forward — per connection, on exactly the long-lived forward where they
+// accumulate. An agent restart under an idle connection is all it takes.
+func TestCarry_ReleasesAConnectionWhoseStreamEnded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  error
+	}{
+		{"the stream failed", errors.New("the agent went away mid-connection")},
+		{"the stream ended", io.EOF},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The local client end is held open and read from by nobody: the
+			// point is that this side gives up without it.
+			client, server := tcpPair(t)
+			_ = client
+
+			r := NewRegistrar(nil, Deps{})
+			f := &activeForward{key: forwardKey{sandbox: "build-box", remotePort: 3000}, localAddr: "127.0.0.1:1"}
+
+			done := make(chan error, 1)
+			go func() {
+				done <- r.carry(t.Context(), f, &carriedClient{stream: &carriedStream{endWith: tc.end}}, server)
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(20 * time.Second):
+				t.Fatal("carry never returned: the connection, its socket and both its goroutines are held until the whole forward is torn down")
+			}
+		})
+	}
+}
+
 // ------------------------------------------------------------- the stop call
 
 // The instruction a forward hands back has to be the one that works. remote_host
@@ -256,6 +331,57 @@ func TestAcceptLoop_RetriesATransientAcceptFailure(t *testing.T) {
 	_, _, lastErr := f.stats()
 	assert.Contains(t, lastErr, "accepting a local connection",
 		"the failure must be visible in the forward's listing rather than only in a log")
+}
+
+// alwaysFailingListener never recovers and never reports itself closed: a
+// descriptor limit that does not clear, which is the case the retry must not
+// turn into a forward that cannot be torn down.
+type alwaysFailingListener struct{ flakyListener }
+
+func (l *alwaysFailingListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls++
+	return nil, &net.OpError{Op: "accept", Err: syscall.EMFILE}
+}
+
+// A forward torn down while its accept loop is backing off has to come apart at
+// once.
+//
+// activeForward.close closes the listener, cancels, and then joins — so a
+// backoff that only waited out its timer would hold sandbox_forward(stop=true),
+// sandbox_remove and the MCP server's own shutdown for up to the cap, on a
+// listener that has already been closed. The retry is what makes a transient
+// failure survivable; the cancellation is what stops it making teardown wait.
+func TestAcceptLoop_TearingDownDuringABackoffReturnsAtOnce(t *testing.T) {
+	lis := &alwaysFailingListener{}
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &activeForward{
+		key:       forwardKey{sandbox: "build-box", remotePort: 3000},
+		localAddr: "127.0.0.1:1",
+		listener:  lis,
+		cancel:    cancel,
+	}
+	r := NewRegistrar(nil, Deps{})
+
+	f.wg.Add(1)
+	go r.acceptLoop(ctx, f, nil, nil)
+
+	// Let it climb to the cap, so a loop that waited out its timer would be
+	// waiting out the longest one.
+	require.Eventually(t, func() bool { return lis.accepts() > 8 }, 20*time.Second, 5*time.Millisecond,
+		"the loop must keep retrying a failure that does not clear")
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		f.close()
+	}()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("tearing down a forward blocked on its accept loop's backoff")
+	}
 }
 
 // ------------------------------------------------------------ the listing

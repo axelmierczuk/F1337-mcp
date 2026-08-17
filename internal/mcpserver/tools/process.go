@@ -410,7 +410,7 @@ type ReadyProbeArgs struct {
 	// UptimeSeconds is how long the process must merely survive.
 	UptimeSeconds float64 `json:"uptime_seconds,omitempty" jsonschema:"ready once the process has stayed alive this many seconds; the weakest probe, for a process with nothing better to check"`
 	// TimeoutSeconds bounds the wait.
-	TimeoutSeconds float64 `json:"timeout_seconds,omitempty" jsonschema:"how long to wait for the probe to pass before reporting ready_error; defaults to the agent's timeout (30s)"`
+	TimeoutSeconds float64 `json:"timeout_seconds,omitempty" jsonschema:"how long to wait for the probe to pass before reporting ready_error; defaults to the agent's timeout (30s) and is capped at one hour"`
 }
 
 // toProto validates the probe and converts it. Exactly one condition must be
@@ -420,6 +420,18 @@ func (p *ReadyProbeArgs) toProto() (*sandboxdv1.ReadyProbe, error) {
 	if p == nil {
 		return nil, nil
 	}
+	// The two seconds-valued arguments, checked before anything is built from
+	// them. They are the durations this side sizes the RPC deadline from, and a
+	// negative one is a caller mistake rather than a value to clamp silently —
+	// the integer seconds arguments on signal and restart are refused the same
+	// way. secondsToDuration bounds the other end.
+	if p.UptimeSeconds < 0 {
+		return nil, fmt.Errorf("ready_probe.uptime_seconds %g is negative", p.UptimeSeconds)
+	}
+	if p.TimeoutSeconds < 0 {
+		return nil, fmt.Errorf("ready_probe.timeout_seconds %g is negative", p.TimeoutSeconds)
+	}
+
 	var set []string
 	out := &sandboxdv1.ReadyProbe{}
 	if p.LogPattern != "" {
@@ -456,7 +468,21 @@ func (p *ReadyProbeArgs) toProto() (*sandboxdv1.ReadyProbe, error) {
 	return out, nil
 }
 
+// secondsToDuration converts a seconds-valued argument, bounded.
+//
+// The bound is the same maxSecondsArgument every integer seconds argument gets,
+// and it is here for the same reason: an hour is far past anything useful, and
+// what it really stops is the multiplication. A float64 that large converts to
+// an int64 that is implementation-defined when it does not fit — saturating to
+// the maximum on arm64, wrapping to the minimum on amd64 — so an unbounded
+// timeout_seconds gives an RPC deadline of either three centuries or a duration
+// that has already expired, and which one depends on the workstation's
+// architecture. Negative values are refused by the caller rather than clamped,
+// because a negative timeout is a mistake worth naming.
 func secondsToDuration(s float64) time.Duration {
+	if s > maxSecondsArgument {
+		s = maxSecondsArgument
+	}
 	return time.Duration(s * float64(time.Second))
 }
 

@@ -516,19 +516,27 @@ func (r *Registrar) sandboxRemove(_ context.Context, _ *mcp.CallToolRequest, in 
 	if err := d.Fleet.Remove(sb.Name); err != nil {
 		return RemoveResult{}, "", err
 	}
-	if d.Clients != nil {
-		d.Clients.Remove(sb.Name)
-	}
-	// And the forwards that reached it. A forward is owned by this process
-	// rather than by the call that opened it, so nothing else would ever close
-	// this one — and removing the sandbox closes the pooled channel underneath
-	// it, leaving a local port that accepts a connection and then drops it.
-	// That is the one outcome a caller cannot diagnose, which is why the tool
-	// preflights against it when opening a forward; arriving at it from this
-	// end is no better.
+	// The forwards that reached it, before the channel they run over. A forward
+	// is owned by this process rather than by the call that opened it, so
+	// nothing else would ever close this one — and removing the sandbox closes
+	// the pooled channel underneath it, leaving a local port that accepts a
+	// connection and then drops it. That is the one outcome a caller cannot
+	// diagnose, which is why the tool preflights against it when opening a
+	// forward; arriving at it from this end is no better.
+	//
+	// Order matters, and it is this way round: dropping the channel first
+	// leaves a window in which the listener is still accepting and every
+	// connection it takes opens a stream on a channel that has just closed —
+	// the accepts-and-then-drops symptom, reached in the middle of the code
+	// that exists to prevent it. Closing the forwards first also means the
+	// per-connection goroutines this joins are joined while the transport they
+	// are using is still there.
 	var forwardsClosed []string
 	if r.forwards != nil {
 		forwardsClosed = r.forwards.stopForSandbox(sb.Name)
+	}
+	if d.Clients != nil {
+		d.Clients.Remove(sb.Name)
 	}
 
 	note := "Deregistered locally only. The agent is still installed and running on the host; uninstalling it is a separate operator action."

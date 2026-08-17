@@ -4,6 +4,12 @@
 # Support/sandboxd/agent.yaml (macOS), or %ProgramData%\sandboxd\agent.yaml
 # (Windows) by `sandboxd-agent enroll`.
 
+# The name this host enrolled under, written by `enroll` from the name the
+# control plane assigned. Every audit record below is stamped with it, and a
+# record shipped off-box that does not name its machine cannot be acted on — so
+# a hand-written configuration that omits this loses that, silently.
+name: "build-box"
+
 # Address the agent serves gRPC on. The MCP server dials this.
 listen: "0.0.0.0:8722"
 

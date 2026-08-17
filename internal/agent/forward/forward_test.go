@@ -63,7 +63,7 @@ func newService(t *testing.T, cfg agent.ForwardConfig, tune ...func(*policy.Audi
 	// before.
 	t.Cleanup(func() { _ = auditLog.Close() })
 
-	svc, err := New(agent.Deps{
+	built, err := New(agent.Deps{
 		Config:  &agent.Config{Forward: cfg},
 		Log:     slog.New(slog.DiscardHandler),
 		Status:  agent.NewStatus(),
@@ -71,7 +71,28 @@ func newService(t *testing.T, cfg agent.ForwardConfig, tune ...func(*policy.Audi
 		Version: "test",
 	})
 	require.NoError(t, err)
-	return svc.(*Service)
+	svc, ok := built.(*Service)
+	require.True(t, ok)
+
+	// Wait for the handlers before the log they write to is closed.
+	//
+	// Registered after the two cleanups above, so it runs before them: the
+	// record is written on the way out of Forward, and several of these tests
+	// deliberately walk away from a stream rather than draining it. A handler
+	// still unwinding when Audit.Close lands reopens the file — Close
+	// documents that further writes do — and recreates it inside a temp
+	// directory RemoveAll is already walking, which surfaces as "directory not
+	// empty" in whichever test the scheduler picked, not in the one that left
+	// the stream open. active drops only after record returns, so an idle
+	// service is one whose records are all on disk.
+	t.Cleanup(func() {
+		deadline := time.Now().Add(30 * time.Second)
+		for svc.active.Load() > 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		assert.Zero(t, svc.active.Load(), "a forwarded connection outlived the test that opened it")
+	})
+	return svc
 }
 
 // records returns everything the service has written to its audit log.
@@ -297,6 +318,66 @@ func TestForward_RemoteCloseArrivesAsACloseEvent(t *testing.T) {
 			break
 		}
 	}
+}
+
+// A sandbox-side socket that fails, rather than closing cleanly, has to be
+// reported to the caller too.
+//
+// The two directions of this stream are joined before the handler returns, and
+// the request direction is parked in stream.Recv waiting for a caller with no
+// reason to speak — an idle keep-alive connection through a forward is exactly
+// that. Saying nothing holds the connection, its socket, both its goroutines
+// and its slot against forward.max_connections until the caller happens to send
+// something, on a connection that can no longer carry anything. A server that
+// crashes mid-request resets its socket, which is the ordinary way a forwarded
+// connection dies rather than an exotic one.
+func TestForward_AFailedSandboxSideSocketIsReportedToTheCaller(t *testing.T) {
+	port := echoServer(t)
+
+	// The failure is injected rather than provoked with a reset. A server that
+	// crashes mid-request is what produces one in the field, but which of
+	// ECONNRESET and a clean EOF the kernel hands back is the platform's
+	// choice — and an EOF takes the clean-close path, so a test that provoked
+	// it would pass against the old behaviour on whichever platform decided to
+	// be tidy. Injecting the error asserts the branch itself, everywhere.
+	svc := newService(t, agent.ForwardConfig{MaxConnections: 4})
+	svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			return nil, err
+		}
+		return &deadReadConn{Conn: conn}, nil
+	}
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	stream, opened, err := open(ctx, t, client, port, "")
+	require.NoError(t, err)
+	require.True(t, opened.GetSuccess(), opened.GetError())
+
+	// The caller sends nothing after the open. It learns the connection is over
+	// because the agent tells it, not because it asked.
+	resp, err := stream.Recv()
+	require.NoError(t, err, "the caller must be told the sandbox-side connection failed, not left waiting on it")
+	require.NotNil(t, resp.GetClose(), "the failure must arrive as a close event: %v", resp.GetEvent())
+	assert.Contains(t, resp.GetClose().GetReason(), "failed")
+
+	// And a caller that acts on it — the MCP server's local end shuts its write
+	// half, the local client sees EOF and hangs up, and that becomes a
+	// CloseSend — releases everything the connection held.
+	require.NoError(t, stream.CloseSend())
+	eventually(t, func() bool { return svc.active.Load() == 0 })
+}
+
+// deadReadConn is a connection whose read side has failed the way a peer that
+// reset it does: not io.EOF, not net.ErrClosed, and not recoverable.
+type deadReadConn struct{ net.Conn }
+
+func (c *deadReadConn) Read([]byte) (int, error) {
+	return 0, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
 }
 
 // -------------------------------------------------------------- failures

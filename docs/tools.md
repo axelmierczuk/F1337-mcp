@@ -151,7 +151,7 @@ Spawn a supervised process.
 | `name` | string | **Required.** Label, e.g. `web-dev`. Must be unique among running processes unless `replace_existing`. |
 | `working_dir` | string | |
 | `env` | string[] | |
-| `ready_probe` | object | Exactly one of `log_pattern`, `tcp_port`, `http_get_url`, `uptime_seconds`, plus `timeout_seconds`. |
+| `ready_probe` | object | Exactly one of `log_pattern`, `tcp_port`, `http_get_url`, `uptime_seconds`, plus `timeout_seconds`. Both seconds arguments are capped at an hour; a negative one is refused. |
 | `wait_for_ready` | bool | Block until the probe passes. Defaults to **true whenever `ready_probe` is set**. |
 | `restart_policy` | enum | `never` (default), `on_failure`, `always`. |
 | `max_restarts` | int | |

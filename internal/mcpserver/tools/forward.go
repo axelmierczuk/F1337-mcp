@@ -688,14 +688,24 @@ func (r *Registrar) carry(ctx context.Context, f *activeForward, client sandboxd
 		sendErr = localToStream(conn, stream)
 	}()
 
-	// Sandbox to local. It does not stop the other direction either: a server
-	// that closed its write half has not necessarily stopped reading, and a
-	// client still sending must still be delivered. Tearing the forward down
-	// cancels the context, which closes this socket underneath both pumps, so
-	// neither waits forever on a peer with nothing left to say.
+	// Sandbox to local. A close *event* does not stop the other direction: a
+	// server that closed its write half has not necessarily stopped reading,
+	// and a client still sending must still be delivered.
+	//
+	// The stream *ending* is different, and cancelling on it is what stops this
+	// connection outliving its own transport. Once this pump returns there is
+	// no stream left — the agent's handler has returned, so it has already
+	// consumed everything the caller sent, or the RPC failed outright — and
+	// nothing the local client says afterwards can reach the sandbox. Without
+	// the cancel, the other pump stays parked in conn.Read on a client with no
+	// reason to speak: one goroutine, one descriptor and one gRPC stream held
+	// until the whole forward is torn down, per connection, on exactly the
+	// long-lived forward where they accumulate. An agent restart under an idle
+	// keep-alive connection is all it takes.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer cancel()
 		recvErr = streamToLocal(stream, conn)
 	}()
 

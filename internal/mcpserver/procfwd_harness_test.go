@@ -363,6 +363,11 @@ func reapEverything(t *testing.T, conn *grpc.ClientConn) {
 // liveClients is a tools.Clients backed by one real agent over bufconn.
 type liveClients struct {
 	conn *grpc.ClientConn
+
+	// onRemove observes the moment the pooled channel is dropped, so a test can
+	// assert on what has already happened by then. Nil for every test that does
+	// not care.
+	onRemove func(string)
 }
 
 func (c *liveClients) Host(string, string) (sandboxdv1.HostServiceClient, error) {
@@ -387,7 +392,11 @@ func (c *liveClients) Forward(string, string) (sandboxdv1.ForwardServiceClient, 
 
 func (c *liveClients) Health(string) (client.HealthStatus, bool) { return client.HealthStatus{}, false }
 
-func (c *liveClients) Remove(string) {}
+func (c *liveClients) Remove(name string) {
+	if c.onRemove != nil {
+		c.onRemove(name)
+	}
+}
 
 // ------------------------------------------------------------- MCP fixture
 
@@ -395,6 +404,7 @@ func (c *liveClients) Remove(string) {}
 type liveFixture struct {
 	t       *testing.T
 	agent   *liveAgent
+	clients *liveClients
 	server  *mcpserver.Server
 	session *mcp.ClientSession
 	sandbox string
@@ -408,9 +418,10 @@ func newLiveFixture(t *testing.T, opts liveAgentOptions) *liveFixture {
 	live := startLiveAgent(t, opts)
 	dir := t.TempDir()
 
+	clients := &liveClients{conn: live.conn}
 	server, err := mcpserver.New(mcpserver.Options{
 		ConfigDir: dir,
-		Clients:   &liveClients{conn: live.conn},
+		Clients:   clients,
 		LogWriter: &testWriter{t: t},
 		// Short, because nothing here talks to a real network. A tool that
 		// waits on a probe raises its own deadline above this.
@@ -440,7 +451,7 @@ func newLiveFixture(t *testing.T, opts liveAgentOptions) *liveFixture {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close() })
 
-	return &liveFixture{t: t, agent: live, server: server, session: session, sandbox: liveSandboxName}
+	return &liveFixture{t: t, agent: live, clients: clients, server: server, session: session, sandbox: liveSandboxName}
 }
 
 // call invokes a tool and returns the raw result.

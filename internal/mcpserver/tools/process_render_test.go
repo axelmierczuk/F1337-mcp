@@ -339,6 +339,55 @@ func TestProbeDeadline_FallsBackToTheAgentDefault(t *testing.T) {
 	assert.Equal(t, 30*time.Second, probeDeadline(&sandboxdv1.ReadyProbe{}))
 }
 
+// The probe's two seconds-valued arguments are bounded like every other one.
+//
+// They are floats, and a float64 that does not fit in an int64 converts to a
+// value the spec leaves to the implementation: arm64 saturates to the maximum,
+// amd64 wraps to the minimum. Unbounded, ready_probe.timeout_seconds therefore
+// buys either an RPC deadline three centuries out — a start call that can hang
+// for the life of the process — or one that has already expired, so the call
+// reports a timeout for a start that never left, and which of the two depends
+// on the workstation's architecture. The same argument applies to
+// uptime_seconds, which becomes a duration the agent waits out.
+func TestReadyProbeArgs_BoundsItsSecondsArguments(t *testing.T) {
+	for _, seconds := range []float64{
+		maxSecondsArgument + 1,
+		1e9,
+		9223372030, // just inside int64 nanoseconds, so the deadline arithmetic overflows
+		1e18,       // far outside it, where the conversion itself is implementation-defined
+	} {
+		probe, err := (&ReadyProbeArgs{TCPPort: 3000, TimeoutSeconds: seconds}).toProto()
+		require.NoErrorf(t, err, "timeout_seconds=%g", seconds)
+
+		deadline := probeDeadline(probe)
+		assert.Positivef(t, deadline, "timeout_seconds=%g gave a deadline that has already expired", seconds)
+		assert.LessOrEqualf(t, deadline, maxSecondsArgument*time.Second,
+			"timeout_seconds=%g must be bounded, not taken at its word", seconds)
+		assert.Positivef(t, deadline+followSlack,
+			"timeout_seconds=%g overflows the start call's deadline into the past", seconds)
+
+		uptime, err := (&ReadyProbeArgs{UptimeSeconds: seconds}).toProto()
+		require.NoErrorf(t, err, "uptime_seconds=%g", seconds)
+		assert.Positivef(t, uptime.GetUptime().AsDuration(), "uptime_seconds=%g", seconds)
+		assert.LessOrEqualf(t, uptime.GetUptime().AsDuration(), maxSecondsArgument*time.Second,
+			"uptime_seconds=%g must be bounded", seconds)
+	}
+}
+
+// And a negative one is named rather than silently dropped, the way
+// grace_seconds already is on signal and restart.
+func TestReadyProbeArgs_RejectsNegativeSeconds(t *testing.T) {
+	_, err := (&ReadyProbeArgs{TCPPort: 3000, TimeoutSeconds: -1}).toProto()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout_seconds")
+	assert.Contains(t, err.Error(), "negative")
+
+	_, err = (&ReadyProbeArgs{UptimeSeconds: -1}).toProto()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "uptime_seconds")
+	assert.Contains(t, err.Error(), "negative")
+}
+
 // ------------------------------------------------------------- deadlines
 
 // A graceful stop blocks on the agent for the whole grace period before it

@@ -468,6 +468,26 @@ func socketToStream(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest, s
 					}},
 				})
 			}
+			// A failure is told to the caller too, and for a stronger reason
+			// than a clean close is. The other pump is parked in stream.Recv
+			// waiting for a caller that has no reason to speak — an idle
+			// keep-alive connection through the forward is exactly that — and
+			// this handler joins both before it returns. Saying nothing here
+			// leaves the connection, its socket, its two goroutines and its
+			// slot against forward.max_connections held until the caller
+			// happens to send something, on a connection that can no longer
+			// carry anything. A server that crashes mid-request resets its
+			// socket, so this is the ordinary way a forwarded connection dies.
+			//
+			// The event is the same shape as a clean close because the
+			// protocol has no third one, and the difference is carried in the
+			// reason. The RPC still ends in an error, so the audit record
+			// still says the connection failed.
+			_ = stream.Send(&sandboxdv1.ForwardResponse{
+				Event: &sandboxdv1.ForwardResponse_Close{Close: &sandboxdv1.ForwardClose{
+					Reason: "the sandbox-side connection failed: " + err.Error(),
+				}},
+			})
 			return status.Errorf(codes.Unavailable, "reading from the sandbox-side connection: %v", err)
 		}
 	}
