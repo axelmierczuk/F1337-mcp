@@ -53,30 +53,30 @@ func TestReadCgroupLimits(t *testing.T) {
 		{
 			name: "memory limit on the leaf",
 			files: map[string]string{
-				"proc/self/cgroup": "0::/system.slice/sandboxd.service\n",
-				"sys/fs/cgroup/system.slice/sandboxd.service/memory.max":     "2147483648\n",
-				"sys/fs/cgroup/system.slice/sandboxd.service/memory.current": "536870912\n",
+				"proc/self/cgroup": "0::/system.slice/fleet.service\n",
+				"sys/fs/cgroup/system.slice/fleet.service/memory.max":     "2147483648\n",
+				"sys/fs/cgroup/system.slice/fleet.service/memory.current": "536870912\n",
 			},
 			want: cgroupLimits{MemoryMax: 2147483648, MemoryCurrent: 536870912},
 		},
 		{
 			name: "cpu quota on the leaf",
 			files: map[string]string{
-				"proc/self/cgroup": "0::/system.slice/sandboxd.service\n",
-				"sys/fs/cgroup/system.slice/sandboxd.service/cpu.max": "150000 100000\n",
+				"proc/self/cgroup": "0::/system.slice/fleet.service\n",
+				"sys/fs/cgroup/system.slice/fleet.service/cpu.max": "150000 100000\n",
 			},
 			want: cgroupLimits{CPUQuota: 150000, CPUPeriod: 100000},
 		},
 		{
 			name: "a parent slice is tighter than the leaf",
 			files: map[string]string{
-				"proc/self/cgroup":                                           "0::/system.slice/sandboxd.service\n",
+				"proc/self/cgroup":                                           "0::/system.slice/fleet.service\n",
 				"sys/fs/cgroup/system.slice/memory.max":                      "1073741824\n",
 				"sys/fs/cgroup/system.slice/memory.current":                  "104857600\n",
-				"sys/fs/cgroup/system.slice/sandboxd.service/memory.max":     "4294967296\n",
-				"sys/fs/cgroup/system.slice/sandboxd.service/memory.current": "1048576\n",
+				"sys/fs/cgroup/system.slice/fleet.service/memory.max":     "4294967296\n",
+				"sys/fs/cgroup/system.slice/fleet.service/memory.current": "1048576\n",
 				"sys/fs/cgroup/system.slice/cpu.max":                         "50000 100000\n",
-				"sys/fs/cgroup/system.slice/sandboxd.service/cpu.max":        "400000 100000\n",
+				"sys/fs/cgroup/system.slice/fleet.service/cpu.max":        "400000 100000\n",
 			},
 			want: cgroupLimits{
 				MemoryMax:     1073741824,
@@ -93,11 +93,11 @@ func TestReadCgroupLimits(t *testing.T) {
 			name: "unified line among v1 controller lines",
 			files: map[string]string{
 				"proc/self/cgroup": "12:devices:/user.slice\n" +
-					"5:memory:/system.slice/sandboxd.service\n" +
-					"3:cpu,cpuacct:/system.slice/sandboxd.service\n" +
-					"0::/system.slice/sandboxd.service\n",
-				"sys/fs/cgroup/system.slice/sandboxd.service/memory.max":     "1073741824\n",
-				"sys/fs/cgroup/system.slice/sandboxd.service/memory.current": "104857600\n",
+					"5:memory:/system.slice/fleet.service\n" +
+					"3:cpu,cpuacct:/system.slice/fleet.service\n" +
+					"0::/system.slice/fleet.service\n",
+				"sys/fs/cgroup/system.slice/fleet.service/memory.max":     "1073741824\n",
+				"sys/fs/cgroup/system.slice/fleet.service/memory.current": "104857600\n",
 			},
 			want: cgroupLimits{MemoryMax: 1073741824, MemoryCurrent: 104857600},
 		},
@@ -382,16 +382,16 @@ func TestReadCgroupLimitsV1(t *testing.T) {
 			// matters for the same reason.
 			name: "a parent slice is tighter than the leaf",
 			files: map[string]string{
-				"proc/self/cgroup": "5:memory:/system.slice/sandboxd.service\n" +
-					"3:cpu,cpuacct:/system.slice/sandboxd.service\n",
+				"proc/self/cgroup": "5:memory:/system.slice/fleet.service\n" +
+					"3:cpu,cpuacct:/system.slice/fleet.service\n",
 				"sys/fs/cgroup/memory/system.slice/memory.limit_in_bytes":                   "1073741824\n",
 				"sys/fs/cgroup/memory/system.slice/memory.usage_in_bytes":                   "104857600\n",
-				"sys/fs/cgroup/memory/system.slice/sandboxd.service/memory.limit_in_bytes":  "4294967296\n",
-				"sys/fs/cgroup/memory/system.slice/sandboxd.service/memory.usage_in_bytes":  "1048576\n",
+				"sys/fs/cgroup/memory/system.slice/fleet.service/memory.limit_in_bytes":  "4294967296\n",
+				"sys/fs/cgroup/memory/system.slice/fleet.service/memory.usage_in_bytes":  "1048576\n",
 				"sys/fs/cgroup/cpu,cpuacct/system.slice/cpu.cfs_quota_us":                   "50000\n",
 				"sys/fs/cgroup/cpu,cpuacct/system.slice/cpu.cfs_period_us":                  "100000\n",
-				"sys/fs/cgroup/cpu,cpuacct/system.slice/sandboxd.service/cpu.cfs_quota_us":  "400000\n",
-				"sys/fs/cgroup/cpu,cpuacct/system.slice/sandboxd.service/cpu.cfs_period_us": "100000\n",
+				"sys/fs/cgroup/cpu,cpuacct/system.slice/fleet.service/cpu.cfs_quota_us":  "400000\n",
+				"sys/fs/cgroup/cpu,cpuacct/system.slice/fleet.service/cpu.cfs_period_us": "100000\n",
 			},
 			want: cgroupLimits{
 				MemoryMax: 1073741824, MemoryCurrent: 104857600,

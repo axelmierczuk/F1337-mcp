@@ -95,6 +95,13 @@ func (s *Supervisor) adopt(p persisted) error {
 	r.captureOffsets = p.CaptureOffsets
 	r.stability = p.StartedAt
 	r.adopted = true
+	if p.JobName != "" {
+		// The name the *spawning* agent gave the job, which is the only name the
+		// running job answers to. It differs from the one this agent would
+		// compute whenever the record predates the fleet rebrand, and reopening
+		// the job is how a group signal reaches a re-adopted tree on Windows.
+		r.jobName = p.JobName
+	}
 
 	// The history the previous agent wrote, back into the ring, so a caller
 	// asking for logs after a restart sees the same tail it saw before it.

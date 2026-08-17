@@ -77,7 +77,7 @@ func chownToServiceUser(string, string) error { return nil }
 
 // grantServiceUserAccess is a no-op on Windows, for the same reason.
 //
-// %ProgramData%\sandboxd inherits an ACL that already admits the built-in
+// %ProgramData%\fleet inherits an ACL that already admits the built-in
 // service identities, and there is no Unix-style 0600 to undo: `enroll` writes
 // the key with the same inherited ACL. An install under a custom account has to
 // be granted access by hand — docs/service.md says so.

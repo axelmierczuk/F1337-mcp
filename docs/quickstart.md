@@ -20,7 +20,7 @@ go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
 fleetctl ca init
 ```
 
-Writes the CA key and certificate to `~/.config/sandboxd/ca/`. The signing key
+Writes the CA key and certificate to `~/.config/fleet/ca/`. The signing key
 never leaves this directory, and no MCP tool can read it.
 
 Print the fingerprint to pin during enrollment:
@@ -87,7 +87,7 @@ Add to `mcp.json`:
 ```json
 {
   "mcpServers": {
-    "sandboxd": {
+    "fleet": {
       "command": "fleet-mcp",
       "args": ["serve"]
     }

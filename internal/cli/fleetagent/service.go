@@ -141,7 +141,7 @@ func runServiceInstall(out io.Writer, configPath, userName string, level Hardeni
 		// call to make: --config /etc/agent.yaml would make that directory
 		// /etc. The files inside it were given away individually; the
 		// traversal has to be granted by whoever owns the directory.
-		p.Printf("NOTE: %s is not a directory sandboxd created, so its ownership was left\n", configDir)
+		p.Printf("NOTE: %s is not a directory fleet created, so its ownership was left\n", configDir)
 		p.Printf("      alone — the files inside it were handed over, but %s still has to\n", params.User)
 		p.Println("      be able to traverse it. If the daemon cannot read its config, run:")
 		p.Printf("        chown %s %s\n", params.User, configDir)
@@ -373,8 +373,8 @@ func isInstalled(svc service.Service) bool {
 func minimalServiceConfig() *service.Config {
 	return &service.Config{
 		Name:        ServiceName,
-		DisplayName: "sandboxd agent",
-		Description: "Runs commands and serves files for a sandboxd fleet over mTLS gRPC.",
+		DisplayName: "fleet agent",
+		Description: "Runs commands and serves files for a fleet fleet over mTLS gRPC.",
 	}
 }
 

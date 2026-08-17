@@ -1,4 +1,4 @@
-// Package fsutil holds the small filesystem primitives sandboxd's on-disk
+// Package fsutil holds the small filesystem primitives fleet's on-disk
 // state depends on: writing a file atomically, and taking an advisory lock
 // across processes.
 //
@@ -62,7 +62,7 @@ func WriteAtomic(path string, data []byte, mode os.FileMode) error {
 // old inode would not be seen by a process that has already opened the new
 // one.
 //
-// Advisory means cooperative. It serializes sandboxd's own processes against
+// Advisory means cooperative. It serializes fleet's own processes against
 // each other, which is what read-modify-write on a shared config file needs;
 // it does not stop an unrelated program from writing the file.
 func Lock(path string) (release func() error, err error) {

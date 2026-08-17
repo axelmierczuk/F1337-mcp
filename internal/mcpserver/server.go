@@ -34,13 +34,13 @@ import (
 )
 
 // ServerName is the implementation name reported at initialize.
-const ServerName = "sandboxd"
+const ServerName = "fleet"
 
 // Instructions is what a client that surfaces server instructions shows the
 // model. It carries the select-then-act workflow once, here, instead of
 // repeating it in nineteen tool descriptions that are paid for on every
 // request.
-const Instructions = `sandboxd gives you tools on remote development machines ("sandboxes") over mTLS.
+const Instructions = `fleet gives you tools on remote development machines ("sandboxes") over mTLS.
 
 Select before you act. Call sandbox_list to see the fleet, then sandbox_select to
 choose a target; every later call acts on that selection. Pass "sandbox" on a call
@@ -65,7 +65,7 @@ action via fleetctl.`
 type Options struct {
 	// ConfigDir overrides where the registry and credentials are read from.
 	// Empty resolves through registry.ConfigDir, which honours
-	// SANDBOXD_CONFIG_DIR.
+	// FLEET_CONFIG_DIR.
 	ConfigDir string
 	// RegistryPath overrides the registry file. Empty is
 	// <config dir>/registry.yaml.
@@ -98,7 +98,7 @@ type Options struct {
 	CallTimeout time.Duration
 }
 
-// Server is a configured sandboxd MCP server, not yet connected to a
+// Server is a configured fleet MCP server, not yet connected to a
 // transport.
 type Server struct {
 	mcp       *mcp.Server
@@ -161,7 +161,7 @@ func New(opts Options) (*Server, error) {
 
 	s.mcp = mcp.NewServer(&mcp.Implementation{
 		Name:        ServerName,
-		Title:       "sandboxd",
+		Title:       "fleet",
 		Version:     version.Version,
 		Description: "Development tools on remote sandbox machines.",
 	}, &mcp.ServerOptions{

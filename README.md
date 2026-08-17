@@ -2,7 +2,7 @@
   <img src="docs/assets/logo.svg" alt="Three connected sandboxes" width="120">
 </p>
 
-# sandboxd
+# fleet
 
 **Let your coding agent choose which machine it runs on.**
 
@@ -74,7 +74,7 @@ installs a system service. Use `install.ps1` on Windows.
 ```json
 {
   "mcpServers": {
-    "sandboxd": {
+    "fleet": {
       "command": "fleet-mcp",
       "args": ["serve"]
     }
@@ -108,7 +108,7 @@ never silently acts on the wrong host.
 - **Caps and audit.** Wall-clock timeouts, output limits, append-only JSONL
   log of every exec and write.
 
-`sandboxd` does not sandbox — it's remote execution against a host you
+`fleet` does not sandbox — it's remote execution against a host you
 designate. Isolation is whatever that host already provides (VM, container,
 dedicated machine). Full threat model in [docs/security.md](docs/security.md).
 

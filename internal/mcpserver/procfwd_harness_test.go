@@ -57,9 +57,9 @@ import (
 // processes that outlive the call that started them, so they are entered
 // through a test function and run until they are signalled. Both mechanisms
 // live in one package and neither is the other's dispatcher: a child of this
-// one leaves SANDBOXD_MCP_TEST_HELPER unset, so TestMain hands it to m.Run and
+// one leaves FLEET_MCP_TEST_HELPER unset, so TestMain hands it to m.Run and
 // TestM2HelperChild picks it up.
-const m2HelperEnv = "SANDBOXD_MCP_M2_HELPER"
+const m2HelperEnv = "FLEET_MCP_M2_HELPER"
 
 // TestM2HelperChild is the entry point of every process the process-tool tests
 // supervise. It is not a test.

@@ -26,21 +26,75 @@ func newTestRegistry(t *testing.T) (*registry.Registry, string) {
 }
 
 func TestConfigDir(t *testing.T) {
+	// Every case pins the search roots at a temp directory. Left to the real
+	// environment these would consult the developer's own ~/.config, where an
+	// actual pre-rebrand directory would change the answer.
+	base := func(t *testing.T) string {
+		t.Helper()
+		root := t.TempDir()
+		t.Setenv("FLEET_CONFIG_DIR", "")
+		t.Setenv(registry.LegacyEnvConfigDir, "")
+		t.Setenv("XDG_CONFIG_HOME", root)
+		t.Setenv("APPDATA", root)
+		return root
+	}
+	populate := func(t *testing.T, dir string) string {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "registry.yaml"), []byte("sandboxes: []\n"), 0o600))
+		return dir
+	}
+
 	t.Run("explicit override wins", func(t *testing.T) {
-		t.Setenv("SANDBOXD_CONFIG_DIR", "/custom/config")
+		base(t)
+		t.Setenv("FLEET_CONFIG_DIR", "/custom/config")
 		dir, err := registry.ConfigDir()
 		require.NoError(t, err)
 		assert.Equal(t, "/custom/config", dir)
 	})
 
-	t.Run("falls back to home when nothing set", func(t *testing.T) {
-		t.Setenv("SANDBOXD_CONFIG_DIR", "")
-		t.Setenv("XDG_CONFIG_HOME", "")
-		t.Setenv("APPDATA", "")
+	t.Run("a fresh install lands on the new name", func(t *testing.T) {
+		root := base(t)
 		dir, err := registry.ConfigDir()
 		require.NoError(t, err)
-		assert.NotEmpty(t, dir)
-		assert.Contains(t, dir, "sandboxd")
+		assert.Equal(t, filepath.Join(root, "fleet"), dir)
+	})
+
+	// The migration cases. A host that enrolled before the rebrand keeps its
+	// registry and credentials under the old directory, and the new binary has
+	// to find them there rather than report an empty fleet.
+	t.Run("the deprecated environment variable is still honoured", func(t *testing.T) {
+		base(t)
+		t.Setenv(registry.LegacyEnvConfigDir, "/legacy/config")
+		dir, err := registry.ConfigDir()
+		require.NoError(t, err)
+		assert.Equal(t, "/legacy/config", dir)
+	})
+
+	t.Run("the new environment variable wins over the deprecated one", func(t *testing.T) {
+		base(t)
+		t.Setenv("FLEET_CONFIG_DIR", "/new/config")
+		t.Setenv(registry.LegacyEnvConfigDir, "/legacy/config")
+		dir, err := registry.ConfigDir()
+		require.NoError(t, err)
+		assert.Equal(t, "/new/config", dir)
+	})
+
+	t.Run("an enrolled pre-rebrand directory is used as-is", func(t *testing.T) {
+		root := base(t)
+		legacy := populate(t, filepath.Join(root, "sandboxd"))
+		dir, err := registry.ConfigDir()
+		require.NoError(t, err)
+		assert.Equal(t, legacy, dir, "the enrollment is here; reporting the new empty path would read as a lost fleet")
+	})
+
+	t.Run("once migrated, the new directory wins", func(t *testing.T) {
+		root := base(t)
+		populate(t, filepath.Join(root, "sandboxd"))
+		migrated := populate(t, filepath.Join(root, "fleet"))
+		dir, err := registry.ConfigDir()
+		require.NoError(t, err)
+		assert.Equal(t, migrated, dir)
 	})
 }
 

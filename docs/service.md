@@ -23,7 +23,7 @@ model.
 
 | Platform | Default account | Created by install? |
 | --- | --- | --- |
-| Linux | `sandboxd`, a system account | Yes, via `useradd` or `adduser` |
+| Linux | `fleet`, a system account | Yes, via `useradd` or `adduser` |
 | macOS | The invoking user (`$SUDO_USER`) | No — pass `--user` for a different one |
 | Windows | `NT AUTHORITY\NetworkService` | n/a, it is a built-in identity |
 
@@ -56,14 +56,14 @@ that decides the daemon will run as somebody else — so on Linux and macOS it
 hands that account the config, certificate, key, and CA bundle, and the
 directory holding them.
 
-The directory only changes hands when it is one `enroll` created (`/etc/sandboxd`,
-`/Library/Application Support/sandboxd`, or the per-user enrollment directory).
+The directory only changes hands when it is one `enroll` created (`/etc/fleet`,
+`/Library/Application Support/fleet`, or the per-user enrollment directory).
 Point `--config` somewhere else and `install` gives away the four files but
 leaves the directory alone, and says so: `--config /etc/agent.yaml` must not
-turn into `chown sandboxd /etc`. Make that directory traversable by the service
+turn into `chown fleet /etc`. Make that directory traversable by the service
 account yourself.
 
-On Windows nothing is chowned: access there is by ACL, and `%ProgramData%\sandboxd`
+On Windows nothing is chowned: access there is by ACL, and `%ProgramData%\fleet`
 already admits the built-in service identities.
 
 ## Hardening
@@ -170,7 +170,7 @@ fleet-agent service status
 
 sudo fleet-agent service install            # idempotent: reinstalls, no error
 sudo fleet-agent service uninstall
-ls /etc/sandboxd /var/lib/sandboxd             # credentials and state still there
+ls /etc/fleet /var/lib/fleet             # credentials and state still there
 ```
 
 ### macOS, launchd
@@ -180,7 +180,7 @@ sudo fleet-agent service install --user "$(whoami)"
 sudo fleet-agent service start
 fleet-agent service status
 sudo launchctl list fleet-agent             # PID, and AbandonProcessGroup in the job
-tail -f /Library/Logs/sandboxd/fleet-agent.err.log
+tail -f /Library/Logs/fleet/fleet-agent.err.log
 
 sudo shutdown -r now                           # survives a reboot
 sudo fleet-agent service uninstall

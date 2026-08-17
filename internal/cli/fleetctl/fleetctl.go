@@ -1,4 +1,4 @@
-// Package fleetctl implements the operator CLI for the sandboxd control
+// Package fleetctl implements the operator CLI for the fleet control
 // plane: certificate authority management, enrollment token minting, and the
 // enrollment listener.
 //
@@ -32,7 +32,7 @@ func Main(args []string, out io.Writer) int {
 func NewRootCommand(out io.Writer) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "fleetctl",
-		Short: "Operator CLI for the sandboxd control plane",
+		Short: "Operator CLI for the fleet control plane",
 		Long: "fleetctl manages the fleet certificate authority, mints single-use\n" +
 			"enrollment tokens, and serves the endpoint hosts join the fleet through.",
 		SilenceUsage: true,

@@ -129,7 +129,7 @@ func TestAuthorizePeer_RejectsWrongOUEvenWithClientAuthUsage(t *testing.T) {
 
 	_, err := agent.AuthorizePeerForTest(state, agent.DefaultClientOU)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "fleet-agent", "the error should name the OU the leaf actually carries")
+	assert.Contains(t, err.Error(), "sandboxd-agent", "the error should name the OU the leaf actually carries")
 	assert.Contains(t, err.Error(), agent.DefaultClientOU)
 
 	// And the control leaf, which differs only in its OU, passes.

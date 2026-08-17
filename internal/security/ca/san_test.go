@@ -110,7 +110,7 @@ func TestSignCSR_ControlPlaneProfile(t *testing.T) {
 	authority := newCA(t)
 	leaf, certPEM, err := authority.SignCSR(csrFor(t, "control"), ca.SignOptions{
 		Profile:  ca.ProfileControlPlane,
-		Subject:  "sandboxd control plane",
+		Subject:  "fleet control plane",
 		DNSNames: []string{"control.internal"},
 	})
 	require.NoError(t, err)

@@ -927,18 +927,18 @@ func TestExec_AuditNeverRecordsEnvironmentValues(t *testing.T) {
 	// name reaches the command through the environment alone. A request that
 	// put the name in argv would prove nothing: argv is recorded on purpose.
 	req := helperReq("envdump")
-	req.Env = append(req.Env, "SANDBOXD_TEST_SECRET="+secret)
+	req.Env = append(req.Env, "FLEET_TEST_SECRET="+secret)
 
 	stream, err := h.run(t, req)
 	require.NoError(t, err)
-	require.Contains(t, stream.output(sandboxdv1.Stream_STREAM_STDOUT), "SANDBOXD_TEST_SECRET="+secret,
+	require.Contains(t, stream.output(sandboxdv1.Stream_STREAM_STDOUT), "FLEET_TEST_SECRET="+secret,
 		"the command really did receive the secret, so its absence from the log is not an accident of it never existing")
 
 	require.NoError(t, h.audit.Close())
 	raw, err := os.ReadFile(h.auditPath)
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), secret, "an audit log that captures secrets is a new place to steal them from")
-	require.NotContains(t, string(raw), "SANDBOXD_TEST_SECRET", "not even the name of an environment variable is recorded")
+	require.NotContains(t, string(raw), "FLEET_TEST_SECRET", "not even the name of an environment variable is recorded")
 
 	// The command's output carried the secret too, and that is also absent:
 	// there is no field for output in a record.

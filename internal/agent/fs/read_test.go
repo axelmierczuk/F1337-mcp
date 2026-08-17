@@ -328,7 +328,7 @@ func writeLargeFile(t *testing.T, path string, size int) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, f.Close()) }()
 
-	block := []byte(strings.Repeat("sandboxd streams this file rather than buffering it.\n", 512))
+	block := []byte(strings.Repeat("fleet streams this file rather than buffering it.\n", 512))
 	for written := 0; written < size; {
 		n := min(len(block), size-written)
 		m, err := f.Write(block[:n])

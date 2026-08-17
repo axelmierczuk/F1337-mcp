@@ -1,4 +1,4 @@
-# sandboxd — build, codegen, and verification targets.
+# fleet — build, codegen, and verification targets.
 
 SHELL      := /bin/bash
 MODULE     := github.com/axelmierczuk/fleet-mcp

@@ -1,4 +1,4 @@
-// Command fleetctl is the operator CLI for the sandboxd control plane.
+// Command fleetctl is the operator CLI for the fleet control plane.
 //
 // It initialises the certificate authority, mints enrollment tokens, serves the
 // enrollment endpoint, and inspects the fleet registry. PKI setup deliberately

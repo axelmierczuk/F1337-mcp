@@ -21,7 +21,10 @@ const DefaultListen = "0.0.0.0:8722"
 
 // DefaultClientOU is the organizational unit an incoming client certificate
 // must carry. It matches ca.ProfileControl's OU: a leaf issued to another
-// agent carries "fleet-agent" and is refused.
+// agent carries "sandboxd-agent" and is refused.
+//
+// It keeps its pre-rebrand name because it is matched against certificates
+// already issued to enrolled agents; see ca.Profile.OrganizationalUnit.
 const DefaultClientOU = "sandboxd-control"
 
 // ErrNoAllowedRoots is returned by Config.Validate when the jail is enforced,

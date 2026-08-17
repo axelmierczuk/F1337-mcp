@@ -31,7 +31,7 @@ var errAlreadyExited = errors.New("the process has already exited")
 func (s *Supervisor) signalRecord(r *record, sig platform.Signal, group bool) error {
 	r.mu.Lock()
 	pid, startID, existing, state := r.pid, r.startID, r.group, r.state
-	jobName := jobObjectName(r.id)
+	jobName := r.jobName
 	r.mu.Unlock()
 
 	if state == sandboxdv1.ProcessState_PROCESS_STATE_ORPHANED {

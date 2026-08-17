@@ -532,7 +532,7 @@ func (s *Supervisor) spawn(r *record, fresh bool) error {
 		// Named, not kill-on-close: the name is how a restarted agent reopens
 		// the job on Windows, and kill-on-close would destroy the tree the
 		// moment the old agent exited.
-		Name: jobObjectName(r.id),
+		Name: r.jobName,
 	})
 	if err != nil {
 		return fmt.Errorf("process: prepare process group: %w", err)

@@ -358,7 +358,7 @@ func TestEnroll_ConcurrentEnrollmentsGetDistinctNames(t *testing.T) {
 type failingRecorder struct{}
 
 func (failingRecorder) Record(enroll.EnrolledSandbox) error {
-	return errors.New("registry: save /home/operator/.config/sandboxd/registry.yaml: disk full")
+	return errors.New("registry: save /home/operator/.config/fleet/registry.yaml: disk full")
 }
 
 // The enrolling host is unauthenticated. A registry failure is the control

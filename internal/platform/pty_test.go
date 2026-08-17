@@ -13,9 +13,9 @@ import (
 
 func echoArgv() []string {
 	if runtime.GOOS == "windows" {
-		return []string{"cmd.exe", "/c", "echo sandboxd-pty"}
+		return []string{"cmd.exe", "/c", "echo fleet-pty"}
 	}
-	return []string{"/bin/sh", "-c", "echo sandboxd-pty"}
+	return []string{"/bin/sh", "-c", "echo fleet-pty"}
 }
 
 func TestOpenPTY(t *testing.T) {
@@ -60,13 +60,13 @@ func TestPTY_RunsACommand(t *testing.T) {
 			n, err := tty.Read(chunk)
 			if n > 0 {
 				buf.Write(chunk[:n])
-				if bytes.Contains(buf.Bytes(), []byte("sandboxd-pty")) {
+				if bytes.Contains(buf.Bytes(), []byte("fleet-pty")) {
 					found <- true
 					return
 				}
 			}
 			if err != nil {
-				found <- bytes.Contains(buf.Bytes(), []byte("sandboxd-pty"))
+				found <- bytes.Contains(buf.Bytes(), []byte("fleet-pty"))
 				return
 			}
 		}

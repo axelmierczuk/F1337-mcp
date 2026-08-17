@@ -101,7 +101,7 @@ func TestSelection_TwoIdentitiesAreIndependent(t *testing.T) {
 
 // TestSelection_ClientsWithDistinctImplementationNamesAreDistinct covers the
 // identity that a real client supplies without knowing anything about
-// sandboxd: the implementation name it reports at connect time.
+// fleet: the implementation name it reports at connect time.
 func TestSelection_ClientsWithDistinctImplementationNamesAreDistinct(t *testing.T) {
 	first := newFixture(t, fixtureOptions{clientName: "editor-a"})
 	first.add("build-box", "build-box.internal:8722", nil)

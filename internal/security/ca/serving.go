@@ -100,7 +100,7 @@ func (c *CA) issueServerCertificate(certPath, keyPath string, hosts []string, tt
 
 	dnsNames, ips := splitHosts(hosts)
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "sandboxd control plane"},
+		Subject: pkix.Name{CommonName: "fleet control plane"},
 	}, key)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("ca: create control plane CSR: %w", err)
@@ -108,7 +108,7 @@ func (c *CA) issueServerCertificate(certPath, keyPath string, hosts []string, tt
 
 	leaf, certPEM, err := c.SignCSR(csrDER, SignOptions{
 		Profile:     ProfileControlPlane,
-		Subject:     "sandboxd control plane",
+		Subject:     "fleet control plane",
 		DNSNames:    dnsNames,
 		IPAddresses: ips,
 		TTL:         ttl,

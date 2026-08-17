@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/axelmierczuk/fleet-mcp/internal/legacypath"
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
@@ -16,7 +17,13 @@ const ConfigFileName = "agent.yaml"
 // EnvConfig names an environment variable holding an explicit config path. It
 // is how the service unit passes the path the installer baked in without
 // depending on the daemon rediscovering it.
-const EnvConfig = "SANDBOXD_AGENT_CONFIG"
+const EnvConfig = "FLEET_AGENT_CONFIG"
+
+// LegacyEnvConfig is what EnvConfig was called before the fleet rebrand. A
+// service unit installed by an older agent still passes it, and that unit is
+// not rewritten until `fleet-agent service install` runs again, so it is
+// honoured when it is the only one set.
+const LegacyEnvConfig = "SANDBOXD_AGENT_CONFIG"
 
 // SystemConfigDir returns the machine-wide configuration directory, as
 // documented at the top of examples/agent.yaml.
@@ -25,17 +32,23 @@ const EnvConfig = "SANDBOXD_AGENT_CONFIG"
 // per-user enrollment (`fleet-agent enroll` without root) lands under
 // UserConfigDir instead, and DefaultConfigPath prefers whichever actually
 // exists.
+//
+// Every one of these directories was named "sandboxd" before the rebrand, and
+// on a host that enrolled back then it is where the agent's certificates and
+// key still are. The pre-rebrand path is used when it holds something and the
+// new one does not; see internal/legacypath.
 func SystemConfigDir() string {
 	switch runtime.GOOS {
 	case "windows":
-		if dir := os.Getenv("ProgramData"); dir != "" {
-			return filepath.Join(dir, "sandboxd")
+		dir := os.Getenv("ProgramData")
+		if dir == "" {
+			dir = `C:\ProgramData`
 		}
-		return filepath.Join(`C:\ProgramData`, "sandboxd")
+		return legacypath.Dir(filepath.Join(dir, "fleet"), filepath.Join(dir, "sandboxd"))
 	case "darwin":
-		return "/Library/Application Support/sandboxd"
+		return legacypath.Dir("/Library/Application Support/fleet", "/Library/Application Support/sandboxd")
 	default:
-		return "/etc/sandboxd"
+		return legacypath.Dir("/etc/fleet", "/etc/sandboxd")
 	}
 }
 
@@ -44,11 +57,13 @@ func SystemConfigDir() string {
 func DefaultStateDir() string {
 	switch runtime.GOOS {
 	case "windows":
+		// Derived from SystemConfigDir, which has already resolved which of the
+		// two names this host actually uses.
 		return filepath.Join(SystemConfigDir(), "state")
 	case "darwin":
-		return "/Library/Application Support/sandboxd/state"
+		return legacypath.Dir("/Library/Application Support/fleet/state", "/Library/Application Support/sandboxd/state")
 	default:
-		return "/var/lib/sandboxd"
+		return legacypath.Dir("/var/lib/fleet", "/var/lib/sandboxd")
 	}
 }
 
@@ -60,9 +75,9 @@ func DefaultLogDir() string {
 	case "windows":
 		return filepath.Join(SystemConfigDir(), "logs")
 	case "darwin":
-		return "/Library/Logs/sandboxd"
+		return legacypath.Dir("/Library/Logs/fleet", "/Library/Logs/sandboxd")
 	default:
-		return "/var/log/sandboxd"
+		return legacypath.Dir("/var/log/fleet", "/var/log/sandboxd")
 	}
 }
 
@@ -79,14 +94,14 @@ func UserConfigDir() (string, error) {
 // DefaultConfigPath resolves which config the daemon should read, in the order
 // an operator would expect it to be found:
 //
-//  1. $SANDBOXD_AGENT_CONFIG, if set.
+//  1. $FLEET_AGENT_CONFIG (or the deprecated $SANDBOXD_AGENT_CONFIG), if set.
 //  2. The machine-wide path, if a file is actually there.
 //  3. The per-user enrollment directory.
 //
 // It returns the per-user path even when nothing exists yet, so the error a
 // caller reports names a concrete file rather than a search.
 func DefaultConfigPath() (string, error) {
-	if path := os.Getenv(EnvConfig); path != "" {
+	if path := legacypath.Env(EnvConfig, LegacyEnvConfig); path != "" {
 		return path, nil
 	}
 	systemPath := filepath.Join(SystemConfigDir(), ConfigFileName)

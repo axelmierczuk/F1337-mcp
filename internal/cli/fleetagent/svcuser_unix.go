@@ -14,7 +14,12 @@ import (
 
 // systemUserName is the dedicated account the Linux installer creates. It owns
 // nothing except the agent's state and log directories.
-const systemUserName = "sandboxd"
+const systemUserName = "fleet"
+
+// legacySystemUserName is what systemUserName was before the fleet rebrand. A
+// host installed back then already has this account, and its state and log
+// directories are owned by it.
+const legacySystemUserName = "sandboxd"
 
 // requireElevation refuses an operation that will fail partway through
 // without it, naming what to do instead.
@@ -69,6 +74,15 @@ func defaultServiceUser() (string, error) {
 		}
 		return current.Username, nil
 	}
+	// The same rule the config directories follow: a host that already has the
+	// pre-rebrand account keeps it. Defaulting to the new name here would grow a
+	// second system account on every upgraded host and chown the state and log
+	// directories away from the account that owns them and is running as them.
+	if _, err := user.Lookup(systemUserName); err != nil {
+		if _, err := user.Lookup(legacySystemUserName); err == nil {
+			return legacySystemUserName, nil
+		}
+	}
 	return systemUserName, nil
 }
 
@@ -85,7 +99,7 @@ func ensureServiceUser(name string, create bool) error {
 		return fmt.Errorf("service account %q does not exist and --create-user=false; create it or pass --user with an existing account", name)
 	}
 	if runtime.GOOS != "linux" {
-		return fmt.Errorf("service account %q does not exist.\n\nsandboxd does not create accounts on %s. Create one, or pass --user with an existing account",
+		return fmt.Errorf("service account %q does not exist.\n\nfleet does not create accounts on %s. Create one, or pass --user with an existing account",
 			name, runtime.GOOS)
 	}
 
@@ -133,7 +147,7 @@ const serviceAccessByOwnership = true
 // is a directory `enroll` created — it has to change hands too, because a file
 // inside a 0700 directory owned by somebody else is not readable however its
 // own mode reads. An empty dir means the caller judged the directory not
-// sandboxd's to reassign.
+// fleet's to reassign.
 //
 // Ownership rather than a group and a wider mode: the account is already the
 // one every command this agent runs executes as, so it can read the key by

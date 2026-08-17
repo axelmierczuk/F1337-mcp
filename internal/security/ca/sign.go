@@ -36,10 +36,19 @@ const (
 // OrganizationalUnit for a profile is baked into the subject, and is also
 // what the agent-side policy check (internal/agent, milestone M1) matches
 // against to require the control OU on incoming client certificates.
+//
+// These deliberately kept their pre-rebrand names. An OU is not branding: it
+// is written into every certificate this CA has ever issued, and it is matched
+// on at every mTLS handshake. Renaming it would mean an agent enrolled before
+// the rename presenting OU=sandboxd-agent to a control plane that now demands
+// OU=fleet-agent, and a control plane presenting OU=fleet-control to an agent
+// whose config still says require_client_ou: sandboxd-control — the whole
+// fleet refusing to talk to itself until every member is re-enrolled. Changing
+// them is a flag day, not a rename; see the PR that carried out the rebrand.
 func (p Profile) OrganizationalUnit() string {
 	switch p {
 	case ProfileAgent:
-		return "fleet-agent"
+		return "sandboxd-agent"
 	case ProfileControl:
 		return "sandboxd-control"
 	case ProfileControlPlane:
@@ -190,7 +199,7 @@ func DecodeCSR(data []byte) ([]byte, error) {
 //
 // The wildcard rule is the important one: a leaf bearing "*.internal" answers
 // to every name in the domain, which turns a single issued certificate into
-// blanket authority over the fleet's namespace. Nothing in sandboxd needs a
+// blanket authority over the fleet's namespace. Nothing in fleet needs a
 // wildcard — a sandbox is dialled by its own name and addresses — so refusing
 // to sign one costs nothing and removes the whole class.
 //

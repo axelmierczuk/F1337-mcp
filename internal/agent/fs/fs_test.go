@@ -82,7 +82,7 @@ func tempSiblings(t *testing.T, dir string) []string {
 	require.NoError(t, err)
 	var out []string
 	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".sandboxd-") && strings.HasSuffix(entry.Name(), ".tmp") {
+		if strings.Contains(entry.Name(), ".fleet-") && strings.HasSuffix(entry.Name(), ".tmp") {
 			out = append(out, entry.Name())
 		}
 	}

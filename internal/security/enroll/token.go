@@ -17,7 +17,7 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 )
 
-// TokenPrefix marks a string as a sandboxd enrollment token, so one is
+// TokenPrefix marks a string as a fleet enrollment token, so one is
 // recognizable at a glance (in logs, in shell history) for what it is.
 const TokenPrefix = "sbx_"
 

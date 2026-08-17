@@ -107,7 +107,7 @@ func (p UnitParams) SystemdUnit() string {
 	var b strings.Builder
 
 	b.WriteString("[Unit]\n")
-	b.WriteString("Description=sandboxd agent\n")
+	b.WriteString("Description=fleet agent\n")
 	b.WriteString("Documentation=https://github.com/axelmierczuk/fleet-mcp\n")
 	b.WriteString("After=network-online.target\n")
 	b.WriteString("Wants=network-online.target\n")
@@ -302,8 +302,8 @@ func (p UnitParams) LaunchdPlist() string {
 func (p UnitParams) ServiceConfig() *service.Config {
 	return &service.Config{
 		Name:        ServiceName,
-		DisplayName: "sandboxd agent",
-		Description: "Runs commands and serves files for a sandboxd fleet over mTLS gRPC.",
+		DisplayName: "fleet agent",
+		Description: "Runs commands and serves files for a fleet fleet over mTLS gRPC.",
 		Executable:  p.Executable,
 		Arguments:   p.Arguments(),
 		UserName:    p.User,

@@ -26,6 +26,14 @@ type record struct {
 	id  string
 	dir string // per-process state directory: logs and the persisted record
 
+	// jobName is the Windows job object this process's tree lives in. It is
+	// carried on the record rather than recomputed from id at each use, because
+	// a re-adopted process's job was named by whichever agent spawned it: the
+	// fleet rebrand changed the prefix, so an agent upgraded across it would
+	// compute a name no running job answers to and lose the ability to signal
+	// the tree. adopt restores the name the spawning agent persisted.
+	jobName string
+
 	buf *logBuffer
 
 	mu sync.Mutex
@@ -118,6 +126,7 @@ func newRecord(sup *Supervisor, id, dir string) *record {
 		sup:     sup,
 		id:      id,
 		dir:     dir,
+		jobName: jobObjectName(id),
 		exited:  closedChan(),
 		changed: make(chan struct{}),
 	}
@@ -330,7 +339,7 @@ func (r *record) snapshotPersisted() persisted {
 		Shell:            r.shell,
 		PID:              r.pid,
 		StartID:          r.startID,
-		JobName:          jobObjectName(r.id),
+		JobName:          r.jobName,
 		State:            stateName(r.state),
 		ExitCode:         r.exitCode,
 		Signal:           r.signalName,
@@ -382,7 +391,11 @@ func argvHash(argv []string) string {
 //
 // Session-global, so it carries the process id the agent assigned rather than
 // just a service name.
-func jobObjectName(id string) string { return "sandboxd-process-" + id }
+//
+// Only new processes are named with this. A process spawned before the fleet
+// rebrand is still in a "sandboxd-process-" job, and its record carries that
+// name for adopt to restore — see record.jobName.
+func jobObjectName(id string) string { return "fleet-process-" + id }
 
 // sanitizeName turns a caller-supplied label into something usable as a path
 // component and as part of a process id.

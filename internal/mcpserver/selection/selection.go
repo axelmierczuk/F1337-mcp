@@ -8,7 +8,7 @@
 // A pure handle design is correct and unusable — the model must thread the
 // handle through every call, and it will eventually drop it. A pure implicit
 // design is usable and incorrect — it breaks with concurrent clients and
-// cannot survive a restart. So sandboxd does both, in a fixed order:
+// cannot survive a restart. So fleet does both, in a fixed order:
 //
 //  1. The call's explicit sandbox argument (name or handle). Always wins.
 //  2. The sticky default recorded for the calling client identity, taken from
@@ -40,7 +40,7 @@ import (
 // MetaKeyClientID is the _meta key a client sets to name itself explicitly.
 // It takes precedence over everything else, and is the way two clients that
 // report the same implementation name keep independent selections.
-const MetaKeyClientID = "io.sandboxd/clientId"
+const MetaKeyClientID = "io.fleet/clientId"
 
 // handlePrefix marks a sandbox reference as a handle rather than a name.
 //
@@ -111,7 +111,7 @@ func (t *Target) Call() mcperr.Call {
 // with no extra persistence to keep in sync. It is one-way: a handle names a
 // sandbox only by matching against the registered names.
 func HandleFor(name string) string {
-	sum := sha256.Sum256([]byte("sandboxd/handle/v1\x00" + name))
+	sum := sha256.Sum256([]byte("fleet/handle/v1\x00" + name))
 	return handlePrefix + hex.EncodeToString(sum[:8])
 }
 
@@ -219,7 +219,7 @@ func NewResolver(fleet *registry.Registry, opts *Options) *Resolver {
 //
 // In order of precedence:
 //
-//  1. The io.sandboxd/clientId key in the request's _meta. A client that runs
+//  1. The io.fleet/clientId key in the request's _meta. A client that runs
 //     several concurrent sessions and wants each to hold its own selection
 //     sets this.
 //  2. The client implementation name, which protocol 2026-07-28 carries in

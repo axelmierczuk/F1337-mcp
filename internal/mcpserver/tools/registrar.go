@@ -1,4 +1,4 @@
-// Package tools implements the MCP tools sandboxd exposes, and the
+// Package tools implements the MCP tools fleet exposes, and the
 // registration seam every one of them is built on.
 //
 // # Registering a tool

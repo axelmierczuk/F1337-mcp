@@ -80,7 +80,7 @@ func createAtomic(j *jail.Jail, log *slog.Logger, target string, mode fs.FileMod
 	}
 
 	for attempt := 0; attempt < 10; attempt++ {
-		tmpPath := filepath.Join(dir, "."+base+".sandboxd-"+randomSuffix()+".tmp")
+		tmpPath := filepath.Join(dir, "."+base+".fleet-"+randomSuffix()+".tmp")
 		// Through the jail rather than os.OpenFile: on Linux this is an openat2
 		// with RESOLVE_BENEATH, so the temp file cannot be redirected out of the
 		// jail by a component swapped for a symlink between the resolve and the

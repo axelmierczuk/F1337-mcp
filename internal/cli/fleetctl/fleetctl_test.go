@@ -22,7 +22,7 @@ import (
 // test, and returns its output and exit code.
 func run(t *testing.T, configDir string, args ...string) (string, int) {
 	t.Helper()
-	t.Setenv("SANDBOXD_CONFIG_DIR", configDir)
+	t.Setenv("FLEET_CONFIG_DIR", configDir)
 	var out bytes.Buffer
 	code := fleetctl.Main(args, &out)
 	return out.String(), code

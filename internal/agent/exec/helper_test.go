@@ -17,7 +17,7 @@ import (
 // ignores SIGTERM, one that spawns a grandchild, one that writes more output
 // than any cap) something this repository controls rather than something it
 // hopes /bin/sh will do the same way everywhere.
-const helperEnv = "SANDBOXD_EXEC_TEST_HELPER"
+const helperEnv = "FLEET_EXEC_TEST_HELPER"
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(helperEnv); mode != "" {

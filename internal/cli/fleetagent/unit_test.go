@@ -20,11 +20,11 @@ import (
 func params() fleetagent.UnitParams {
 	return fleetagent.UnitParams{
 		Executable:   "/usr/local/bin/fleet-agent",
-		ConfigPath:   "/etc/sandboxd/agent.yaml",
-		User:         "sandboxd",
+		ConfigPath:   "/etc/fleet/agent.yaml",
+		User:         "fleet",
 		AllowedRoots: []string{"/home/build/workspace"},
-		StateDir:     "/var/lib/sandboxd",
-		LogDir:       "/var/log/sandboxd",
+		StateDir:     "/var/lib/fleet",
+		LogDir:       "/var/log/fleet",
 		RestartDelay: 5 * time.Second,
 		StopTimeout:  45 * time.Second,
 		Hardening:    fleetagent.HardeningStandard,
@@ -34,7 +34,7 @@ func params() fleetagent.UnitParams {
 // The daemon is started with the config path baked in, so it does not have to
 // rediscover it as whichever account the service runs under.
 func TestUnitParams_Arguments(t *testing.T) {
-	assert.Equal(t, []string{"serve", "--config", "/etc/sandboxd/agent.yaml"}, params().Arguments())
+	assert.Equal(t, []string{"serve", "--config", "/etc/fleet/agent.yaml"}, params().Arguments())
 }
 
 // The single most load-bearing line in the systemd unit.
@@ -55,8 +55,8 @@ func TestSystemdUnit_Restart(t *testing.T) {
 	unit := params().SystemdUnit()
 	assert.Contains(t, unit, "Restart=on-failure")
 	assert.Contains(t, unit, "RestartSec=5")
-	assert.Contains(t, unit, "ExecStart=/usr/local/bin/fleet-agent serve --config /etc/sandboxd/agent.yaml")
-	assert.Contains(t, unit, "User=sandboxd")
+	assert.Contains(t, unit, "ExecStart=/usr/local/bin/fleet-agent serve --config /etc/fleet/agent.yaml")
+	assert.Contains(t, unit, "User=fleet")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
 	assert.Contains(t, unit, "StandardOutput=journal")
 	assert.Contains(t, unit, "StandardError=journal")
@@ -86,7 +86,7 @@ func TestSystemdUnit_HardeningLevels(t *testing.T) {
 	strict := p.SystemdUnit()
 	assert.Contains(t, strict, "ProtectSystem=strict")
 	assert.NotContains(t, strict, "ProtectSystem=full")
-	assert.Contains(t, strict, "ReadWritePaths=-/home/build/workspace /var/lib/sandboxd /var/log/sandboxd")
+	assert.Contains(t, strict, "ReadWritePaths=-/home/build/workspace /var/lib/fleet /var/log/fleet")
 
 	p.Hardening = fleetagent.HardeningNone
 	none := p.SystemdUnit()
@@ -111,14 +111,14 @@ func TestSystemdUnit_StrictToleratesARootThatDoesNotExistYet(t *testing.T) {
 	p.AllowedRoots = []string{"/home/build/workspace", "/srv/not-created-yet"}
 
 	unit := p.SystemdUnit()
-	assert.Contains(t, unit, "ReadWritePaths=-/home/build/workspace -/srv/not-created-yet /var/lib/sandboxd /var/log/sandboxd")
+	assert.Contains(t, unit, "ReadWritePaths=-/home/build/workspace -/srv/not-created-yet /var/lib/fleet /var/log/fleet")
 
 	for _, line := range strings.Split(unit, "\n") {
 		if !strings.HasPrefix(line, "ReadWritePaths=") {
 			continue
 		}
 		for _, entry := range strings.Fields(strings.TrimPrefix(line, "ReadWritePaths=")) {
-			if entry == "/var/lib/sandboxd" || entry == "/var/log/sandboxd" {
+			if entry == "/var/lib/fleet" || entry == "/var/log/fleet" {
 				continue
 			}
 			assert.True(t, strings.HasPrefix(entry, "-"),
@@ -132,7 +132,7 @@ func TestSystemdUnit_StrictToleratesARootThatDoesNotExistYet(t *testing.T) {
 // wrote there invisible to the rest of the host and lose it on restart, which
 // is a worse outcome than one missing directive.
 func TestSystemdUnit_PrivateTmpSkippedWhenARootIsUnderTmp(t *testing.T) {
-	for _, root := range []string{"/tmp/sandboxd", "/tmp", "/var/tmp/build"} {
+	for _, root := range []string{"/tmp/fleet", "/tmp", "/var/tmp/build"} {
 		t.Run(root, func(t *testing.T) {
 			p := params()
 			p.AllowedRoots = []string{"/home/build/workspace", root}
@@ -179,14 +179,14 @@ func TestLaunchdPlist_IsWellFormedXML(t *testing.T) {
 	assert.Contains(t, plist, "<string>/usr/local/bin/fleet-agent</string>")
 	assert.Contains(t, plist, "<string>serve</string>")
 	assert.Contains(t, plist, "<string>--config</string>")
-	assert.Contains(t, plist, "<string>/etc/sandboxd/agent.yaml</string>")
-	assert.Contains(t, plist, "<key>UserName</key>\n\t<string>sandboxd</string>")
+	assert.Contains(t, plist, "<string>/etc/fleet/agent.yaml</string>")
+	assert.Contains(t, plist, "<key>UserName</key>\n\t<string>fleet</string>")
 	assert.Contains(t, plist, "<key>RunAtLoad</key>")
 
-	// Issue #18 asks for log paths under /Library/Logs/sandboxd; LogDir is
+	// Issue #18 asks for log paths under /Library/Logs/fleet; LogDir is
 	// what carries that on macOS.
-	assert.Contains(t, plist, "<string>/var/log/sandboxd/fleet-agent.out.log</string>")
-	assert.Contains(t, plist, "<string>/var/log/sandboxd/fleet-agent.err.log</string>")
+	assert.Contains(t, plist, "<string>/var/log/fleet/fleet-agent.out.log</string>")
+	assert.Contains(t, plist, "<string>/var/log/fleet/fleet-agent.err.log</string>")
 }
 
 // KeepAlive as a dict with SuccessfulExit=false restarts a failed daemon and
@@ -218,8 +218,8 @@ func TestServiceConfig_WindowsOptions(t *testing.T) {
 	cfg := params().ServiceConfig()
 
 	assert.Equal(t, "fleet-agent", cfg.Name)
-	assert.Equal(t, "sandboxd", cfg.UserName)
-	assert.Equal(t, []string{"serve", "--config", "/etc/sandboxd/agent.yaml"}, cfg.Arguments)
+	assert.Equal(t, "fleet", cfg.UserName)
+	assert.Equal(t, []string{"serve", "--config", "/etc/fleet/agent.yaml"}, cfg.Arguments)
 	assert.Equal(t, "/usr/local/bin/fleet-agent", cfg.Executable)
 
 	assert.Equal(t, "automatic", cfg.Option["StartType"])

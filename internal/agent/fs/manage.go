@@ -352,7 +352,7 @@ func (s *Service) copySymlink(ctx context.Context, source, destination string) e
 	if len(base) > 64 {
 		base = base[:64]
 	}
-	tmpPath := filepath.Join(dir, "."+base+".sandboxd-"+randomSuffix()+".tmp")
+	tmpPath := filepath.Join(dir, "."+base+".fleet-"+randomSuffix()+".tmp")
 	if err := os.Symlink(target, tmpPath); err != nil {
 		return fileError(destination, err)
 	}

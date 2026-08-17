@@ -26,7 +26,7 @@ func TestRoot_HelpNamesServeAndItsFlags(t *testing.T) {
 	for _, flag := range []string{"--config-dir", "--registry", "--ca-cert", "--cert", "--key", "--log-level"} {
 		assert.Containsf(t, help, flag, "serve should document %s", flag)
 	}
-	assert.Contains(t, help, "SANDBOXD_CONFIG_DIR")
+	assert.Contains(t, help, "FLEET_CONFIG_DIR")
 	assert.Contains(t, help, "stderr", "the help must say where logs go")
 }
 
@@ -49,7 +49,7 @@ func TestUnknownCommand_FailsWithoutTouchingStdout(t *testing.T) {
 
 // TestServe_ResolvesTheConfigDirectory covers both ways of pointing the
 // server at its state, end to end through the real serve path: the flag, and
-// SANDBOXD_CONFIG_DIR when the flag is absent. Getting this wrong means a
+// FLEET_CONFIG_DIR when the flag is absent. Getting this wrong means a
 // server that quietly keeps its registry somewhere the operator is not
 // looking.
 func TestServe_ResolvesTheConfigDirectory(t *testing.T) {
@@ -63,14 +63,14 @@ func TestServe_ResolvesTheConfigDirectory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// A directory that does not exist yet, so its creation is the
 			// evidence that this is the one the server chose.
-			dir := filepath.Join(t.TempDir(), "sandboxd")
+			dir := filepath.Join(t.TempDir(), "fleet")
 
 			args := []string{"serve"}
 			if tc.useFlag {
 				args = append(args, "--config-dir", dir)
-				t.Setenv("SANDBOXD_CONFIG_DIR", filepath.Join(t.TempDir(), "ignored"))
+				t.Setenv("FLEET_CONFIG_DIR", filepath.Join(t.TempDir(), "ignored"))
 			} else {
-				t.Setenv("SANDBOXD_CONFIG_DIR", dir)
+				t.Setenv("FLEET_CONFIG_DIR", dir)
 			}
 
 			var out bytes.Buffer

@@ -121,9 +121,9 @@ $elevated  = Test-Elevated
 
 if (-not $InstallDir) {
     $InstallDir = if ($elevated) {
-        Join-Path $env:ProgramFiles 'sandboxd'
+        Join-Path $env:ProgramFiles 'fleet'
     } else {
-        Join-Path $env:LOCALAPPDATA 'Programs\sandboxd'
+        Join-Path $env:LOCALAPPDATA 'Programs\fleet'
     }
 }
 
@@ -140,7 +140,7 @@ $checksumUrl  = "$BaseUrl/download/$resolved/checksums.txt"
 
 Write-Step "fleet-agent $resolved for windows/$arch"
 
-$work = Join-Path ([IO.Path]::GetTempPath()) ("sandboxd-" + [Guid]::NewGuid().ToString('n'))
+$work = Join-Path ([IO.Path]::GetTempPath()) ("fleet-" + [Guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 
 try {

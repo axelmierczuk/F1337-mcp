@@ -98,7 +98,7 @@ func newServeCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&configDir, "config-dir", "",
-		"directory holding the registry and credentials (default: $SANDBOXD_CONFIG_DIR, else the per-user config directory)")
+		"directory holding the registry and credentials (default: $FLEET_CONFIG_DIR, else the per-user config directory)")
 	cmd.Flags().StringVar(&registryPath, "registry", "", "path to the fleet registry (default: <config dir>/registry.yaml)")
 	cmd.Flags().StringVar(&caCert, "ca-cert", "", "fleet CA certificate (default: <config dir>/ca/ca.crt)")
 	cmd.Flags().StringVar(&cert, "cert", "", "control certificate presented to agents (default: <config dir>/control.crt)")
@@ -107,7 +107,7 @@ func newServeCommand() *cobra.Command {
 	return cmd
 }
 
-// resolveConfigDir honours the flag first and SANDBOXD_CONFIG_DIR after it,
+// resolveConfigDir honours the flag first and FLEET_CONFIG_DIR after it,
 // via registry.ConfigDir, so one directory holds the registry, the CA and the
 // control leaf no matter which of the three binaries opened it.
 func resolveConfigDir(flagValue string) (string, error) {

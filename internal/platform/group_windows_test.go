@@ -186,7 +186,7 @@ func TestJobObject_KillOnCloseKillsTheTree(t *testing.T) {
 // restart there is no job handle left in memory, only the name that was
 // persisted with the process record.
 func TestJobObject_ReopenByName(t *testing.T) {
-	name := "sandboxd-test-" + strconv.Itoa(os.Getpid()) + "-" + t.Name()
+	name := "fleet-test-" + strconv.Itoa(os.Getpid()) + "-" + t.Name()
 	_, leader, grandchild, reaped := startWindowsTree(t, platform.GroupConfig{Name: name})
 
 	reopened, err := platform.OpenProcessGroup(leader, name)
@@ -211,7 +211,7 @@ func TestJobObject_ReopenByName(t *testing.T) {
 func TestJobObject_ReopenWithUnknownNameDegrades(t *testing.T) {
 	pid, exited := sleeperWithExit(t)
 
-	reopened, err := platform.OpenProcessGroup(pid, "sandboxd-test-no-such-job-"+strconv.Itoa(os.Getpid()))
+	reopened, err := platform.OpenProcessGroup(pid, "fleet-test-no-such-job-"+strconv.Itoa(os.Getpid()))
 	require.NoError(t, err)
 	defer reopened.Close()
 

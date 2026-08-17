@@ -49,7 +49,7 @@ through every subsequent call, and it will eventually drop it. A pure implicit
 design is usable and incorrect: it breaks with concurrent clients and cannot
 survive a restart.
 
-`sandboxd` resolves the target in a fixed order:
+`fleet` resolves the target in a fixed order:
 
 1. The call's explicit `sandbox` argument, if present. Always wins.
 2. The sticky default recorded for the calling client identity (taken from
@@ -63,13 +63,13 @@ There is deliberately no fourth rule. A fleet of exactly one sandbox does not
 resolve implicitly either: a fleet grows from one to two without anyone
 revisiting the calls written while it had one member.
 
-**Client identity** is taken from `_meta`, in order: the `io.sandboxd/clientId`
+**Client identity** is taken from `_meta`, in order: the `io.fleet/clientId`
 key, if the client sets one; otherwise the client implementation name, which
 protocol `2026-07-28` carries in `_meta` as
 `io.modelcontextprotocol/clientInfo`; otherwise a per-process fallback. Keying
 on the name rather than name-and-version means upgrading a client does not
 silently drop its selection. A client that runs several concurrent sessions and
-wants each to hold its own target sets `io.sandboxd/clientId`.
+wants each to hold its own target sets `io.fleet/clientId`.
 
 A selection made under the per-process fallback is held in memory and never
 written to the registry. The fallback is `process:<pid>`, and a pid is reused:

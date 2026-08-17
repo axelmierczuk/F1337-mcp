@@ -31,7 +31,7 @@ import (
 // certain to exist on Linux, macOS and Windows alike, and it behaves the same
 // on all three — where `echo` is a shell builtin on one of them and a file on
 // the others.
-const e2eHelperEnv = "SANDBOXD_EXEC_E2E"
+const e2eHelperEnv = "FLEET_EXEC_E2E"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(e2eHelperEnv) {
@@ -71,7 +71,7 @@ func TestExecService_EndToEnd(t *testing.T) {
 
 	stream, err := client.Exec(ctx, &sandboxdv1.ExecRequest{
 		Argv: []string{selfPath(t), "hello"},
-		Env:  []string{"SANDBOXD_EXEC_E2E=echo"},
+		Env:  []string{"FLEET_EXEC_E2E=echo"},
 	})
 	require.NoError(t, err)
 

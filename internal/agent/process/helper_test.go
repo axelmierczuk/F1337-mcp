@@ -36,7 +36,7 @@ import (
 // binary means the same test runs everywhere, against a child whose behaviour
 // the test controls exactly.
 
-const helperEnv = "SANDBOXD_PROCESS_TEST_HELPER"
+const helperEnv = "FLEET_PROCESS_TEST_HELPER"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(helperEnv) != "" {

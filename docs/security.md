@@ -6,7 +6,7 @@
 files on the host it runs on, at the request of a remote caller. **It is a
 remote code execution service.** That is the feature.
 
-**`sandboxd` does not sandbox.** The name describes what you point it at, not
+**`fleet` does not sandbox.** The name describes what you point it at, not
 what it provides. The agent applies a path jail, command policy, and resource
 caps, and those are worth having — but they are hardening, not isolation. A
 process that can run arbitrary code on a host has that host. Real isolation is
@@ -89,7 +89,7 @@ every file it writes is owned by it. **Running the agent as root means every
 sandbox command a model issues runs as root**, and the path jail is the only
 thing between it and the rest of the machine.
 
-So `service install` does not default to a superuser: a dedicated `sandboxd`
+So `service install` does not default to a superuser: a dedicated `fleet`
 system account on Linux, the invoking user on macOS, and `NT
 AUTHORITY\NetworkService` rather than `LocalSystem` on Windows. `--user root`
 is available, warns loudly, and is a decision rather than a default. See

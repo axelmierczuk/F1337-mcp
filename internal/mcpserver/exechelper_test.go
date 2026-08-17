@@ -17,7 +17,7 @@ import (
 // The awkward cases (a process that outlives its caller, one that writes more
 // output than any cap) then belong to this repository rather than to whatever
 // /bin/sh happens to do on the day.
-const helperEnv = "SANDBOXD_MCP_TEST_HELPER"
+const helperEnv = "FLEET_MCP_TEST_HELPER"
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(helperEnv); mode != "" {

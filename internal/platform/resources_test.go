@@ -54,7 +54,7 @@ func TestReadResources_MissingDiskPathStillReportsMemory(t *testing.T) {
 
 	// A bad disk path must not cost the caller the rest of the report: half a
 	// resource report is more useful to a scheduler than none.
-	res, err := platform.ReadResources(os.TempDir() + string(os.PathSeparator) + "sandboxd-no-such-directory-xyzzy")
+	res, err := platform.ReadResources(os.TempDir() + string(os.PathSeparator) + "fleet-no-such-directory-xyzzy")
 	require.NoError(t, err)
 	require.Positive(t, res.MemoryTotalBytes)
 	require.Zero(t, res.DiskTotalBytes)
