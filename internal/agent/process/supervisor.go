@@ -809,6 +809,13 @@ func (s *Supervisor) remove(r *record, force, deleteLogs bool) error {
 		if err := s.stopRecord(r, s.cfg.defaultGracePeriod, true); err != nil {
 			return err
 		}
+		// stopRecord is satisfied by RESTARTING — the run has ended — but a
+		// record waiting out a backoff still has a spawn on a timer, and
+		// deleting it now would leave that process supervised by nobody. With
+		// restarts suppressed the timer stands down into a terminal state.
+		if !s.awaitTerminal(r, killGrace) {
+			return fmt.Errorf("process %s is %s and did not stop", r.id, stateName(r.currentState()))
+		}
 	}
 
 	// Mark it removed before anything is deleted. A transition that lands

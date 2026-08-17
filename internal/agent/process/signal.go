@@ -218,6 +218,31 @@ func (s *Supervisor) awaitExit(r *record, timeout time.Duration) bool {
 	}
 }
 
+// awaitTerminal blocks until the record is in a terminal state, or the timeout
+// elapses.
+//
+// Unlike awaitExit it does not accept RESTARTING. A record waiting out a
+// backoff still has a spawn on a timer, and treating that as stopped is how an
+// explicit restart or a forced remove ends up racing an automatic restart.
+func (s *Supervisor) awaitTerminal(r *record, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	for {
+		changed, state := r.wait()
+		if isTerminal(state) {
+			return true
+		}
+		select {
+		case <-changed:
+		case <-deadline.C:
+			return false
+		case <-s.ctx.Done():
+			return false
+		}
+	}
+}
+
 // restart stops a process and starts it again from the same spec, keeping the
 // process id, the record and the log history.
 //
@@ -226,25 +251,30 @@ func (s *Supervisor) awaitExit(r *record, timeout time.Duration) bool {
 // bounds; charging an explicit request against that budget would let a caller
 // exhaust a service's automatic recovery by asking for restarts by hand.
 func (s *Supervisor) restart(r *record, grace time.Duration) error {
+	if r.currentState() == sandboxdv1.ProcessState_PROCESS_STATE_ORPHANED {
+		return errors.New("the process is ORPHANED and cannot be restarted; remove it and start a new one")
+	}
+
+	// Suppress the policy across the whole stop, not only the signal. A restart
+	// the policy already had pending is holding the record in RESTARTING with a
+	// spawn on a timer; with restarts suppressed that timer stands down into
+	// CRASHED instead of starting a second copy beside this one.
+	r.mu.Lock()
+	r.restartsDisabled = true
+	r.mu.Unlock()
+
 	if isLive(r.currentState()) {
-		// Restarts are suppressed for the stop half, then restored, so the
-		// policy does not race the explicit respawn and start a second copy.
 		if _, err := s.gracefulStop(r, grace, true, true); err != nil {
 			return err
 		}
+	}
+	if !s.awaitTerminal(r, killGrace) {
+		return fmt.Errorf("process %s is %s and did not stop", r.id, stateName(r.currentState()))
 	}
 
 	r.mu.Lock()
 	r.restartsDisabled = false
 	r.mu.Unlock()
-
-	state := r.currentState()
-	if state == sandboxdv1.ProcessState_PROCESS_STATE_ORPHANED {
-		return errors.New("the process is ORPHANED and cannot be restarted; remove it and start a new one")
-	}
-	if isLive(state) {
-		return fmt.Errorf("process %s is %s and did not stop", r.id, stateName(state))
-	}
 
 	if err := r.setState(sandboxdv1.ProcessState_PROCESS_STATE_RESTARTING, nil); err != nil {
 		return err
