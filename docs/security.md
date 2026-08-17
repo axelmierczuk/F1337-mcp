@@ -55,10 +55,21 @@ operator                control plane              new host
 
 - Tokens are **single-use** and short-lived.
 - **A token authorizes an identity, not just admission.** The name and addresses
-  given to `enroll mint` are the only ones the issued certificate carries. An
-  enrolling host may decline to use them; it cannot widen them, and asking to be
-  enrolled under a different name is refused. Otherwise one valid token yields a
-  CA-signed leaf for any name in the fleet, and mTLS stops meaning anything.
+  given to `enroll mint` are the only ones the issued certificate carries — in
+  its subject as much as in its subject alternative names, because an attacker
+  does not care which field a name it chose ends up in. An enrolling host may
+  decline to use them; it cannot widen them, and asking to be enrolled under a
+  different name is refused. Otherwise one valid token yields a CA-signed leaf
+  for any name in the fleet, and mTLS stops meaning anything.
+- **A registry label is not an identity.** A token minted without `--name` lets
+  the enrolling host pick what the fleet registry calls it. That name is a
+  label: it is echoed back as `assigned_name` and printed by `sandboxctl list`,
+  and it appears nowhere in the certificate.
+- Everything an enrolling host says about itself — its platform, its version,
+  the addresses it names — is bounded in length and rejected if it contains
+  anything but text. All of it is persisted in the registry and printed back to
+  an operator, and a terminal escape in a fleet listing is a lie about the
+  fleet.
 - The host generates its own keypair and sends only a CSR. **The private key
   never crosses the network**, so neither a leaked token nor a compromised
   control plane yields an existing agent's key.

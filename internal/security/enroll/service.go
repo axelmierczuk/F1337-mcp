@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
@@ -143,6 +145,13 @@ func (s *Service) Enroll(ctx context.Context, req *sandboxdv1.EnrollRequest) (*s
 	if err := checkRequestedName(requested); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	// The name is not the only string this request writes into the fleet
+	// registry, and the registry is printed back to the operator as a table.
+	// Everything else the host says about itself is bounded here for the same
+	// reason the name is.
+	if err := checkHostDescription(req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	switch {
 	case rec.Name != "" && requested != "" && requested != rec.Name:
 		return nil, status.Errorf(codes.InvalidArgument,
@@ -150,11 +159,13 @@ func (s *Service) Enroll(ctx context.Context, req *sandboxdv1.EnrollRequest) (*s
 	case rec.Name == "" && requested == "":
 		return nil, status.Error(codes.InvalidArgument, "enroll: no sandbox name requested and token reserved none")
 	}
-	// certName is the name the leaf may be certified for: the one the operator
-	// reserved at mint time. A token that reserved none lets its holder pick a
-	// name — a legitimate choice for bulk enrollment — but a name this side did
-	// not choose is a registry label and nothing more, so it stays out of the
-	// certificate.
+	// Two names, deliberately. name is the fleet registry's label for this
+	// sandbox and the enrolling host may choose it; certName is the name the
+	// leaf may be certified for and only the operator may choose it, at mint
+	// time. A token that reserved none lets its holder pick a label — a
+	// legitimate choice for bulk enrollment — but a name this side did not
+	// choose stays out of the certificate entirely: out of the SANs, and out of
+	// the subject. They are the same field to an attacker.
 	name, certName := requested, ""
 	if rec.Name != "" {
 		name, certName = rec.Name, rec.Name
@@ -162,6 +173,9 @@ func (s *Service) Enroll(ctx context.Context, req *sandboxdv1.EnrollRequest) (*s
 
 	// Everything that can reject this request runs before the registry write
 	// below, so a request that cannot be signed leaves no fleet member behind.
+	// "Everything" has to mean it: ca.CheckCSR here covers the request, and the
+	// certifiable closure below covers the names, which is the half that stayed
+	// inside SignCSR and so ran after the write.
 	extraHosts, err := checkRequestedAddresses(certName, rec.Addresses, req.GetListenAddresses())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -170,12 +184,26 @@ func (s *Service) Enroll(ctx context.Context, req *sandboxdv1.EnrollRequest) (*s
 		return nil, status.Errorf(codes.InvalidArgument, "enroll: %v", err)
 	}
 
+	// certifiable reports whether the leaf for a candidate name could actually
+	// be signed. Collision resolution decides that name, and the registry write
+	// that reserves it is irreversible, so the question has to be answerable
+	// before the write rather than after it.
+	certifiable := func(candidate string) error {
+		dnsNames, ips := sanSet(certifiedName(certName, candidate), rec.Addresses, extraHosts)
+		return ca.CheckSANs(dnsNames, ips)
+	}
+
 	// Record before signing: the registry entry is what reserves the name, so
 	// taking it first closes the window where two hosts enrolling at once both
 	// pass the collision check. A failure here means no certificate is issued
 	// at all, which is the safe direction.
-	name, err = s.reserve(name, enrolledSandbox(rec, req))
-	if err != nil {
+	name, err = s.reserve(name, enrolledSandbox(rec, req), certifiable)
+	switch {
+	case errors.Is(err, errUncertifiable):
+		// The caller's own request is what cannot be certified, so it gets to
+		// hear why — nothing here describes the control plane.
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	case err != nil:
 		// The caller is unauthenticated and a registry failure is the control
 		// plane's own problem, described in the control plane's own terms —
 		// down to absolute paths on its filesystem. It goes to the log.
@@ -186,22 +214,35 @@ func (s *Service) Enroll(ctx context.Context, req *sandboxdv1.EnrollRequest) (*s
 		)
 		return nil, status.Error(codes.Internal, "enroll: could not record this sandbox in the fleet registry")
 	}
-	if certName != "" {
-		// Collision resolution may have moved the name; certify what was
-		// actually created, never the name it collided with.
-		certName = name
-	}
+	// Collision resolution may have moved the name; certify what was actually
+	// created, never the name it collided with.
+	certName = certifiedName(certName, name)
 	dnsNames, ips := sanSet(certName, rec.Addresses, extraHosts)
 
 	cert, certPEM, err := s.CA.SignCSR(req.GetCsrDer(), ca.SignOptions{
-		Profile:     ca.ProfileAgent,
-		Subject:     name,
+		Profile: ca.ProfileAgent,
+		// The subject is a certificate field like any other, so it comes from
+		// the token and not from the request. Round 2 kept the host's chosen
+		// name out of the SANs but passed it here, which still yielded a
+		// CA-signed leaf whose common name was whatever its holder typed —
+		// the control plane's own name included.
+		Subject:     certName,
 		DNSNames:    dnsNames,
 		IPAddresses: ips,
 		TTL:         s.LeafTTL,
 	})
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "enroll: sign CSR: %v", err)
+		// Everything the caller could have got wrong — the CSR, the addresses,
+		// the names — was checked before the registry write above. A failure
+		// this late is the control plane's own: a CA whose key does not match
+		// its certificate, a signing step that broke. Blaming the caller for it
+		// with InvalidArgument would be wrong, and the detail is internal.
+		s.log().Error("enrollment could not sign an agent leaf",
+			slog.String("peer", peerAddr(ctx)),
+			slog.String("name", name),
+			slog.String("error", err.Error()),
+		)
+		return nil, status.Error(codes.Internal, "enroll: could not sign a certificate for this sandbox")
 	}
 
 	return &sandboxdv1.EnrollResponse{
@@ -229,6 +270,11 @@ func (s *Service) log() *slog.Logger {
 	return s.Log
 }
 
+// errUncertifiable marks a reserve failure caused by the request itself rather
+// than by the fleet registry, so Enroll can tell the caller what was wrong with
+// what it sent instead of reporting the control plane as broken.
+var errUncertifiable = errors.New("enroll: this request cannot be certified")
+
 // reserve records sb under base, or under the first free "base-N" when base is
 // taken, and returns the name it settled on. The response's AssignedName tells
 // the caller which name it actually got, so a collision is visible rather than
@@ -238,7 +284,12 @@ func (s *Service) log() *slog.Logger {
 // write, but it is not trusted: between the check and the record, another host
 // enrolling concurrently can take the name. The record is the reservation, so
 // an ErrNameTaken from it simply moves the search on.
-func (s *Service) reserve(base string, sb EnrolledSandbox) (string, error) {
+//
+// certifiable is consulted for the candidate this call is about to take, and it
+// is what keeps the reservation and the certificate in step. The registry entry
+// cannot be taken back, so a candidate whose leaf could not be signed must be
+// rejected before the write, not discovered after it.
+func (s *Service) reserve(base string, sb EnrolledSandbox, certifiable func(string) error) (string, error) {
 	for i := 0; i < maxNameAttempts; i++ {
 		candidate := base
 		if i > 0 {
@@ -246,6 +297,9 @@ func (s *Service) reserve(base string, sb EnrolledSandbox) (string, error) {
 		}
 		if s.Names != nil && s.Names.Exists(candidate) {
 			continue
+		}
+		if err := certifiable(candidate); err != nil {
+			return candidate, fmt.Errorf("%w: %w", errUncertifiable, err)
 		}
 		if s.Fleet == nil {
 			return candidate, nil
@@ -261,6 +315,21 @@ func (s *Service) reserve(base string, sb EnrolledSandbox) (string, error) {
 		}
 	}
 	return base, fmt.Errorf("enroll: no name free for %q after %d attempts", base, maxNameAttempts)
+}
+
+// certifiedName is the name a leaf may carry once collision resolution has
+// settled on assigned.
+//
+// A token that reserved a name certifies whichever name was actually created
+// for it — the reserved one, or the free "-N" the collision moved it to. A
+// token that reserved none certifies nothing: the name such a host picks for
+// itself is a registry label, and a label the control plane did not choose has
+// no business in a certificate, as a subject or as anything else.
+func certifiedName(reserved, assigned string) string {
+	if reserved == "" {
+		return ""
+	}
+	return assigned
 }
 
 // maxNameLength bounds a caller-supplied sandbox name. The name reaches the
@@ -282,6 +351,76 @@ func checkRequestedName(name string) error {
 		// best and something crafted for a log or a terminal at worst.
 		if r <= ' ' || r > '~' {
 			return fmt.Errorf("enroll: requested sandbox name contains an invalid character %q", r)
+		}
+	}
+	return nil
+}
+
+// maxDescriptorLength bounds each of the strings an enrolling host uses to
+// describe itself. None of them is an identity — they are recorded for an
+// operator to read — but all of them are persisted in the fleet registry and
+// printed back in `sandboxctl list`, and a kernel version has no more use for a
+// kilobyte than a name does.
+const maxDescriptorLength = 256
+
+// maxListenAddresses bounds how many endpoints one request may name. A fleet
+// member listens on a handful; the number here is generous for that and still
+// keeps the registry a record of a host rather than of a message.
+const maxListenAddresses = 32
+
+// checkHostDescription bounds every caller-supplied string on the request
+// other than the name, which checkRequestedName has already covered.
+//
+// These reach the same two places the name does — a registry entry and an
+// operator's terminal — so they get the same treatment. Round 2 bounded the
+// name because "a sandbox name is typed on a command line and printed in a
+// table"; that is equally true of the platform an agent claims to run on and
+// the version it claims to be, and those were left unbounded and unchecked.
+func checkHostDescription(req *sandboxdv1.EnrollRequest) error {
+	p := req.GetPlatform()
+	for _, field := range []struct{ name, value string }{
+		{"agent version", req.GetAgentVersion()},
+		{"platform OS", p.GetOs()},
+		{"platform architecture", p.GetArch()},
+		{"platform kernel version", p.GetKernelVersion()},
+		{"platform hostname", p.GetHostname()},
+		{"platform path separator", p.GetPathSeparator()},
+	} {
+		if err := checkDescriptor(field.name, field.value); err != nil {
+			return err
+		}
+	}
+
+	addrs := req.GetListenAddresses()
+	if len(addrs) > maxListenAddresses {
+		return fmt.Errorf("enroll: request names %d listen addresses, limit is %d", len(addrs), maxListenAddresses)
+	}
+	for _, addr := range addrs {
+		if err := checkDescriptor("listen address", addr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkDescriptor bounds one self-described string's length and rejects
+// anything in it that is not text.
+//
+// Control characters are the point: the first listen address becomes the
+// registry's address for this sandbox, and every one of these fields is
+// printed into `sandboxctl list`'s table. A terminal escape sequence there
+// rewrites what the operator sees about their own fleet, and a newline splits
+// one row into two.
+func checkDescriptor(field, value string) error {
+	if len(value) > maxDescriptorLength {
+		return fmt.Errorf("enroll: %s is %d bytes, limit is %d", field, len(value), maxDescriptorLength)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("enroll: %s is not valid UTF-8", field)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return fmt.Errorf("enroll: %s contains a control character %q", field, r)
 		}
 	}
 	return nil
@@ -364,12 +503,20 @@ func sanSet(certName string, authorized, extra []string) (dnsNames []string, ips
 
 // hostOf strips the port from a host:port address, tolerating a bare host and
 // discarding wildcard listen addresses, which name no host at all.
+//
+// A bracketed IPv6 literal without a port ("[::1]") is a form SplitHostPort
+// rejects, so the brackets are stripped here instead. Leaving them on turned a
+// loopback address into a string net.ParseIP could not read, which then reached
+// the certificate as a DNS name and was refused there — after the registry
+// entry had already been written.
 func hostOf(addr string) string {
 	host := addr
 	if h, _, err := net.SplitHostPort(addr); err == nil {
 		host = h
+	} else if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
 	}
-	if host == "0.0.0.0" || host == "::" || host == "[::]" {
+	if host == "0.0.0.0" || host == "::" {
 		return ""
 	}
 	return host

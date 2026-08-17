@@ -71,6 +71,29 @@ func TestInit_ForceOverwrites(t *testing.T) {
 	assert.NotEqual(t, first.Certificate().Raw, second.Certificate().Raw)
 }
 
+// A certificate beside a key from a different CA is what a half-restored
+// backup, or two `ca init` runs pointed at overlapping directories, leaves
+// behind. Loading it succeeds, so `sandboxctl serve` starts and `ca
+// fingerprint` prints — and the operator distributes — the fingerprint of a CA
+// this process cannot sign for. Every enrollment then fails at the last step,
+// after its token has been spent.
+func TestLoad_RejectsCertificateAndKeyFromDifferentCAs(t *testing.T) {
+	dirA := filepath.Join(t.TempDir(), "a")
+	dirB := filepath.Join(t.TempDir(), "b")
+	_, err := ca.Init(dirA, false)
+	require.NoError(t, err)
+	_, err = ca.Init(dirB, false)
+	require.NoError(t, err)
+
+	keyB, err := os.ReadFile(filepath.Join(dirB, "ca.key"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dirA, "ca.key"), keyB, 0o600))
+
+	_, err = ca.Load(dirA)
+	require.Error(t, err, "a certificate and a key from different CAs are not a CA")
+	assert.Contains(t, err.Error(), "different CAs")
+}
+
 func TestSignCSR_AgentProfile_ServerAuthValidates(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "ca")
 	c, err := ca.Init(dir, false)

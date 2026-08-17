@@ -29,7 +29,7 @@ func TestMapError_MapsKnownCodes(t *testing.T) {
 		{codes.DeadlineExceeded, client.ErrDeadlineExceeded},
 		{codes.Unauthenticated, client.ErrCertificateRejected},
 		{codes.PermissionDenied, client.ErrPermissionDenied},
-		{codes.ResourceExhausted, client.ErrMessageTooLarge},
+		{codes.ResourceExhausted, client.ErrResourceExhausted},
 	}
 	for _, tc := range cases {
 		t.Run(tc.code.String(), func(t *testing.T) {
@@ -57,4 +57,22 @@ func TestMapError_PolicyDenialIsNotACertificateProblem(t *testing.T) {
 	rejected := client.MapError(status.Error(codes.Unauthenticated, "bad certificate"))
 	assert.ErrorIs(t, rejected, client.ErrCertificateRejected)
 	assert.NotErrorIs(t, rejected, client.ErrPermissionDenied)
+}
+
+// ResourceExhausted is not one condition. gRPC raises it when a message
+// exceeds the configured limit, and the agent raises it when a budget of its
+// own runs out — the cap on concurrently supervised processes that
+// docs/security.md commits to. Reporting the second as the first sends an
+// operator to resize a message that was never too big.
+func TestMapError_ResourceExhaustedIsNotAlwaysASizeLimit(t *testing.T) {
+	tooBig := client.MapError(status.Error(codes.ResourceExhausted,
+		"grpc: received message larger than max (5242880 vs. 4194304)"))
+	assert.ErrorIs(t, tooBig, client.ErrMessageTooLarge)
+	assert.NotErrorIs(t, tooBig, client.ErrResourceExhausted)
+
+	atCap := client.MapError(status.Error(codes.ResourceExhausted,
+		"sandbox is already supervising the maximum of 16 processes"))
+	assert.ErrorIs(t, atCap, client.ErrResourceExhausted)
+	assert.NotErrorIs(t, atCap, client.ErrMessageTooLarge,
+		"a process-count cap is not fixed by reading less at a time")
 }
