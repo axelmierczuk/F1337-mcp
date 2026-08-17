@@ -47,6 +47,7 @@ func TestSession_IsRecordedWithoutItsContents(t *testing.T) {
 
 	sess, err := openSession(ctx, t, client, openOptions("cat"))
 	require.NoError(t, err)
+	sess.awaitOutput(catReady)
 
 	require.NoError(t, sess.typed(typedSecret+"\n"))
 	// Waited for, not assumed: if the secret never reached the session, the

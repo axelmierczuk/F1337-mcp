@@ -88,6 +88,7 @@ func TestSession_CarriesTypingToTheProgramAndItsOutputBack(t *testing.T) {
 
 	sess, err := openSession(ctx, t, client, openOptions("cat"))
 	require.NoError(t, err)
+	sess.awaitOutput(catReady)
 
 	require.NoError(t, sess.typed("hello-from-the-operator\n"))
 	sess.awaitOutput("read[hello-from-the-operator]")
@@ -158,7 +159,7 @@ func TestSession_InterruptByteReachesTheProgramRatherThanTheStream(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, sess.typed(strings.Join(selfArgv(), " ")+"; echo survived=$((21+21))\n"))
+	require.NoError(t, sess.typed(strings.Join(selfArgv(), " ")+"\n"))
 	// The interrupt is sent only once the helper is the terminal's foreground
 	// process. A Ctrl-C arriving while the shell is still parsing the line
 	// interrupts nothing.
@@ -166,9 +167,19 @@ func TestSession_InterruptByteReachesTheProgramRatherThanTheStream(t *testing.T)
 
 	require.NoError(t, sess.typed("\x03"))
 
-	// The shell ran the next command, which means the interrupt reached the
-	// program in the foreground and not the shell behind it.
-	sess.awaitOutput("survived=42")
+	// A fresh command, and its answer. One assertion covers both halves of the
+	// criterion and neither is reachable without the other: the shell only
+	// reads this line once the program in front of it has ended, so an
+	// interrupt that never arrived leaves it unread forever.
+	//
+	// It is a separate line rather than the tail of the one above, because what
+	// a shell does with the *rest of a command list* after an interrupt is the
+	// shell's own business — dash abandons it and bash carries on, and this
+	// test is about the agent rather than about /bin/sh. The marker is
+	// arithmetic, so the answer is something the far end computed rather than
+	// something the terminal echoed back.
+	require.NoError(t, sess.typed("echo after=$((21+21))\n"))
+	sess.awaitOutput("after=42")
 
 	// And the session itself is still there — the half that fails if an
 	// interrupt is treated as anything other than a byte on the wire.
@@ -230,6 +241,7 @@ func TestSession_ActivityKeepsAnIdleTimeoutAtBay(t *testing.T) {
 
 	sess, err := openSession(ctx, t, client, openOptions("cat"))
 	require.NoError(t, err)
+	sess.awaitOutput(catReady)
 
 	// Typing for twice the timeout. Each line is answered, so both directions
 	// are carrying bytes throughout.

@@ -196,7 +196,9 @@ func winsize() {
 	ctx, cancel := context.WithTimeout(context.Background(), winsizeLifetime)
 	defer cancel()
 
-	platform.WatchWindowSize(ctx, os.Stdin.Fd(), func(columns, rows int) {
+	// stdout, not stdin: on Windows a terminal's size comes from the console
+	// screen buffer, and only the output handle has one.
+	platform.WatchWindowSize(ctx, os.Stdout.Fd(), func(columns, rows int) {
 		fmt.Printf("size %dx%d\n", columns, rows)
 	})
 }

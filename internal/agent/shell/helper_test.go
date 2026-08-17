@@ -119,6 +119,14 @@ func arg(args []string, fallback string) string {
 	return args[0]
 }
 
+// catReady is what the cat helper prints before it starts reading.
+//
+// Every test that types waits for it first. Input written to a terminal whose
+// program has not attached to it yet can be dropped — reliably enough on a
+// Windows pseudo-console that CI caught it, and in principle anywhere — and the
+// program's own first line is the only thing that says it is there to read.
+const catReady = "cat-ready"
+
 // helperCat reads from the terminal a byte at a time.
 //
 // A byte at a time rather than bufio, because a terminal in canonical mode
@@ -126,6 +134,8 @@ func arg(args []string, fallback string) string {
 // hold the last partial line — which is the state this helper spends most of
 // its life in.
 func helperCat() int {
+	fmt.Println(catReady)
+
 	var line strings.Builder
 	buf := make([]byte, 1)
 	for {
@@ -151,11 +161,18 @@ func helperCat() int {
 
 // helperWinsize prints its terminal's size whenever it changes, including once
 // at startup.
+//
+// The size is read from stdout rather than stdin, and that is not
+// interchangeable: a terminal's size belongs to the terminal on Unix and either
+// descriptor answers, but on Windows it comes from the console screen buffer
+// and only the output handle has one. Asking stdin there fails, and a helper
+// that asked would print nothing at all on the platform whose resize path is
+// least like the others.
 func helperWinsize() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	platform.WatchWindowSize(ctx, os.Stdin.Fd(), func(columns, rows int) {
+	platform.WatchWindowSize(ctx, os.Stdout.Fd(), func(columns, rows int) {
 		fmt.Printf("size %dx%d\n", columns, rows)
 	})
 	return 0
