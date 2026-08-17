@@ -273,14 +273,14 @@ func parsePolicy(s string) (sandboxdv1.RestartPolicy, error) {
 func processLine(st *sandboxdv1.ProcessStatus, now time.Time) ProcessLine {
 	line := ProcessLine{
 		ProcessID:      st.GetProcessId(),
-		Name:           clip(st.GetName(), maxProcessName),
+		Name:           clipCell(st.GetName(), maxProcessName),
 		State:          stateString(st.GetState()),
 		PID:            st.GetPid(),
-		Command:        clip(strings.Join(st.GetArgv(), " "), maxCommandChars),
+		Command:        clipCell(strings.Join(st.GetArgv(), " "), maxCommandChars),
 		RestartCount:   st.GetRestartCount(),
-		LastLogLine:    clip(st.GetLastLogLine(), maxLastLogLine),
+		LastLogLine:    clipCell(st.GetLastLogLine(), maxLastLogLine),
 		ListeningPorts: sortedPorts(st.GetListeningPorts()),
-		AdoptionNote:   clip(st.GetAdoptionNote(), maxLastLogLine),
+		AdoptionNote:   clipCell(st.GetAdoptionNote(), maxLastLogLine),
 		Signal:         st.GetSignal(),
 	}
 	if started := st.GetStartedAt(); started != nil {
@@ -317,22 +317,18 @@ func processDetail(st *sandboxdv1.ProcessStatus, now time.Time) ProcessDetail {
 	return d
 }
 
-// clip bounds an agent-supplied string, cutting on a rune boundary.
-func clip(s string, limit int) string {
-	s = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(s, "\r", ""), "\n", " "), " ")
-	if len(s) <= limit {
-		return s
-	}
-	cut := limit
-	for cut > 0 && !utf8RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "…"
+// clipCell bounds an agent-supplied string for one cell of the listing.
+//
+// It flattens first and then bounds, which is the difference from [clip] in
+// output.go and the reason this is not that: a cell of a fixed-width table is
+// one line by definition, so a newline in one — in a process name, in the last
+// line of output, in an adoption note — splits its row in two and breaks the
+// only claim the listing makes. Bounding a string that still contains a newline
+// bounds the wrong thing. Trailing spaces go too, so the last column of a row
+// cannot carry padding past the end of the line.
+func clipCell(s string, limit int) string {
+	return clip(strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(s, "\r", ""), "\n", " "), " "), limit)
 }
-
-// utf8RuneStart is utf8.RuneStart, inlined so this file does not import the
-// package for one predicate.
-func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
 // processClient dials the target's ProcessService.
 func (r *Registrar) processClient(target *selection.Target) (sandboxdv1.ProcessServiceClient, error) {

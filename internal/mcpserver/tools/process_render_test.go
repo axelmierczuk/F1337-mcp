@@ -468,6 +468,24 @@ func TestClip_CutsOnARuneBoundary(t *testing.T) {
 	assert.True(t, isValidUTF8(got), "clipping mid-rune would put invalid UTF-8 into the result")
 }
 
+// clipCell is clip plus the one thing a table cell needs and a rendered line
+// does not: it flattens before it bounds, because a cell of a fixed-width table
+// is one line by definition and bounding a string that still holds a newline
+// bounds the wrong thing.
+func TestClipCell_FlattensBeforeItBounds(t *testing.T) {
+	got := clipCell("web\ndev\r\nlisten", 64)
+	assert.Equal(t, "web dev listen", got)
+	assert.NotContains(t, got, "\n")
+
+	// And a cell that is only newlines and padding leaves nothing hanging off
+	// the end of its row.
+	assert.Empty(t, clipCell("  \n  \r\n", 64))
+
+	long := clipCell(strings.Repeat("é", 200)+"\nsecond line", 20)
+	assert.True(t, strings.HasSuffix(long, "…"))
+	assert.NotContains(t, long, "\n")
+}
+
 func isValidUTF8(s string) bool {
 	for _, r := range s {
 		if r == '�' {

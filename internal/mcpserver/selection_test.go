@@ -222,6 +222,23 @@ func TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, listed.Tools)
 
+	// The walk is driven from tools/list, which is what makes it cover a tool
+	// the moment it is registered — and is also the one thing it cannot check
+	// about itself. A registration lost to a merge shortens the list, and a
+	// walk over a shorter list passes without ever mentioning what is missing:
+	// two milestones landing side by side each add a registerX line to the same
+	// Register, and a resolution that takes one side wholesale unregisters the
+	// other's tools silently. So the check runs both ways — every listed tool
+	// needs a fixture, and every fixture has to have been listed.
+	listedNames := map[string]bool{}
+	for _, tool := range listed.Tools {
+		listedNames[tool.Name] = true
+	}
+	for name := range echoFixtures {
+		assert.Truef(t, listedNames[name],
+			"%s has a fixture but is not registered: a tool that stopped being registered is a tool this walk would otherwise stop covering without saying so", name)
+	}
+
 	for _, tool := range listed.Tools {
 		fixture, ok := echoFixtures[tool.Name]
 		require.Truef(t, ok,

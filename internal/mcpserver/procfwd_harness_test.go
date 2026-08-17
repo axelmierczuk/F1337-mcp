@@ -48,9 +48,18 @@ import (
 
 // ------------------------------------------------------------ child process
 
-// helperEnv marks a re-executed copy of this test binary as a supervised
+// m2HelperEnv marks a re-executed copy of this test binary as a supervised
 // child rather than a test run.
-const helperEnv = "SANDBOXD_MCP_M2_HELPER"
+//
+// Named apart from exechelper_test.go's helperEnv, and dispatched apart from
+// it, because the two want different things from the binary. #48's helper is
+// selected in TestMain and returns an exit code; these children are supervised
+// processes that outlive the call that started them, so they are entered
+// through a test function and run until they are signalled. Both mechanisms
+// live in one package and neither is the other's dispatcher: a child of this
+// one leaves SANDBOXD_MCP_TEST_HELPER unset, so TestMain hands it to m.Run and
+// TestM2HelperChild picks it up.
+const m2HelperEnv = "SANDBOXD_MCP_M2_HELPER"
 
 // TestM2HelperChild is the entry point of every process the process-tool tests
 // supervise. It is not a test.
@@ -62,13 +71,13 @@ const helperEnv = "SANDBOXD_MCP_M2_HELPER"
 // this binary runs the same test everywhere against a child whose behaviour the
 // test controls exactly.
 func TestM2HelperChild(t *testing.T) {
-	if os.Getenv(helperEnv) == "" {
+	if os.Getenv(m2HelperEnv) == "" {
 		t.Skip("not a test: the child-process entry point for the process-tool tests")
 	}
-	helperMain()
+	m2HelperMain()
 }
 
-func helperMain() {
+func m2HelperMain() {
 	args := os.Args[1:]
 	for i, arg := range args {
 		if arg == "--" {
@@ -205,7 +214,7 @@ func helperArgv(t *testing.T, mode string, args ...string) []string {
 
 // helperEnviron is the environment a supervised child needs to run as a child
 // rather than as a test.
-func helperEnviron() []string { return []string{helperEnv + "=1"} }
+func helperEnviron() []string { return []string{m2HelperEnv + "=1"} }
 
 // ------------------------------------------------------------- live agent
 
