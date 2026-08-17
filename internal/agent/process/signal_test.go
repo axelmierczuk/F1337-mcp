@@ -332,10 +332,13 @@ func TestBackoffGrowsBetweenRestarts(t *testing.T) {
 	r, err := ts.start(spec, false)
 	require.NoError(t, err)
 
-	waitFor(t, 60*time.Second, "the restart budget to be exhausted", func() bool {
-		return r.status().GetRestartCount() >= 3 &&
-			r.currentState() == sandboxdv1.ProcessState_PROCESS_STATE_CRASHED
-	})
+	// The give-up note, rather than a state and a count read separately: those
+	// are two locks and can match a moment that never existed. The note is
+	// written once, after the last restart the budget allows has already been
+	// decided, so every backoff this test is about is recorded by the time it
+	// appears and no further one can be.
+	waitForLine(t, r, 60*time.Second, "giving up after 3 restarts")
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_CRASHED, r.currentState())
 
 	mu.Lock()
 	got := slices.Clone(decided)
@@ -406,17 +409,25 @@ func TestMaxRestartsIsHonouredThenTheSupervisorGivesUp(t *testing.T) {
 	r, err := ts.start(spec, false)
 	require.NoError(t, err)
 
-	waitFor(t, 30*time.Second, "the supervisor to give up", func() bool {
-		return r.currentState() == sandboxdv1.ProcessState_PROCESS_STATE_CRASHED &&
-			r.status().GetRestartCount() >= 2
-	})
+	// Waiting for the note the supervisor writes when it gives up, which is the
+	// fact this test is about and also the last thing to happen.
+	//
+	// Not for a state and a count. Those are two reads under two separate
+	// locks, so the pair can match a moment that never existed: CRASHED left
+	// over from the second run's exit, and a count of 2 read after the third
+	// run had already been spawned. The test then went on to require the note
+	// 400ms later, and whether the supervisor had got that far in 400ms was a
+	// question about the runner rather than about the supervisor. It failed on
+	// windows-latest with both restarts recorded and the give-up note not yet
+	// written.
+	waitForLine(t, r, 30*time.Second, "giving up after 2 restarts")
 
-	// It stays given up: no further restarts once the budget is spent.
+	// It stays given up: no further restarts once the budget is spent. The
+	// sleep is sound in this direction — it asserts nothing further happened,
+	// so a slow runner can only make it more true.
 	time.Sleep(400 * time.Millisecond)
 	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_CRASHED, r.currentState())
 	require.EqualValues(t, 2, r.status().GetRestartCount())
-	require.Contains(t, strings.Join(logTexts(r), "\n"), "giving up after 2 restarts",
-		"the reason has to be recorded where someone will read it")
 }
 
 // TestRestartCounterResetsAfterSustainedUptime: a service that crashes once a
