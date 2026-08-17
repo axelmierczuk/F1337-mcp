@@ -122,16 +122,31 @@ func spew(args []string) {
 	}
 }
 
+// treeLifetime bounds how long a level of the tree lasts if nothing kills it.
+//
+// The tree exists to be killed, and no scenario ever asserts that it is still
+// there — only that it is gone, within deadlines of thirty seconds or less. A
+// bound three orders of magnitude beyond those therefore cannot make any
+// assertion pass for the wrong reason.
+//
+// What it bounds is the mess a failing run leaves behind. The scenario kills the
+// pids it parsed out of the command's output when it fails, but a run that never
+// gets that output — an exec that timed out at the call level, an agent that
+// died mid-call, a result that would not decode — has nothing to kill, and
+// without this each such run would strand three processes that sleep forever.
+const treeLifetime = 5 * time.Minute
+
 // tree announces its pid and process group, spawns a child one level
-// shallower, and then sleeps forever.
+// shallower, and then waits to be killed.
 //
 // Each level prints "pid N pgid M" on the shared stdout, so the caller ends up
 // holding the identity of every process in the tree. The group id is there so
 // the caller can tell whether the command really leads a group of its own:
 // "nothing is left in the group" is a claim about an empty set either way, and
-// only true membership makes it a claim about this tree. Nothing here exits on
-// its own: the only way this tree ends is for something to kill it, which is
-// the question the timeout scenario asks.
+// only true membership makes it a claim about this tree. Within any window a
+// scenario observes, the only way this tree ends is for something to kill it,
+// which is the question the timeout scenario asks; see treeLifetime for the
+// long stop that keeps a failed run from stranding it forever.
 func tree(args []string) {
 	depth := 2
 	if len(args) > 0 {
@@ -151,7 +166,7 @@ func tree(args []string) {
 			fail("spawn child: " + err.Error())
 		}
 	}
-	sleepForever()
+	time.Sleep(treeLifetime)
 }
 
 // sleepForever blocks until something kills the process.

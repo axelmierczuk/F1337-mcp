@@ -46,18 +46,18 @@ func TestExecTimeoutKillsTheWholeProcessTree(t *testing.T) {
 		"timeout_seconds": 2,
 	}, callOptions{timeout: 120 * time.Second}))
 
-	if !res.TimedOut {
-		t.Fatalf("a command that never exits should have been killed for overrunning: %+v", res)
-	}
-
+	// Registered before the first assertion rather than after the last
+	// precondition, because the assertions are what fail. The tree sleeps until
+	// something kills it, so a run that gave up here would leave three
+	// processes on the machine and three more the next time — and the two
+	// checks below are exactly the ones that fire when the agent has *not*
+	// killed it, which is when the survivors are certain rather than merely
+	// possible.
+	//
+	// Only when the scenario failed, and then only because it failed: on the
+	// passing path these pids are already gone and could belong to somebody
+	// else by now.
 	procs := parseTree(t, res.Stdout)
-	if len(procs) != 3 {
-		t.Fatalf("expected three levels of the tree to announce themselves, got %v from:\n%s", procs, res.Stdout)
-	}
-	// Only when the scenario failed, and then only because it failed: the tree
-	// sleeps forever, so an agent that did not kill it leaves three processes on
-	// the machine for every run. Nothing is signalled on the passing path, where
-	// these pids are already gone and could belong to somebody else.
 	t.Cleanup(func() {
 		if !t.Failed() {
 			return
@@ -66,6 +66,13 @@ func TestExecTimeoutKillsTheWholeProcessTree(t *testing.T) {
 			killPID(p.pid)
 		}
 	})
+
+	if !res.TimedOut {
+		t.Fatalf("a command that never exits should have been killed for overrunning: %+v", res)
+	}
+	if len(procs) != 3 {
+		t.Fatalf("expected three levels of the tree to announce themselves, got %v from:\n%s", procs, res.Stdout)
+	}
 
 	// Checked before anything is asserted about the group, because it is what
 	// makes those assertions mean anything. The leader reported its own group
