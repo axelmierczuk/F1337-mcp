@@ -203,10 +203,18 @@ func (*ReadFileResponse_Result) isReadFileResponse_Event() {}
 type ReadResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	LinesReturned uint64                 `protobuf:"varint,1,opt,name=lines_returned,json=linesReturned,proto3" json:"lines_returned,omitempty"`
-	TotalLines    uint64                 `protobuf:"varint,2,opt,name=total_lines,json=totalLines,proto3" json:"total_lines,omitempty"`
-	Truncation    *Truncation            `protobuf:"bytes,3,opt,name=truncation,proto3" json:"truncation,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Lines in the whole file. Exact only when total_lines_exact is set;
+	// otherwise it is a lower bound.
+	TotalLines uint64      `protobuf:"varint,2,opt,name=total_lines,json=totalLines,proto3" json:"total_lines,omitempty"`
+	Truncation *Truncation `protobuf:"bytes,3,opt,name=truncation,proto3" json:"truncation,omitempty"`
+	// True when total_lines counts the whole file. Counting lines means reading
+	// every byte, so the agent stops at a size bound rather than reading a
+	// gigabyte to answer a windowed read; past that bound total_lines reports
+	// how far the count got and this is false. A caller that renders "line 40 of
+	// N" must not print N when this is false.
+	TotalLinesExact bool `protobuf:"varint,4,opt,name=total_lines_exact,json=totalLinesExact,proto3" json:"total_lines_exact,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ReadResult) Reset() {
@@ -258,6 +266,13 @@ func (x *ReadResult) GetTruncation() *Truncation {
 		return x.Truncation
 	}
 	return nil
+}
+
+func (x *ReadResult) GetTotalLinesExact() bool {
+	if x != nil {
+		return x.TotalLinesExact
+	}
+	return false
 }
 
 type FileMetadata struct {
@@ -959,8 +974,12 @@ type GlobRequest struct {
 	Limit uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
 	// Honour .gitignore rules while walking.
 	RespectGitignore bool `protobuf:"varint,4,opt,name=respect_gitignore,json=respectGitignore,proto3" json:"respect_gitignore,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Walk into .git, node_modules, vendor and target, which are skipped by
+	// default. The default walk is otherwise dominated by directories nobody
+	// meant to search.
+	IncludeDefaultIgnored bool `protobuf:"varint,5,opt,name=include_default_ignored,json=includeDefaultIgnored,proto3" json:"include_default_ignored,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *GlobRequest) Reset() {
@@ -1017,6 +1036,13 @@ func (x *GlobRequest) GetLimit() uint32 {
 func (x *GlobRequest) GetRespectGitignore() bool {
 	if x != nil {
 		return x.RespectGitignore
+	}
+	return false
+}
+
+func (x *GlobRequest) GetIncludeDefaultIgnored() bool {
+	if x != nil {
+		return x.IncludeDefaultIgnored
 	}
 	return false
 }
@@ -1086,9 +1112,12 @@ type GrepRequest struct {
 	MaxMatches       uint32 `protobuf:"varint,6,opt,name=max_matches,json=maxMatches,proto3" json:"max_matches,omitempty"`
 	RespectGitignore bool   `protobuf:"varint,7,opt,name=respect_gitignore,json=respectGitignore,proto3" json:"respect_gitignore,omitempty"`
 	// Return only the names of matching files, not the matching lines.
-	FilesOnly     bool `protobuf:"varint,8,opt,name=files_only,json=filesOnly,proto3" json:"files_only,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	FilesOnly bool `protobuf:"varint,8,opt,name=files_only,json=filesOnly,proto3" json:"files_only,omitempty"`
+	// Search inside .git, node_modules, vendor and target, which are skipped by
+	// default.
+	IncludeDefaultIgnored bool `protobuf:"varint,9,opt,name=include_default_ignored,json=includeDefaultIgnored,proto3" json:"include_default_ignored,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *GrepRequest) Reset() {
@@ -1173,6 +1202,13 @@ func (x *GrepRequest) GetRespectGitignore() bool {
 func (x *GrepRequest) GetFilesOnly() bool {
 	if x != nil {
 		return x.FilesOnly
+	}
+	return false
+}
+
+func (x *GrepRequest) GetIncludeDefaultIgnored() bool {
+	if x != nil {
+		return x.IncludeDefaultIgnored
 	}
 	return false
 }
@@ -1741,7 +1777,7 @@ const file_sandboxd_v1_fs_proto_rawDesc = "" +
 	"\bmetadata\x18\x01 \x01(\v2\x19.sandboxd.v1.FileMetadataH\x00R\bmetadata\x12\x16\n" +
 	"\x05chunk\x18\x02 \x01(\fH\x00R\x05chunk\x121\n" +
 	"\x06result\x18\x03 \x01(\v2\x17.sandboxd.v1.ReadResultH\x00R\x06resultB\a\n" +
-	"\x05event\"\x8d\x01\n" +
+	"\x05event\"\xb9\x01\n" +
 	"\n" +
 	"ReadResult\x12%\n" +
 	"\x0elines_returned\x18\x01 \x01(\x04R\rlinesReturned\x12\x1f\n" +
@@ -1749,7 +1785,8 @@ const file_sandboxd_v1_fs_proto_rawDesc = "" +
 	"totalLines\x127\n" +
 	"\n" +
 	"truncation\x18\x03 \x01(\v2\x17.sandboxd.v1.TruncationR\n" +
-	"truncation\"\x8c\x02\n" +
+	"truncation\x12*\n" +
+	"\x11total_lines_exact\x18\x04 \x01(\bR\x0ftotalLinesExact\"\x8c\x02\n" +
 	"\fFileMetadata\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1d\n" +
 	"\n" +
@@ -1803,17 +1840,18 @@ const file_sandboxd_v1_fs_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"a\n" +
 	"\x10StatPathResponse\x12\x16\n" +
 	"\x06exists\x18\x01 \x01(\bR\x06exists\x125\n" +
-	"\bmetadata\x18\x02 \x01(\v2\x19.sandboxd.v1.FileMetadataR\bmetadata\"~\n" +
+	"\bmetadata\x18\x02 \x01(\v2\x19.sandboxd.v1.FileMetadataR\bmetadata\"\xb6\x01\n" +
 	"\vGlobRequest\x12\x18\n" +
 	"\apattern\x18\x01 \x01(\tR\apattern\x12\x12\n" +
 	"\x04root\x18\x02 \x01(\tR\x04root\x12\x14\n" +
 	"\x05limit\x18\x03 \x01(\rR\x05limit\x12+\n" +
-	"\x11respect_gitignore\x18\x04 \x01(\bR\x10respectGitignore\"]\n" +
+	"\x11respect_gitignore\x18\x04 \x01(\bR\x10respectGitignore\x126\n" +
+	"\x17include_default_ignored\x18\x05 \x01(\bR\x15includeDefaultIgnored\"]\n" +
 	"\fGlobResponse\x12\x14\n" +
 	"\x05paths\x18\x01 \x03(\tR\x05paths\x127\n" +
 	"\n" +
 	"truncation\x18\x02 \x01(\v2\x17.sandboxd.v1.TruncationR\n" +
-	"truncation\"\x9b\x02\n" +
+	"truncation\"\xd3\x02\n" +
 	"\vGrepRequest\x12\x18\n" +
 	"\apattern\x18\x01 \x01(\tR\apattern\x12\x12\n" +
 	"\x04root\x18\x02 \x01(\tR\x04root\x12!\n" +
@@ -1824,7 +1862,8 @@ const file_sandboxd_v1_fs_proto_rawDesc = "" +
 	"maxMatches\x12+\n" +
 	"\x11respect_gitignore\x18\a \x01(\bR\x10respectGitignore\x12\x1d\n" +
 	"\n" +
-	"files_only\x18\b \x01(\bR\tfilesOnly\"}\n" +
+	"files_only\x18\b \x01(\bR\tfilesOnly\x126\n" +
+	"\x17include_default_ignored\x18\t \x01(\bR\x15includeDefaultIgnored\"}\n" +
 	"\fGrepResponse\x12.\n" +
 	"\x05match\x18\x01 \x01(\v2\x16.sandboxd.v1.GrepMatchH\x00R\x05match\x124\n" +
 	"\asummary\x18\x02 \x01(\v2\x18.sandboxd.v1.GrepSummaryH\x00R\asummaryB\a\n" +

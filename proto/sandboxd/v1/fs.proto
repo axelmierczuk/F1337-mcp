@@ -61,8 +61,16 @@ message ReadFileResponse {
 
 message ReadResult {
   uint64 lines_returned = 1;
+  // Lines in the whole file. Exact only when total_lines_exact is set;
+  // otherwise it is a lower bound.
   uint64 total_lines = 2;
   Truncation truncation = 3;
+  // True when total_lines counts the whole file. Counting lines means reading
+  // every byte, so the agent stops at a size bound rather than reading a
+  // gigabyte to answer a windowed read; past that bound total_lines reports
+  // how far the count got and this is false. A caller that renders "line 40 of
+  // N" must not print N when this is false.
+  bool total_lines_exact = 4;
 }
 
 message FileMetadata {
@@ -160,6 +168,10 @@ message GlobRequest {
   uint32 limit = 3;
   // Honour .gitignore rules while walking.
   bool respect_gitignore = 4;
+  // Walk into .git, node_modules, vendor and target, which are skipped by
+  // default. The default walk is otherwise dominated by directories nobody
+  // meant to search.
+  bool include_default_ignored = 5;
 }
 
 message GlobResponse {
@@ -180,6 +192,9 @@ message GrepRequest {
   bool respect_gitignore = 7;
   // Return only the names of matching files, not the matching lines.
   bool files_only = 8;
+  // Search inside .git, node_modules, vendor and target, which are skipped by
+  // default.
+  bool include_default_ignored = 9;
 }
 
 message GrepResponse {
