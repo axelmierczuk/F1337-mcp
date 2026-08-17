@@ -294,6 +294,16 @@ func TestEnroll_RelativeDirWritesLoadablePaths(t *testing.T) {
 	require.NoError(t, os.Chdir(dir))
 	t.Cleanup(func() { _ = os.Chdir(wd) })
 
+	// The expectation is built from the working directory as the process sees
+	// it, which is the base filepath.Abs resolves --dir against. It is not
+	// always the string t.TempDir returned: macOS reports /private/var where
+	// TempDir said /var, and a Windows runner reports the 8.3 short form
+	// (C:\Users\RUNNER~1) where TempDir said C:\Users\runneradmin. Both name
+	// the same directory, so comparing against the wrong spelling tests the
+	// platform's naming rather than this command's behaviour.
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
 	var out bytes.Buffer
 	code := sandboxdagent.Main([]string{"enroll",
 		"--server", cp.address,
@@ -308,13 +318,11 @@ func TestEnroll_RelativeDirWritesLoadablePaths(t *testing.T) {
 	for _, path := range []string{cfg.TLS.Certificate, cfg.TLS.PrivateKey, cfg.TLS.CABundle} {
 		assert.FileExists(t, path, "the daemon must find the material enroll just wrote")
 	}
-	// Compared against the resolved working directory: --dir is made absolute
-	// through it, and on macOS /var is a symlink to /private/var.
-	resolvedDir, err := filepath.EvalSymlinks(dir)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(resolvedDir, "enrollment", "state"), cfg.StateDir)
-	assert.DirExists(t, filepath.Join(resolvedDir, "enrollment"),
+	assert.Equal(t, filepath.Join(cwd, "enrollment", "state"), cfg.StateDir)
+	assert.DirExists(t, filepath.Join(cwd, "enrollment"),
 		"a relative --dir must not have written a second level of the same name")
+	assert.NoDirExists(t, filepath.Join(cwd, "enrollment", "enrollment"),
+		"the directory must not have been rebased through itself")
 }
 
 // The agent asks for what it was told to listen on; the control plane decides
