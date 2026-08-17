@@ -251,9 +251,16 @@ func (s *Server) Serve(ctx context.Context) {
 		return
 	}
 	s.cancel = cancel
+	// Registered under the same lock that decided this proxy is not closed, so
+	// that a Close arriving now either sees closed=false and joins this loop, or
+	// runs first and is seen above. Adding after the unlock leaves a window in
+	// which Close finds an empty group and returns while the accept loop is
+	// starting — which is a Close that has not joined what it documents joining,
+	// and which nothing here would notice because both callers happen to hold
+	// the goroutine some other way.
+	s.wg.Add(1)
 	s.mu.Unlock()
 
-	s.wg.Add(1)
 	s.acceptLoop(serveCtx)
 }
 
@@ -629,6 +636,15 @@ func commandName(cmd byte) string {
 // case-insensitive; matching an address or block is by address, and a name is
 // *not* resolved to compare it — resolving here is exactly what a SOCKS proxy
 // exists not to do.
+//
+// No entries at all is no narrowing, which is the documented default. An entry
+// that is *present but empty* is an error rather than a skipped line, and the
+// difference matters: `--allow "$NARROW"` with the variable unset would
+// otherwise leave a list of one blank entry, which parses to nothing, which
+// means no narrowing — an operator who asked for a narrower proxy and got the
+// widest one, silently. An entry with no host ("`:8080`") is refused for the
+// same reason: it builds a rule nothing can ever match, so it reads as
+// narrowing and narrows nothing.
 func ParseAllowList(entries []string) (func(Destination) bool, error) {
 	type rule struct {
 		host  string
@@ -640,7 +656,7 @@ func ParseAllowList(entries []string) (func(Destination) bool, error) {
 	for _, raw := range entries {
 		entry := strings.TrimSpace(raw)
 		if entry == "" {
-			continue
+			return nil, fmt.Errorf("--allow %q is empty; drop the flag to narrow nothing, which is the default", raw)
 		}
 		r := rule{}
 		// A port is only split off when what remains still parses as something
@@ -650,6 +666,9 @@ func ParseAllowList(entries []string) (func(Destination) bool, error) {
 			n, convErr := strconv.Atoi(port)
 			if convErr != nil || n < 1 || n > 65535 {
 				return nil, fmt.Errorf("--allow %q: %q is not a port", raw, port)
+			}
+			if strings.TrimSpace(host) == "" {
+				return nil, fmt.Errorf("--allow %q names a port but no host; write the host too, or drop the flag to narrow nothing", raw)
 			}
 			entry, r.port = host, n
 		}
@@ -670,6 +689,8 @@ func ParseAllowList(entries []string) (func(Destination) bool, error) {
 		rules = append(rules, r)
 	}
 	if len(rules) == 0 {
+		// Only reachable for an empty slice: every entry that got this far
+		// produced a rule.
 		return nil, nil //nolint:nilnil // no entries is no narrowing, which is the documented default rather than a failure
 	}
 

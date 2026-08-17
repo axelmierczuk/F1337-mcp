@@ -409,6 +409,46 @@ func TestSocks_ReportsAPolicyRefusalAsNotAllowed(t *testing.T) {
 	}
 }
 
+// A connection that failed *after* it was answered gets no second reply.
+//
+// This is the sharpest failure this package has, and the least visible: the
+// reply is ten bytes, and appending them to a response body that was already
+// flowing corrupts exactly the transfers a proxy exists to carry — a truncated
+// tarball, a JSON document with a decoding error nobody can place, a checksum
+// that fails once in a hundred runs. Nothing about it looks like a proxy bug
+// from the client's side.
+//
+// A connection can fail after the reply for entirely ordinary reasons: the
+// agent restarting under it, the destination resetting mid-response, the
+// stream ending. So this is the common case rather than an exotic one, and the
+// client has already learned what it needs from the connection ending.
+func TestSocks_DoesNotAppendAReplyToAConnectionAlreadyAnswered(t *testing.T) {
+	const body = "a response body that must arrive exactly as it was written"
+
+	// Answers the handshake, writes a body, and then fails the way a stream
+	// that died mid-response does.
+	server := startProxy(t, Options{
+		Connect: func(_ context.Context, conn net.Conn, _ Destination, accepted func() error) error {
+			if err := accepted(); err != nil {
+				return err
+			}
+			if _, err := conn.Write([]byte(body)); err != nil {
+				return err
+			}
+			return replyingError{code: ReplyConnectionRefused, msg: "the stream died mid-response"}
+		},
+	})
+
+	c := dialProxy(t, server.Addr())
+	require.Equal(t, byte(authNone), c.greet(t, authNone))
+	require.Equal(t, byte(replySuccess), c.request(t, cmdConnect, addrDomain, []byte("db.internal"), 5432))
+
+	got, err := io.ReadAll(c.conn)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(got),
+		"a reply code written into a response body corrupts it; the client learns about a connection that died from it ending")
+}
+
 // ------------------------------------------------------- the allow list
 
 // --allow narrows destinations before the connection is opened. It is a
@@ -466,9 +506,32 @@ func TestParseAllowList_EmptyMeansNoNarrowing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, narrow)
 
-	narrow, err = ParseAllowList([]string{"  ", ""})
+	narrow, err = ParseAllowList([]string{})
 	require.NoError(t, err)
-	assert.Nil(t, narrow, "entries that are only whitespace are not a list")
+	assert.Nil(t, narrow)
+}
+
+// But an entry that is present and empty is refused, rather than skipped into
+// the same answer.
+//
+// The two look alike and are opposite requests. `--allow "$NARROW"` with the
+// variable unset arrives here as one blank entry; skipping it leaves no rules,
+// which leaves no narrowing — so an operator who asked for a narrower proxy
+// gets the widest one, and nothing says so. The same for an entry that names a
+// port and no host: it builds a rule that can never match, which reads as
+// narrowing and narrows nothing.
+func TestParseAllowList_RefusesAnEntryThatNarrowsNothing(t *testing.T) {
+	for _, entries := range [][]string{{""}, {"   "}, {"db.internal", ""}} {
+		narrow, err := ParseAllowList(entries)
+		require.Errorf(t, err, "%q must not be read as no narrowing at all", entries)
+		assert.Nil(t, narrow)
+		assert.Contains(t, err.Error(), "empty")
+	}
+
+	narrow, err := ParseAllowList([]string{":8080"})
+	require.Error(t, err)
+	assert.Nil(t, narrow)
+	assert.Contains(t, err.Error(), "no host")
 }
 
 func TestParseAllowList_RejectsWhatItCannotParse(t *testing.T) {
