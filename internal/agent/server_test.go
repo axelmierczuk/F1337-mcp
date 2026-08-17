@@ -75,7 +75,7 @@ func TestServer_ExecEnabledDisablesTheJail(t *testing.T) {
 	j := h.server.Deps().Jail
 	assert.False(t, j.Confined(), "exec is enabled, so there is no jail")
 	assert.Empty(t, j.Roots(),
-		"an agent whose jail is off must report no roots: this is what sandbox_select tells the model it may write to")
+		"an agent whose jail is off must report no roots: this is what fleet_select tells the model it may write to")
 
 	// Resolution still works — services call Resolve unconditionally — it just
 	// permits everything. An unconfined jail normalises rather than resolves:

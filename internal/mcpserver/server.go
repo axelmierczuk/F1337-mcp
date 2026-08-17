@@ -42,7 +42,7 @@ const ServerName = "fleet"
 // request.
 const Instructions = `fleet gives you tools on remote development machines ("sandboxes") over mTLS.
 
-Select before you act. Call sandbox_list to see the fleet, then sandbox_select to
+Select before you act. Call fleet_list to see the fleet, then fleet_select to
 choose a target; every later call acts on that selection. Pass "sandbox" on a call
 to override it for that call only. Nothing is ever targeted implicitly: with no
 selection and no argument a call fails with the list of available sandboxes, even
@@ -51,11 +51,11 @@ when the fleet has exactly one member.
 Every result carries "sandbox", the host that actually served the call. Check it
 if you are unsure where you are running.
 
-Paths are on the sandbox, not on this workstation. sandbox_select and
-sandbox_info report the roots the agent allows writes under; if they instead
+Paths are on the sandbox, not on this workstation. fleet_select and
+fleet_info report the roots the agent allows writes under; if they instead
 report "unconfined", the agent enforces no path jail and every path is writable,
-which is not the same as none being writable. Use sandbox_process_start, not
-sandbox_exec, for anything meant to outlive the call.
+which is not the same as none being writable. Use fleet_process_start, not
+fleet_exec, for anything meant to outlive the call.
 
 Registering a sandbox does not enroll it: minting credentials is an operator
 action via fleetctl.`
@@ -178,7 +178,7 @@ func New(opts Options) (*Server, error) {
 		CallTimeout:  opts.CallTimeout,
 	})
 	// Some tools own state that outlives the call that created it —
-	// sandbox_forward's local listeners, which is the whole point of a
+	// fleet_forward's local listeners, which is the whole point of a
 	// forward. Released here, so a listener cannot survive the process that
 	// opened it and hold its port against the next one.
 	s.closers = append(s.closers, s.registrar.Close)

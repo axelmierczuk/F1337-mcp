@@ -124,7 +124,7 @@ So:
 | `false` | enforced on every `FileService` path | the resolved roots |
 
 The wire behaviour matters as much as the enforcement. `allowed_roots` is what
-`sandbox_info` and `sandbox_select` show the model to tell it where it may
+`fleet_info` and `fleet_select` show the model to tell it where it may
 write; reporting roots that constrain nothing is the model-facing version of
 the same lie.
 
@@ -144,7 +144,7 @@ two.
 
 An exec-disabled agent with no allowed roots has no jail either. It refuses to
 start that way unless explicitly forced, and reports the condition in
-`sandbox_info`. It also refuses to start on an allowed root that does not exist:
+`fleet_info`. It also refuses to start on an allowed root that does not exist:
 a missing path can be created later, as a symlink to anywhere, and a jail that
 had accepted it would then confine to whatever it pointed at.
 
@@ -206,7 +206,7 @@ cannot talk its way past.
 Everything else in this document is about what a caller can do **to** the host
 the agent runs on. This section is about what it can do **through** it.
 
-`sandbox_forward` is `ssh -L`: a local listener on the workstation, a socket on
+`fleet_forward` is `ssh -L`: a local listener on the workstation, a socket on
 the sandbox, and bytes in between. Forwarding to the sandbox's own loopback is
 a convenience — it reaches a port on a machine the caller already has full
 command execution on, and gives it nothing it did not already have. Forwarding

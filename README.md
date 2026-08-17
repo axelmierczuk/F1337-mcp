@@ -33,7 +33,7 @@ Three binaries, one Go module:
 - **`fleetctl`** — runs on your workstation. Sets up the CA, mints
   enrollment tokens, and inspects the fleet.
 
-The agent CLI (Claude Code, Cursor, etc.) calls `sandbox_select` to pick a
+The agent CLI (Claude Code, Cursor, etc.) calls `fleet_select` to pick a
 host, then uses the same exec/file/process tools it already knows — they
 just execute wherever you pointed them.
 
@@ -82,20 +82,20 @@ installs a system service. Use `install.ps1` on Windows.
 }
 ```
 
-Done. `sandbox_list` should show `build-box`.
+Done. `fleet_list` should show `build-box`.
 
 ## Tools
 
 Nineteen tools across five groups — see [docs/tools.md](docs/tools.md) for
 full schemas.
 
-- **Fleet** — `sandbox_list`, `sandbox_select`, `sandbox_add`, `sandbox_remove`, `sandbox_info`
-- **Execute** — `sandbox_exec`
-- **Background processes** — `sandbox_process_start`, `sandbox_process_list`, `sandbox_process_logs`, `sandbox_process_signal`, `sandbox_process_restart`
-- **Files** — `sandbox_read`, `sandbox_write`, `sandbox_edit`, `sandbox_ls`, `sandbox_glob`, `sandbox_grep`
-- **Bridge** — `sandbox_transfer`, `sandbox_forward`
+- **Fleet** — `fleet_list`, `fleet_select`, `fleet_add`, `fleet_remove`, `fleet_info`
+- **Execute** — `fleet_exec`
+- **Background processes** — `fleet_process_start`, `fleet_process_list`, `fleet_process_logs`, `fleet_process_signal`, `fleet_process_restart`
+- **Files** — `fleet_read`, `fleet_write`, `fleet_edit`, `fleet_ls`, `fleet_glob`, `fleet_grep`
+- **Bridge** — `fleet_transfer`, `fleet_forward`
 
-`sandbox_select` sets a sticky default sandbox (persisted per client), and
+`fleet_select` sets a sticky default sandbox (persisted per client), and
 every targeted tool can override it with an optional `sandbox` argument.
 Every result echoes back which sandbox actually served it, so the agent
 never silently acts on the wrong host.

@@ -218,7 +218,7 @@ func TestServe_NoJailStartsAndWarns(t *testing.T) {
 	hostClient := waitServing(t, ja)
 	info, err := hostClient.GetHostInfo(context.Background(), &sandboxdv1.GetHostInfoRequest{})
 	require.NoError(t, err)
-	assert.Empty(t, info.GetAllowedRoots(), "a jail-less agent reports no roots, which is how sandbox_info surfaces it")
+	assert.Empty(t, info.GetAllowedRoots(), "a jail-less agent reports no roots, which is how fleet_info surfaces it")
 
 	cancel()
 	select {
@@ -238,7 +238,7 @@ func TestServe_NoJailStartsAndWarns(t *testing.T) {
 // unconfined.
 //
 // The last part is the one that reaches the model: allowed_roots is what
-// sandbox_select returns to tell it where it may write.
+// fleet_select returns to tell it where it may write.
 func TestServe_ExecEnabledIgnoresAllowedRoots(t *testing.T) {
 	ea := newEnrolledAgent(t, t.TempDir())
 

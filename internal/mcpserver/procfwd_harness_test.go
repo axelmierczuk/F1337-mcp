@@ -149,7 +149,7 @@ func m2HelperMain() {
 		//
 		// It says so once the disposition is actually installed, and the test
 		// waits for that line with a ready probe. Without it the test races the
-		// child's own startup: sandbox_process_start returns as soon as the
+		// child's own startup: fleet_process_start returns as soon as the
 		// process is spawned, and a SIGTERM that arrives before this line has
 		// been printed is delivered to a process still carrying the default
 		// disposition, which kills it — so the stop does not escalate and the
@@ -445,7 +445,7 @@ func newLiveFixture(t *testing.T, opts liveAgentOptions) *liveFixture {
 
 	const clientName = "m2-test-client"
 	// The sticky selection is written straight into the registry rather than
-	// made through sandbox_select, which would need a HostService this fixture
+	// made through fleet_select, which would need a HostService this fixture
 	// deliberately does not serve.
 	require.NoError(t, fleet.SetSelection("client:"+clientName, liveSandboxName))
 

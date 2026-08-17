@@ -1,5 +1,5 @@
 // Package client dials fleet-agent instances over mTLS gRPC, pooling
-// connections and tracking health so sandbox_list can report status without a
+// connections and tracking health so fleet_list can report status without a
 // round trip per call.
 //
 // This is the only package in fleet-mcp that knows how to dial an agent.

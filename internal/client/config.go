@@ -11,7 +11,7 @@ import (
 )
 
 // DefaultMaxMessageSize overrides gRPC's 4 MiB default, which bites hardest
-// on sandbox_read of anything but a small file and surfaces as an opaque
+// on fleet_read of anything but a small file and surfaces as an opaque
 // ResourceExhausted with no hint that it is a configured limit rather than a
 // real failure.
 const DefaultMaxMessageSize = 32 * 1024 * 1024 // 32 MiB

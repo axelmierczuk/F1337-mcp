@@ -469,7 +469,7 @@ func TestExec_StalledOutputStreamDoesNotWedgeTheHandler(t *testing.T) {
 // would have carried its children down with it is already gone. Only the sweep
 // at the end of the call reaches what it left — `sh -c 'daemon &'` is the shape
 // — and exec is one-shot by contract, so docs/tools.md points anything
-// longer-lived at sandbox_process_start.
+// longer-lived at fleet_process_start.
 //
 // Round 1 raised the log level on a failing sweep. It did not check that the
 // sweep works, and nothing else did either: every other kill test runs a

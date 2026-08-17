@@ -286,7 +286,7 @@ func auditFor(cfg *Config, log *slog.Logger) *policy.Audit {
 // This is the single place that decides whether the jail is in force. Nothing
 // downstream reads Config.AllowedRoots to answer that question — they ask the
 // jail, which is why an exec-enabled agent reports itself unconfined all the
-// way out to sandbox_select.
+// way out to fleet_select.
 func jailFor(cfg *Config, log *slog.Logger) (*jail.Jail, error) {
 	if !cfg.JailEnforced() {
 		if len(cfg.AllowedRoots) > 0 {

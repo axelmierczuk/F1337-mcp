@@ -570,7 +570,7 @@ type ProcessStatus struct {
 	// Number of times the supervisor has restarted this process.
 	RestartCount  uint32        `protobuf:"varint,11,opt,name=restart_count,json=restartCount,proto3" json:"restart_count,omitempty"`
 	RestartPolicy RestartPolicy `protobuf:"varint,12,opt,name=restart_policy,json=restartPolicy,proto3,enum=sandboxd.v1.RestartPolicy" json:"restart_policy,omitempty"`
-	// Most recent output line, so sandbox_process_list is useful on its own
+	// Most recent output line, so fleet_process_list is useful on its own
 	// without a follow-up logs call for every process.
 	LastLogLine string `protobuf:"bytes,13,opt,name=last_log_line,json=lastLogLine,proto3" json:"last_log_line,omitempty"`
 	// Total bytes of output captured since the process last started.

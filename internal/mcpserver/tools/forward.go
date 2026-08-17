@@ -20,10 +20,10 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 )
 
-// sandbox_forward is `ssh -L`, and saying so is worth more than a paragraph
+// fleet_forward is `ssh -L`, and saying so is worth more than a paragraph
 // explaining it.
 //
-//	sandbox_forward(remote_port=3000, local_port=3000)
+//	fleet_forward(remote_port=3000, local_port=3000)
 //
 // is
 //
@@ -35,7 +35,7 @@ import (
 // forward and no dynamic SOCKS proxy here, and a caller who assumes otherwise
 // builds on a capability that does not exist. Both are deliberately out of
 // scope for #26.
-const forwardDescription = "Forward a port on the selected sandbox to this workstation, so a server running there is reachable over localhost. This is the `ssh -L` equivalent: sandbox_forward(remote_port=3000, local_port=3000) is `ssh -L 3000:localhost:3000 sandbox`. " +
+const forwardDescription = "Forward a port on the selected sandbox to this workstation, so a server running there is reachable over localhost. This is the `ssh -L` equivalent: fleet_forward(remote_port=3000, local_port=3000) is `ssh -L 3000:localhost:3000 sandbox`. " +
 	"The forward is owned by this MCP server, not by this call: it stays open across unrelated tool calls until you pass stop=true or the MCP server exits. Every call lists the forwards that are currently open. " +
 	"The local listener binds loopback only, and remote_host defaults to the sandbox's loopback. Reverse forwarding (`ssh -R`) and dynamic SOCKS proxying (`ssh -D`) are not implemented."
 
@@ -52,12 +52,12 @@ const (
 	forwardCopyBuffer = 32 * 1024
 )
 
-// registerForward adds sandbox_forward and gives the Registrar the manager
+// registerForward adds fleet_forward and gives the Registrar the manager
 // that owns the listeners.
 func registerForward(r *Registrar) {
 	r.forwards = newForwardManager(r.deps.logger())
 	AddTargeted(r, &mcp.Tool{
-		Name:        "sandbox_forward",
+		Name:        "fleet_forward",
 		Title:       "Forward a sandbox port",
 		Description: forwardDescription,
 	}, r.sandboxForward)
@@ -96,7 +96,7 @@ func (k forwardKey) remoteLabel() string {
 	return net.JoinHostPort(host, strconv.Itoa(k.remotePort))
 }
 
-// stopCall renders the sandbox_forward call that tears this forward down.
+// stopCall renders the fleet_forward call that tears this forward down.
 //
 // remote_host is part of the key, so it has to be part of the call: a forward
 // opened with one and torn down without it looks up the loopback forward of the
@@ -105,9 +105,9 @@ func (k forwardKey) remoteLabel() string {
 // forward having closed itself.
 func (k forwardKey) stopCall() string {
 	if k.remoteHost == "" {
-		return fmt.Sprintf("sandbox_forward(remote_port=%d, stop=true)", k.remotePort)
+		return fmt.Sprintf("fleet_forward(remote_port=%d, stop=true)", k.remotePort)
 	}
-	return fmt.Sprintf("sandbox_forward(remote_port=%d, remote_host=%q, stop=true)", k.remotePort, k.remoteHost)
+	return fmt.Sprintf("fleet_forward(remote_port=%d, remote_host=%q, stop=true)", k.remotePort, k.remoteHost)
 }
 
 // forwardManager owns every open forward for the life of the MCP server.
@@ -222,7 +222,7 @@ func (m *forwardManager) stop(key forwardKey) (*activeForward, bool) {
 // stopForSandbox tears down every forward reaching one sandbox and returns
 // their local addresses.
 //
-// It exists for sandbox_remove. A forward outlives the call that opened it, so
+// It exists for fleet_remove. A forward outlives the call that opened it, so
 // deregistering the sandbox it points at would otherwise leave a local port
 // that still accepts connections and drops every one of them — the pooled
 // channel behind it is closed on removal — which is precisely the "accepts and
@@ -261,7 +261,7 @@ func (m *forwardManager) add(f *activeForward) error {
 		return fmt.Errorf("a forward for %s on sandbox %s already exists", f.key.remoteLabel(), f.key.sandbox)
 	}
 	if len(m.forwards) >= maxForwards {
-		return fmt.Errorf("%d forwards are already open, which is this server's maximum; stop one with sandbox_forward(stop=true)", maxForwards)
+		return fmt.Errorf("%d forwards are already open, which is this server's maximum; stop one with fleet_forward(stop=true)", maxForwards)
 	}
 	m.forwards[f.key] = f
 	return nil
@@ -294,7 +294,7 @@ func (m *forwardManager) Close() error {
 
 // ---------------------------------------------------------------- tool
 
-// ForwardArgs are the arguments to sandbox_forward.
+// ForwardArgs are the arguments to fleet_forward.
 type ForwardArgs struct {
 	TargetArgs
 	// RemotePort is the port on the sandbox.
@@ -331,7 +331,7 @@ type ForwardLine struct {
 	LastError string `json:"last_error,omitempty"`
 }
 
-// ForwardResult is the sandbox_forward result.
+// ForwardResult is the fleet_forward result.
 type ForwardResult struct {
 	// Echo carries the sandbox the forward reaches.
 	Echo
@@ -640,7 +640,7 @@ func (r *Registrar) carry(ctx context.Context, f *activeForward, client sandboxd
 
 	// Cancelling the context has to close the socket, not merely the stream.
 	// A pump parked in conn.Read is not waiting on a context, so without this
-	// sandbox_forward(stop=true) would block forever joining a goroutine that
+	// fleet_forward(stop=true) would block forever joining a goroutine that
 	// is blocked on a client which has no reason to say anything — and the
 	// tool call that asked for the teardown would never return.
 	stopOnCancel := context.AfterFunc(streamCtx, func() { _ = conn.Close() })

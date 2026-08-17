@@ -35,7 +35,7 @@ type HostServiceClient interface {
 	// filesystem access under.
 	GetHostInfo(ctx context.Context, in *GetHostInfoRequest, opts ...grpc.CallOption) (*GetHostInfoResponse, error)
 	// Health is a cheap liveness and readiness probe used to populate sandbox
-	// status in sandbox_list without paying for full host introspection.
+	// status in fleet_list without paying for full host introspection.
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
 }
 
@@ -79,7 +79,7 @@ type HostServiceServer interface {
 	// filesystem access under.
 	GetHostInfo(context.Context, *GetHostInfoRequest) (*GetHostInfoResponse, error)
 	// Health is a cheap liveness and readiness probe used to populate sandbox
-	// status in sandbox_list without paying for full host introspection.
+	// status in fleet_list without paying for full host introspection.
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
 	mustEmbedUnimplementedHostServiceServer()
 }

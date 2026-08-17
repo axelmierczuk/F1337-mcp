@@ -51,7 +51,7 @@ type Jail struct {
 	// roots are absolute, cleaned and symlink-resolved.
 	roots []string
 	// configured keeps the roots as the operator wrote them, for reporting in
-	// sandbox_info where the resolved form would be confusing.
+	// fleet_info where the resolved form would be confusing.
 	configured []string
 	workingDir string
 }
@@ -104,7 +104,7 @@ func New(cfg Config) (*Jail, error) {
 //
 // It still normalises paths — callers downstream rely on getting an absolute,
 // cleaned path back — but every path is permitted. The agent refuses to start
-// this way unless explicitly forced, and reports it in sandbox_info, because
+// this way unless explicitly forced, and reports it in fleet_info, because
 // the agent is a remote code execution service and the path jail is the only
 // thing between a caller and the rest of the disk.
 func Unconfined() *Jail {

@@ -59,7 +59,7 @@ func TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines(t *testing.T) {
 
 		// 127.0.0.1:1 is closed, so the call reaches the pool and fails there
 		// rather than at the credentials: the pool is genuinely built.
-		callTool(t, session, "sandbox_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
+		callTool(t, session, "fleet_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
 
 		var wg sync.WaitGroup
 		for range 4 {
@@ -70,7 +70,7 @@ func TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines(t *testing.T) {
 				// depends on where it was when Close landed, and both are
 				// correct. What is asserted is what is left behind.
 				_, _ = session.CallTool(t.Context(), &mcp.CallToolParams{
-					Name: "sandbox_info", Arguments: map[string]any{"sandbox": "closed"},
+					Name: "fleet_info", Arguments: map[string]any{"sandbox": "closed"},
 				})
 			}()
 		}

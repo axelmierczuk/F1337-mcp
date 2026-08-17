@@ -108,7 +108,7 @@ func TestRead_IsLineNumberedInTheShapeOfTheBuiltInRead(t *testing.T) {
 	path := f.path("main.go")
 	writeRemote(t, path, "package main\n\nfunc main() {}\n")
 
-	out := structured[readResult](t, f.ok("sandbox_read", map[string]any{"path": path}))
+	out := structured[readResult](t, f.ok("fleet_read", map[string]any{"path": path}))
 
 	assert.Equal(t, "     1\tpackage main\n     2\t\n     3\tfunc main() {}\n", out.Content)
 	assert.Equal(t, 1, out.FirstLine)
@@ -130,7 +130,7 @@ func TestRead_OffsetAndLimitWindowTheFileAndReportTheWhole(t *testing.T) {
 	}
 	writeRemote(t, path, content.String())
 
-	out := structured[readResult](t, f.ok("sandbox_read", map[string]any{
+	out := structured[readResult](t, f.ok("fleet_read", map[string]any{
 		"path": path, "offset": 40, "limit": 3,
 	}))
 
@@ -156,7 +156,7 @@ func TestRead_DefaultsToASaneLineLimitAndSaysThatItDid(t *testing.T) {
 	}
 	writeRemote(t, path, content.String())
 
-	out := structured[readResult](t, f.ok("sandbox_read", map[string]any{"path": path}))
+	out := structured[readResult](t, f.ok("fleet_read", map[string]any{"path": path}))
 
 	assert.Equal(t, uint64(tools.DefaultReadLines), out.LinesReturned)
 	assert.Contains(t, out.Note, fmt.Sprintf("%d lines", tools.DefaultReadLines))
@@ -170,14 +170,14 @@ func TestRead_BinaryFileIsRefusedWithAClearMessage(t *testing.T) {
 	path := f.path("app.bin")
 	writeRemote(t, path, "\x7fELF\x00\x01\x02\x03binary\x00content")
 
-	text := f.fails("sandbox_read", map[string]any{"path": path})
+	text := f.fails("fleet_read", map[string]any{"path": path})
 
 	assert.Contains(t, text, "not text")
 	assert.Contains(t, text, "raw", "and must name the argument that reads it anyway")
 	assert.NotContains(t, text, "rpc error: code =")
 
 	// And with raw it comes back as bytes rather than mangled text.
-	out := structured[readResult](t, f.ok("sandbox_read", map[string]any{"path": path, "raw": true}))
+	out := structured[readResult](t, f.ok("fleet_read", map[string]any{"path": path, "raw": true}))
 	decoded, err := base64.StdEncoding.DecodeString(out.ContentBase64)
 	require.NoError(t, err)
 	assert.Equal(t, "\x7fELF\x00\x01\x02\x03binary\x00content", string(decoded))
@@ -189,7 +189,7 @@ func TestRead_MissingFileIsAClearNotFound(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	missing := f.path("nope.go")
 
-	text := f.fails("sandbox_read", map[string]any{"path": missing})
+	text := f.fails("fleet_read", map[string]any{"path": missing})
 
 	assert.Contains(t, text, "not found")
 	assert.Contains(t, text, missing)
@@ -206,7 +206,7 @@ func TestRead_CRLFIsPreservedOnDiskAndCalledOutInTheResult(t *testing.T) {
 	path := f.path("crlf.txt")
 	writeRemote(t, path, "alpha\r\nbeta\r\n")
 
-	out := structured[readResult](t, f.ok("sandbox_read", map[string]any{"path": path}))
+	out := structured[readResult](t, f.ok("fleet_read", map[string]any{"path": path}))
 
 	assert.Equal(t, "     1\talpha\n     2\tbeta\n", out.Content)
 	assert.Contains(t, out.Note, "CRLF")
@@ -223,7 +223,7 @@ func TestWrite_CreatesAFileAndReportsThatItDid(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("nested", "new.txt")
 
-	out := structured[writeResult](t, f.ok("sandbox_write", map[string]any{
+	out := structured[writeResult](t, f.ok("fleet_write", map[string]any{
 		"path": path, "content": "hello\n", "create_parents": true,
 	}))
 
@@ -237,7 +237,7 @@ func TestWrite_CreatesAFileAndReportsThatItDid(t *testing.T) {
 
 	// A second write reports that it replaced something, which is the fact a
 	// model that meant to create a new file needs to see.
-	out = structured[writeResult](t, f.ok("sandbox_write", map[string]any{"path": path, "content": "replaced\n"}))
+	out = structured[writeResult](t, f.ok("fleet_write", map[string]any{"path": path, "content": "replaced\n"}))
 	assert.False(t, out.Created)
 	assert.Contains(t, out.Note, "Overwrote")
 }
@@ -268,7 +268,7 @@ func TestWrite_LargeContentIsStreamedRatherThanSentWhole(t *testing.T) {
 	f.clients.filesOverride = capture
 
 	const size = 700 * 1024
-	f.ok("sandbox_write", map[string]any{"path": "/remote/big", "content": strings.Repeat("a", size)})
+	f.ok("fleet_write", map[string]any{"path": "/remote/big", "content": strings.Repeat("a", size)})
 
 	require.NotNil(t, capture.stream)
 	var header, chunks, bytes int
@@ -295,7 +295,7 @@ func TestWrite_LargeContentIsStreamedRatherThanSentWhole(t *testing.T) {
 // byte-for-byte duplicate of it live at once.
 //
 // It is the weakest of the three heap assertions, and the reason is the
-// protocol rather than the code: sandbox_write takes its content as a tool
+// protocol rather than the code: fleet_write takes its content as a tool
 // *argument*, so a 64 MiB write is a 64 MiB JSON string that MCP has already
 // decoded whole before the handler is reached. No choice on this side changes
 // that, so that copy is in the baseline and is not what is being measured.
@@ -318,7 +318,7 @@ func TestWrite_LargeContentIsNotCopiedWhole(t *testing.T) {
 	f.clients.onFiles = sampler.start
 	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
 
-	out := structured[writeResult](t, f.ok("sandbox_write", map[string]any{
+	out := structured[writeResult](t, f.ok("fleet_write", map[string]any{
 		"path": path, "content": strings.Repeat("abcdefgh", heapPayload/8),
 	}))
 
@@ -329,7 +329,7 @@ func TestWrite_LargeContentIsNotCopiedWhole(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(heapPayload), info.Size())
 
-	assertHeapBounded(t, sampler, heapPayload, "sandbox_write")
+	assertHeapBounded(t, sampler, heapPayload, "fleet_write")
 }
 
 // refusingWrite is a WriteFile stream that accepts the header and then refuses
@@ -375,7 +375,7 @@ func TestWrite_AStreamThatStoppedAcceptingContentIsNotReportedAsAWrite(t *testin
 	f := newAgentFixture(t, backendOptions{})
 	f.clients.filesOverride = &refusingWriteFiles{FileServiceClient: f.backend.files}
 
-	text := f.fails("sandbox_write", map[string]any{
+	text := f.fails("fleet_write", map[string]any{
 		"path": "/remote/big", "content": strings.Repeat("a", 200*1024),
 	})
 
@@ -390,7 +390,7 @@ func TestEdit_ReturnsAReadableDiff(t *testing.T) {
 	path := f.path("edit.go")
 	writeRemote(t, path, "package main\n\nconst version = \"0.1.0\"\n")
 
-	out := structured[editResult](t, f.ok("sandbox_edit", map[string]any{
+	out := structured[editResult](t, f.ok("fleet_edit", map[string]any{
 		"path": path, "old_string": `"0.1.0"`, "new_string": `"0.2.0"`,
 	}))
 
@@ -415,7 +415,7 @@ func TestEdit_TwoMatchesErrorsWithTheCountAndLeavesTheFileAlone(t *testing.T) {
 	const original = "value := 1\nother := 2\nvalue := 1\n"
 	writeRemote(t, path, original)
 
-	text := f.fails("sandbox_edit", map[string]any{
+	text := f.fails("fleet_edit", map[string]any{
 		"path": path, "old_string": "value := 1", "new_string": "value := 3",
 	})
 
@@ -435,7 +435,7 @@ func TestEdit_ReplaceAllChangesEveryOccurrence(t *testing.T) {
 	path := f.path("dup.go")
 	writeRemote(t, path, "value := 1\nother := 2\nvalue := 1\n")
 
-	out := structured[editResult](t, f.ok("sandbox_edit", map[string]any{
+	out := structured[editResult](t, f.ok("fleet_edit", map[string]any{
 		"path": path, "old_string": "value := 1", "new_string": "value := 3", "replace_all": true,
 	}))
 
@@ -453,7 +453,7 @@ func TestLs_ListsDirectoriesFirstWithHumanReadableSizes(t *testing.T) {
 	writeRemote(t, f.path("src", "main.go"), "package main\n")
 	writeRemote(t, f.path("README.md"), strings.Repeat("x", 4096))
 
-	out := structured[lsResult](t, f.ok("sandbox_ls", map[string]any{"path": f.remote}))
+	out := structured[lsResult](t, f.ok("fleet_ls", map[string]any{"path": f.remote}))
 
 	assert.Equal(t, []string{"src"}, out.Directories)
 	require.Len(t, out.Files, 1)
@@ -469,7 +469,7 @@ func TestLs_EmptyDirectorySaysSo(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	require.NoError(t, os.MkdirAll(f.path("empty"), 0o755))
 
-	out := structured[lsResult](t, f.ok("sandbox_ls", map[string]any{"path": f.path("empty")}))
+	out := structured[lsResult](t, f.ok("fleet_ls", map[string]any{"path": f.path("empty")}))
 
 	assert.Empty(t, out.Directories)
 	assert.Empty(t, out.Files)
@@ -484,7 +484,7 @@ func TestLs_TruncationIsReported(t *testing.T) {
 		writeRemote(t, f.path("many", fmt.Sprintf("file%02d.txt", i)), "x")
 	}
 
-	out := structured[lsResult](t, f.ok("sandbox_ls", map[string]any{"path": f.path("many"), "limit": 3}))
+	out := structured[lsResult](t, f.ok("fleet_ls", map[string]any{"path": f.path("many"), "limit": 3}))
 
 	assert.Len(t, out.Files, 3)
 	require.NotNil(t, out.Truncation, "a cut listing must say it was cut")
@@ -512,14 +512,14 @@ func TestGlob_ReturnsMatchesNewestFirst(t *testing.T) {
 	require.NoError(t, os.Chtimes(f.path("a", "one.go"), now.Add(-time.Hour), now.Add(-time.Hour)))
 	require.NoError(t, os.Chtimes(f.path("b", "two.go"), now, now))
 
-	out := structured[globResult](t, f.ok("sandbox_glob", map[string]any{
+	out := structured[globResult](t, f.ok("fleet_glob", map[string]any{
 		"pattern": "**/*.go", "root": f.remote,
 	}))
 
 	assert.Equal(t, 2, out.Matches)
 	for _, p := range out.Paths {
 		assert.True(t, strings.HasSuffix(p, ".go"), "unexpected match %s", p)
-		assert.True(t, filepath.IsAbs(p), "paths must be absolute so they can be passed straight to sandbox_read")
+		assert.True(t, filepath.IsAbs(p), "paths must be absolute so they can be passed straight to fleet_read")
 	}
 	require.Len(t, out.Paths, 2)
 	assert.True(t, strings.HasSuffix(out.Paths[0], "two.go"),
@@ -533,7 +533,7 @@ func TestGlob_NoMatchesExplainsTheAnchoringRule(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("deep", "main.go"), "package main\n")
 
-	out := structured[globResult](t, f.ok("sandbox_glob", map[string]any{"pattern": "*.go", "root": f.remote}))
+	out := structured[globResult](t, f.ok("fleet_glob", map[string]any{"pattern": "*.go", "root": f.remote}))
 
 	assert.Zero(t, out.Matches)
 	assert.Contains(t, out.Note, "**/*.go")
@@ -548,7 +548,7 @@ func TestGrep_RendersMatchesCompactlyWithContext(t *testing.T) {
 	path := f.path("app.go")
 	writeRemote(t, path, "package main\n\nfunc handler() {\n\tpanic(\"boom\")\n}\n")
 
-	out := structured[grepResult](t, f.ok("sandbox_grep", map[string]any{
+	out := structured[grepResult](t, f.ok("fleet_grep", map[string]any{
 		"pattern": "panic", "root": f.remote, "context_lines": 1,
 	}))
 
@@ -570,7 +570,7 @@ func TestGrep_ReportsTruncationAndHowLittleWasRead(t *testing.T) {
 		writeRemote(t, f.path("pkg", fmt.Sprintf("file%02d.go", i)), "package pkg\n// TODO: something\n")
 	}
 
-	out := structured[grepResult](t, f.ok("sandbox_grep", map[string]any{
+	out := structured[grepResult](t, f.ok("fleet_grep", map[string]any{
 		"pattern": "TODO", "root": f.remote, "max_matches": 3,
 	}))
 
@@ -601,7 +601,7 @@ func TestGrep_ASearchWithoutASummaryIsNotReportedAsNoMatches(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	f.clients.filesOverride = &summarylessFiles{FileServiceClient: f.backend.files}
 
-	text := f.fails("sandbox_grep", map[string]any{"pattern": "TODO", "root": f.remote})
+	text := f.fails("fleet_grep", map[string]any{"pattern": "TODO", "root": f.remote})
 
 	assert.Contains(t, text, "without a summary")
 	assert.NotContains(t, text, "No matches")
@@ -612,7 +612,7 @@ func TestGrep_FilesOnlyReturnsNames(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("one.go"), "// TODO: a\n// TODO: b\n")
 
-	out := structured[grepResult](t, f.ok("sandbox_grep", map[string]any{
+	out := structured[grepResult](t, f.ok("fleet_grep", map[string]any{
 		"pattern": "TODO", "root": f.remote, "files_only": true,
 	}))
 
@@ -626,7 +626,7 @@ func TestGrep_NoMatchesSaysWhatWasSearched(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("one.go"), "package one\n")
 
-	out := structured[grepResult](t, f.ok("sandbox_grep", map[string]any{
+	out := structured[grepResult](t, f.ok("fleet_grep", map[string]any{
 		"pattern": "nothing-here", "root": f.remote,
 	}))
 
@@ -647,7 +647,7 @@ func TestFiles_JailRejectionNamesTheAllowedRoots(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{execDisabled: true})
 	outside := filepath.Join(t.TempDir(), "escape.txt")
 
-	text := f.fails("sandbox_write", map[string]any{"path": outside, "content": "nope\n"})
+	text := f.fails("fleet_write", map[string]any{"path": outside, "content": "nope\n"})
 
 	assert.Contains(t, text, "outside the allowed roots")
 	assert.Contains(t, text, f.remote, "the error must name the roots the model may use")
@@ -665,7 +665,7 @@ func TestFiles_AnUnconfinedAgentIsNotToldItIsConfined(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	elsewhere := filepath.Join(t.TempDir(), "anywhere.txt")
 
-	out := structured[writeResult](t, f.ok("sandbox_write", map[string]any{
+	out := structured[writeResult](t, f.ok("fleet_write", map[string]any{
 		"path": elsewhere, "content": "written\n",
 	}))
 

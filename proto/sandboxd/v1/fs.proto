@@ -7,8 +7,8 @@ import "sandboxd/v1/common.proto";
 
 option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
 
-// FileService provides the filesystem primitives that back sandbox_read,
-// sandbox_write, sandbox_edit, sandbox_ls, sandbox_glob and sandbox_grep.
+// FileService provides the filesystem primitives that back fleet_read,
+// fleet_write, fleet_edit, fleet_ls, fleet_glob and fleet_grep.
 //
 // Every path in this service is resolved through the agent's path jail:
 // symlinks are resolved first and containment is checked on the result, since

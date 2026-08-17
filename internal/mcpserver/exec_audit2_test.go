@@ -14,7 +14,7 @@ import (
 )
 
 // Round 1 enumerated the streams that could end early and reported a cut one as
-// clean: the pull's read, grep's search, the write's send. sandbox_exec's own
+// clean: the pull's read, grep's search, the write's send. fleet_exec's own
 // stream is the fourth, and its two guards — an output stream that ends without
 // a result, and the two status codes that arrive *after* the command has run —
 // were correct and untested. A guard with no test is one nobody will notice
@@ -41,7 +41,7 @@ func TestExec_AStreamThatEndedWithoutAResultIsNotReportedAsAnExit(t *testing.T) 
 	f := newAgentFixture(t, backendOptions{})
 	f.clients.execOverride = resultlessExec{}
 
-	text := f.fails("sandbox_exec", map[string]any{"argv": []any{"make", "install"}})
+	text := f.fails("fleet_exec", map[string]any{"argv": []any{"make", "install"}})
 
 	assert.Contains(t, text, "without reporting a result")
 	assert.Contains(t, text, "may well have run",
@@ -100,7 +100,7 @@ func TestExec_TheTwoCodesThatArriveAfterTheCommandRanSaySoWhileOthersDoNot(t *te
 			f := newAgentFixture(t, backendOptions{})
 			f.clients.execOverride = codeExec{code: tc.code}
 
-			text := f.fails("sandbox_exec", map[string]any{"argv": []any{"make", "install"}})
+			text := f.fails("fleet_exec", map[string]any{"argv": []any{"make", "install"}})
 
 			assert.Contains(t, text, "build-box", "every failure names the sandbox")
 			assert.NotContains(t, text, "rpc error: code =")

@@ -30,7 +30,7 @@ const (
 // the sandbox.
 //
 // This closes the remote dev loop: the model starts a dev server with
-// sandbox_process_start, forwards its port, and can then reach it over
+// fleet_process_start, forwards its port, and can then reach it over
 // localhost the same way it would a local server.
 type ForwardServiceClient interface {
 	// Forward carries a single TCP connection. The MCP server opens one stream
@@ -67,7 +67,7 @@ type ForwardService_ForwardClient = grpc.BidiStreamingClient[ForwardRequest, For
 // the sandbox.
 //
 // This closes the remote dev loop: the model starts a dev server with
-// sandbox_process_start, forwards its port, and can then reach it over
+// fleet_process_start, forwards its port, and can then reach it over
 // localhost the same way it would a local server.
 type ForwardServiceServer interface {
 	// Forward carries a single TCP connection. The MCP server opens one stream

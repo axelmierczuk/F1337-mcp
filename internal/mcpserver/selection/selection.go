@@ -14,7 +14,7 @@
 //  2. The sticky default recorded for the calling client identity, taken from
 //     _meta and persisted in the registry.
 //  3. Otherwise a structured error listing the available sandboxes and naming
-//     sandbox_select.
+//     fleet_select.
 //
 // There is deliberately no fourth rule. In particular, a fleet of exactly one
 // sandbox does not resolve implicitly: implicit targeting is how the wrong
@@ -126,9 +126,9 @@ type NoTargetError struct {
 
 func (e *NoTargetError) Error() string {
 	if len(e.Available) == 0 {
-		return "no sandbox selected, and none are registered. Enroll a host with `fleetctl enroll mint` (see docs/quickstart.md), or register an already-enrolled agent with sandbox_add"
+		return "no sandbox selected, and none are registered. Enroll a host with `fleetctl enroll mint` (see docs/quickstart.md), or register an already-enrolled agent with fleet_add"
 	}
-	return fmt.Sprintf("no sandbox selected. Call sandbox_select(name=\"%s\") to choose one for subsequent calls, or pass sandbox=\"%s\" to target this call only. Registered: %s",
+	return fmt.Sprintf("no sandbox selected. Call fleet_select(name=\"%s\") to choose one for subsequent calls, or pass sandbox=\"%s\" to target this call only. Registered: %s",
 		e.Available[0], e.Available[0], strings.Join(e.Available, ", "))
 }
 
@@ -143,7 +143,7 @@ type UnknownSandboxError struct {
 
 func (e *UnknownSandboxError) Error() string {
 	if len(e.Available) == 0 {
-		return fmt.Sprintf("unknown sandbox %q: no sandboxes are registered. Enroll one with `fleetctl enroll mint`, or register an already-enrolled agent with sandbox_add", e.Ref)
+		return fmt.Sprintf("unknown sandbox %q: no sandboxes are registered. Enroll one with `fleetctl enroll mint`, or register an already-enrolled agent with fleet_add", e.Ref)
 	}
 	return fmt.Sprintf("unknown sandbox %q. Registered: %s", e.Ref, strings.Join(e.Available, ", "))
 }
@@ -163,9 +163,9 @@ type StaleSelectionError struct {
 
 func (e *StaleSelectionError) Error() string {
 	if len(e.Available) == 0 {
-		return fmt.Sprintf("the selected sandbox %q is no longer registered, and no others are. Register one with sandbox_add", e.Name)
+		return fmt.Sprintf("the selected sandbox %q is no longer registered, and no others are. Register one with fleet_add", e.Name)
 	}
-	return fmt.Sprintf("the selected sandbox %q is no longer registered. Call sandbox_select to choose another. Registered: %s",
+	return fmt.Sprintf("the selected sandbox %q is no longer registered. Call fleet_select to choose another. Registered: %s",
 		e.Name, strings.Join(e.Available, ", "))
 }
 
@@ -379,7 +379,7 @@ func (r *Resolver) Clear(id Identity) error {
 // ClearSelectionsFor drops every sticky default pointing at sandboxName —
 // persisted and in-memory alike — and reports how many were cleared.
 //
-// sandbox_remove goes through here rather than straight to the registry so the
+// fleet_remove goes through here rather than straight to the registry so the
 // unidentified client's selection is cleared too. Missing it would leave the
 // one selection removal cannot see still aimed at a sandbox that is gone.
 func (r *Resolver) ClearSelectionsFor(sandboxName string) (int, error) {

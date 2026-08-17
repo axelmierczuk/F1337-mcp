@@ -151,8 +151,8 @@ func TestCompact(t *testing.T) {
 	assert.True(t, utf8.ValidString(multibyte), "truncation produced invalid UTF-8: %q", multibyte)
 }
 
-// TestCheckLabels guards the free-form half of a sandbox_add call: the model
-// supplies it, the registry stores it, and every sandbox_list result carries it.
+// TestCheckLabels guards the free-form half of a fleet_add call: the model
+// supplies it, the registry stores it, and every fleet_list result carries it.
 func TestCheckLabels(t *testing.T) {
 	assert.NoError(t, checkLabels(nil))
 	assert.NoError(t, checkLabels(map[string]string{"arch": "arm64", "owner": "platform team", "empty": ""}))

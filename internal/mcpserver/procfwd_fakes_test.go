@@ -85,7 +85,7 @@ func (s *fakeLogStream) Recv() (*sandboxdv1.GetProcessLogsResponse, error) {
 }
 
 // fakeForward accepts an open and reports success, which is all the preflight
-// in sandbox_forward asks of it.
+// in fleet_forward asks of it.
 type fakeForward struct{}
 
 func (fakeForward) Forward(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], error) {

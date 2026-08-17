@@ -401,7 +401,7 @@ func TestForward_ADeadPortIsReportedAsAFailedOpen(t *testing.T) {
 	require.NotNil(t, opened)
 	assert.False(t, opened.GetSuccess())
 	assert.Contains(t, opened.GetError(), strconv.Itoa(dead))
-	assert.Contains(t, opened.GetError(), "sandbox_process_list",
+	assert.Contains(t, opened.GetError(), "fleet_process_list",
 		"the message should say how to check what is listening")
 }
 

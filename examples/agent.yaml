@@ -48,7 +48,7 @@ exec:
   # Running commands is what this product is for, so this defaults to true.
   # Setting it to false is what makes allowed_roots above a real boundary.
   enabled: true
-  # Default wall-clock limit for sandbox_exec. On expiry the agent SIGTERMs the
+  # Default wall-clock limit for fleet_exec. On expiry the agent SIGTERMs the
   # command's whole process group, then SIGKILLs it.
   default_timeout: "120s"
   # A request asking for longer than this is refused, with this value named,
@@ -88,7 +88,7 @@ process:
   # In-memory ring buffer retained for fast tailing.
   ring_buffer_lines: 2000
   default_grace_period: "10s"
-  # Hard ceiling on sandbox_process_logs follow, so a tool call cannot hang.
+  # Hard ceiling on fleet_process_logs follow, so a tool call cannot hang.
   max_follow_duration: "60s"
 
 forward:

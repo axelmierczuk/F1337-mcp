@@ -16,7 +16,7 @@ service HostService {
   rpc GetHostInfo(GetHostInfoRequest) returns (GetHostInfoResponse);
 
   // Health is a cheap liveness and readiness probe used to populate sandbox
-  // status in sandbox_list without paying for full host introspection.
+  // status in fleet_list without paying for full host introspection.
   rpc Health(HealthRequest) returns (HealthResponse);
 }
 

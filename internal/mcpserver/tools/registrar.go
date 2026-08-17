@@ -34,7 +34,7 @@
 //
 //	func registerFiles(r *tools.Registrar) {
 //	    tools.AddTargeted(r, &mcp.Tool{
-//	        Name:        "sandbox_edit",
+//	        Name:        "fleet_edit",
 //	        Description: "Replace an exact string in a file on the selected sandbox.",
 //	    }, func(ctx context.Context, req *mcp.CallToolRequest, t *selection.Target, in editArgs) (editResult, error) {
 //	        files, err := r.Deps().Clients.Files(t.Name(), t.Address())
@@ -59,7 +59,7 @@
 // The handler never reads in.Sandbox, never calls the resolver, and never
 // sets out.Sandbox. Resolution happens before it runs; if it fails, the
 // handler is not called at all and the model gets the structured no-target
-// error naming sandbox_select.
+// error naming fleet_select.
 //
 // A streaming RPC works the same way — take the stream from the client,
 // consume it under the handler's context, and map the first error through
@@ -88,13 +88,13 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
-// DefaultProbeTimeout bounds a single health probe issued by sandbox_list.
+// DefaultProbeTimeout bounds a single health probe issued by fleet_list.
 // It is short on purpose: listing a twenty-machine fleet must not wait on the
 // one box somebody powered off.
 const DefaultProbeTimeout = 2 * time.Second
 
 // DefaultCallTimeout bounds a unary call that has no timeout of its own,
-// such as GetHostInfo behind sandbox_info.
+// such as GetHostInfo behind fleet_info.
 const DefaultCallTimeout = 15 * time.Second
 
 // Echo carries the one field every tool result must have: the sandbox that
@@ -136,7 +136,7 @@ type targeter interface {
 // It is an interface rather than the concrete pool for two reasons: the pool
 // needs a full mTLS configuration to construct, which a unit test should not
 // have to mint, and the MCP server has to start usefully on a workstation
-// that has no control certificate yet — sandbox_list and sandbox_add work
+// that has no control certificate yet — fleet_list and fleet_add work
 // fine without one.
 type Clients interface {
 	// Host returns a HostServiceClient for the named sandbox.
@@ -206,7 +206,7 @@ const (
 //
 // [Deps.callTimeout] is sized for a call that asks a question — a stat, a host
 // probe, a directory listing — and applying it to one that carries a file makes
-// the limits these tools advertise unreachable: sandbox_transfer will move
+// the limits these tools advertise unreachable: fleet_transfer will move
 // 256 MiB in one call, and 256 MiB inside the 15s unary default is 17 MB/s
 // sustained, which no link outside a lab delivers. The failure it produced was
 // not a slow transfer either; it was "transferred 40 of 200 files, then the
@@ -328,8 +328,8 @@ type FleetHandler[In, Out any] func(ctx context.Context, req *mcp.CallToolReques
 // AddFleet registers a fleet-group tool: one that operates on the registry
 // rather than on a resolved sandbox, and so names its own subject.
 //
-// sandbox_add echoes the sandbox it registered, sandbox_remove the one it
-// deregistered, sandbox_list the one currently selected. Empty is permitted
+// fleet_add echoes the sandbox it registered, fleet_remove the one it
+// deregistered, fleet_list the one currently selected. Empty is permitted
 // here and only here, for the case where nothing is selected — a targeted
 // tool cannot reach its handler without a resolved target, so its echo is
 // never empty.

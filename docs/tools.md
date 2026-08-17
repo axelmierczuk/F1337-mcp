@@ -13,7 +13,7 @@ Nineteen tools. Conventions that apply to all of them:
 - **Paths** are absolute on the sandbox, or relative to its configured working
   directory. They are resolved through the path jail before use — on an agent
   with `exec.enabled: false`, which is the only configuration where the jail is
-  wired in. With exec enabled, one `sandbox_exec` call reaches any path the
+  wired in. With exec enabled, one `fleet_exec` call reaches any path the
   agent's account can, so there are no allowed roots and the tools report none.
   See [security.md](security.md#filesystem-confinement).
 
@@ -21,7 +21,7 @@ Nineteen tools. Conventions that apply to all of them:
 
 ## Fleet
 
-### `sandbox_list`
+### `fleet_list`
 Inventory of registered sandboxes.
 
 | Argument | Type | Notes |
@@ -32,7 +32,7 @@ Inventory of registered sandboxes.
 Returns name, platform, health, labels, agent version, last-seen time, and which
 one is currently selected.
 
-### `sandbox_select`
+### `fleet_select`
 Choose the default target for subsequent calls.
 
 | Argument | Type | Notes |
@@ -51,7 +51,7 @@ anywhere its user can regardless of the roots, so the jail is enforced only on
 an agent with exec disabled. The flag is explicit rather than implied by an
 absent list, which reads the wrong way round.
 
-### `sandbox_add`
+### `fleet_add`
 Register an already-enrolled agent that is not in the local registry.
 
 | Argument | Type | Notes |
@@ -65,9 +65,9 @@ Does not enroll. Enrollment mints credentials and is an operator action via
 
 Name, address and labels are all validated before the registry is touched, so a
 rejected call leaves nothing behind. Labels are bounded because they are paid
-for twice: in the registry file, and in every `sandbox_list` result.
+for twice: in the registry file, and in every `fleet_list` result.
 
-### `sandbox_remove`
+### `fleet_remove`
 Deregister a sandbox locally. Does not uninstall the agent.
 
 | Argument | Type | Notes |
@@ -76,16 +76,16 @@ Deregister a sandbox locally. Does not uninstall the agent.
 
 Clears the sticky selection of **every** client pointing at it, not just the
 caller's — a selection left aimed at a sandbox that no longer exists is worse
-than no selection. It also closes any [port forwards](#sandbox_forward)
+than no selection. It also closes any [port forwards](#fleet_forward)
 reaching it and reports them in `forwards_closed`: the channel behind them is
 dropped on removal, so what would be left is a local port that accepts a
 connection and then drops it.
 
-### `sandbox_info`
+### `fleet_info`
 Full detail for one sandbox: platform, kernel, CPU and memory, disk, detected
 toolchains, allowed roots, agent version and uptime, running process count.
 Reports `unconfined: true` for an agent with no path jail, on the same terms as
-`sandbox_select`.
+`fleet_select`.
 
 | Argument | Type | Notes |
 | --- | --- | --- |
@@ -96,7 +96,7 @@ Reports `unconfined: true` for an agent with no path jail, on the same terms as
 
 ## Execute
 
-### `sandbox_exec`
+### `fleet_exec`
 Run a command to completion.
 
 | Argument | Type | Notes |
@@ -135,14 +135,14 @@ discarding, so a command that produces a gigabyte finishes and reports what it
 exited with, rather than blocking on a full pipe until the timeout.
 
 For anything that should keep running after the call returns, use
-`sandbox_process_start`. Exec takes its process tree with it: descendants still
+`fleet_process_start`. Exec takes its process tree with it: descendants still
 running when the command exits are killed with it.
 
 ---
 
 ## Background processes
 
-### `sandbox_process_start`
+### `fleet_process_start`
 Spawn a supervised process.
 
 | Argument | Type | Notes |
@@ -177,7 +177,7 @@ construct the probe omits it, and omitting it is the failure the feature exists
 to prevent. `wait_for_ready` defaults to true when a probe is present for the
 same reason — a probe that is configured and not waited on is no probe at all.
 
-### `sandbox_process_list`
+### `fleet_process_list`
 All tracked processes, including exited ones not yet reaped.
 
 | Argument | Type | Notes |
@@ -207,7 +207,7 @@ it is long, uniform, and would cost more than the rest of the table put
 together; the name is what a reader scans by. A process that has exited reports
 no pid, because something else owns that number now.
 
-### `sandbox_process_logs`
+### `fleet_process_logs`
 Buffered output, optionally following new output.
 
 | Argument | Type | Notes |
@@ -251,7 +251,7 @@ dropped, and every piece but the last ends in ` [+]`.
 The block is capped. Past the cap the oldest lines go and the omission is stated
 at the top of what is left, as well as in `truncation`.
 
-### `sandbox_process_signal`
+### `fleet_process_signal`
 Signal or stop a process.
 
 | Argument | Type | Notes |
@@ -274,7 +274,7 @@ and restart calls against a `process_id` the agent does not have fail with the
 ids it does have, each with its name and state — an error the model can act on
 rather than one that costs it a list call.
 
-### `sandbox_process_restart`
+### `fleet_process_restart`
 Stop and start again from the same spec, optionally waiting for readiness.
 
 | Argument | Type | Notes |
@@ -285,7 +285,7 @@ Stop and start again from the same spec, optionally waiting for readiness.
 | `ready_timeout_seconds` | number | How long the probe may take after the restart. Defaults to 30, the agent's own probe default. |
 
 A restart re-runs the probe the process already has, and this side never saw
-it — `sandbox_process_list` does not report a process's probe. So the call's
+it — `fleet_process_list` does not report a process's probe. So the call's
 deadline is sized from the agent's default, and a process started with a longer
 `ready_probe.timeout_seconds` needs the same number here, or the call gives up
 before the agent does and reports a timeout for a restart that is still working.
@@ -299,7 +299,7 @@ not spend the recovery the policy is holding in reserve.
 
 ## Files
 
-### `sandbox_read`
+### `fleet_read`
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `path` | string | **Required.** |
@@ -320,9 +320,9 @@ Line endings are never rewritten. A CRLF file reads back with its CRLF intact,
 on every platform. The numbered rendering drops the carriage return, since a
 stray one mid-result is noise a model will either ignore or copy into its next
 argument, and the result says the file uses CRLF instead — which is what an
-exact-match `sandbox_edit` afterwards has to account for.
+exact-match `fleet_edit` afterwards has to account for.
 
-### `sandbox_write`
+### `fleet_write`
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `path` | string | **Required.** |
@@ -334,7 +334,7 @@ exact-match `sandbox_edit` afterwards has to account for.
 Written to a temporary file and renamed into place, so an interrupted write
 cannot leave a truncated file behind.
 
-### `sandbox_edit`
+### `fleet_edit`
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `path` | string | **Required.** |
@@ -354,30 +354,30 @@ read rather than the file twice.
 The **result** is bounded too, not only the file. `replace_all` with a
 `new_string` longer than `old_string` multiplies, so an edit whose output would
 exceed the agent's edit ceiling is refused before anything is written; rewrite
-the file with `sandbox_write`, which streams.
+the file with `fleet_write`, which streams.
 
 Line endings are preserved. A `new_string` whose endings disagree with the
 file's is refused rather than mixed in, and an `old_string` that fails to match
 only because of them says so.
 
-### `sandbox_ls`
+### `fleet_ls`
 `path`, `recursive`, `include_hidden`, `limit` (default 500).
 
 Directories come back as a list of names and files as name, size and age, in
 that order — two short lists rather than one table of mostly-empty columns.
 Names are relative to the directory listed, which is named once.
 
-### `sandbox_glob`
+### `fleet_glob`
 `pattern` (e.g. `**/*.go`), `root`, `limit` (default 300), `respect_gitignore`,
 `include_default_ignored`.
 
 The pattern is anchored at `root`: `*.go` does not recurse and `**/*.go` does.
 Results are files, sorted by modification time, newest first, and given as
-absolute paths so they can be passed straight to `sandbox_read`. `.git`,
+absolute paths so they can be passed straight to `fleet_read`. `.git`,
 `node_modules`, `vendor` and `target` are skipped unless
 `include_default_ignored` is set.
 
-### `sandbox_grep`
+### `fleet_grep`
 `pattern` (RE2), `root`, `include_glob`, `case_insensitive`, `context_lines`,
 `max_matches`, `files_only`, `respect_gitignore`, `include_default_ignored`.
 
@@ -386,7 +386,7 @@ match, `path-line- text` for a context line, which is the only thing telling
 the two apart once they are in a flat list.
 
 `include_glob` uses gitignore semantics rather than the anchored ones of
-`sandbox_glob`: `*.go` matches at any depth. `max_matches` defaults to 100 and
+`fleet_glob`: `*.go` matches at any depth. `max_matches` defaults to 100 and
 stops the walk rather than truncating a finished search, so the summary's
 `files_searched` reports how little of the tree was read, and the truncation
 note says so rather than letting "truncated" be read as "that is all of them".
@@ -402,7 +402,7 @@ the network first.
 
 ## Bridge
 
-### `sandbox_transfer`
+### `fleet_transfer`
 Move files and directories between the workstation and a sandbox.
 
 | Argument | Type | Notes |
@@ -468,13 +468,13 @@ fails the transfer rather than committing the prefix under the real name.
 
 Each file's own RPC deadline scales with its size rather than using the deadline
 sized for a question, so the cap above is a size a transfer can actually reach
-on a link slower than a laboratory's. The same applies to `sandbox_write`.
+on a link slower than a laboratory's. The same applies to `fleet_write`.
 
-### `sandbox_forward`
+### `fleet_forward`
 Forward a sandbox port to the workstation. **This is `ssh -L`.**
 
 ```
-sandbox_forward(remote_port=3000, local_port=3000)
+fleet_forward(remote_port=3000, local_port=3000)
   ==  ssh -L 3000:localhost:3000 sandbox
 ```
 
@@ -494,7 +494,7 @@ Returns `local_address`, plus `active_forwards`: every forward this MCP server
 holds, on every sandbox, in the result of **every** call — so the model can see
 what is already open without a tool that does nothing else.
 
-Closes the remote dev loop: start a server with `sandbox_process_start`, forward
+Closes the remote dev loop: start a server with `fleet_process_start`, forward
 its port, then reach it over `localhost` exactly as if it were local.
 
 **Not implemented, deliberately.** There is no reverse forward (`ssh -R`) and no

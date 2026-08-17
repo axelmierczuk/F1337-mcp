@@ -8,7 +8,7 @@ import (
 )
 
 // HealthStatus is the most recent result of probing a sandbox's
-// HostService.Health, cached so sandbox_list can report status without a
+// HostService.Health, cached so fleet_list can report status without a
 // round trip per sandbox.
 type HealthStatus struct {
 	// Reachable is false when the probe itself failed (timeout, connection

@@ -228,7 +228,7 @@ This means the download was corrupted or tampered with. Not installing.
             }
         }
 
-        Write-Step 'done. This host should now appear in sandbox_list.'
+        Write-Step 'done. This host should now appear in fleet_list.'
     } else {
         Write-Host @"
 

@@ -449,7 +449,7 @@ func TestOpenFile(t *testing.T) {
 }
 
 // TestAtomic pins the claim OpenFile makes about itself to the platform it is
-// running on, so the guarantee reported in sandbox_info cannot drift from the
+// running on, so the guarantee reported in fleet_info cannot drift from the
 // implementation.
 func TestAtomic(t *testing.T) {
 	t.Parallel()

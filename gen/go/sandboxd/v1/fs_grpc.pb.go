@@ -35,8 +35,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// FileService provides the filesystem primitives that back sandbox_read,
-// sandbox_write, sandbox_edit, sandbox_ls, sandbox_glob and sandbox_grep.
+// FileService provides the filesystem primitives that back fleet_read,
+// fleet_write, fleet_edit, fleet_ls, fleet_glob and fleet_grep.
 //
 // Every path in this service is resolved through the agent's path jail:
 // symlinks are resolved first and containment is checked on the result, since
@@ -195,8 +195,8 @@ func (c *fileServiceClient) MovePath(ctx context.Context, in *MovePathRequest, o
 // All implementations must embed UnimplementedFileServiceServer
 // for forward compatibility.
 //
-// FileService provides the filesystem primitives that back sandbox_read,
-// sandbox_write, sandbox_edit, sandbox_ls, sandbox_glob and sandbox_grep.
+// FileService provides the filesystem primitives that back fleet_read,
+// fleet_write, fleet_edit, fleet_ls, fleet_glob and fleet_grep.
 //
 // Every path in this service is resolved through the agent's path jail:
 // symlinks are resolved first and containment is checked on the result, since

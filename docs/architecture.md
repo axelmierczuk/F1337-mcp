@@ -55,9 +55,9 @@ survive a restart.
 2. The sticky default recorded for the calling client identity (taken from
    `_meta`), persisted in the registry.
 3. Otherwise: a structured error listing available sandboxes and instructing the
-   model to call `sandbox_select`.
+   model to call `fleet_select`.
 
-`sandbox_select` sets (2) and returns a handle usable as (1).
+`fleet_select` sets (2) and returns a handle usable as (1).
 
 There is deliberately no fourth rule. A fleet of exactly one sandbox does not
 resolve implicitly either: a fleet grows from one to two without anyone
@@ -86,7 +86,7 @@ opaque enough that a model cannot construct one for a sandbox it was never
 given.
 
 A reference carrying the `sbx_` prefix resolves as a handle first and only then
-as a name. `sandbox_add` refuses to register a name with that prefix, but it is
+as a name. `fleet_add` refuses to register a name with that prefix, but it is
 not the only way a name reaches the registry: an enrollment token that reserves
 no name lets the enrolling host choose its own. Matching names first would let
 such a host name itself after another sandbox's handle and receive every call
@@ -204,7 +204,7 @@ The order matters. Rejecting `..` in the requested path before resolution is the
 classic mistake: a symlink inside the jail pointing outside it walks straight
 through that check.
 
-`sandbox_edit` deliberately mirrors the exact-match, uniqueness-enforcing
+`fleet_edit` deliberately mirrors the exact-match, uniqueness-enforcing
 contract of the agent's built-in edit tool. Matching that contract is what makes
 the remote tool feel native, and the uniqueness requirement is what stops an
 ambiguous match from silently editing the wrong line.

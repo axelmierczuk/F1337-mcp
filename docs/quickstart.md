@@ -104,9 +104,9 @@ fleetctl list
 ## 7. Use it
 
 ```
-sandbox_list()                                    → build-box (linux/amd64, serving)
-sandbox_select(name="build-box")                  → selected
-sandbox_exec(argv=["go","test","./..."])          → exit 0
+fleet_list()                                    → build-box (linux/amd64, serving)
+fleet_select(name="build-box")                  → selected
+fleet_exec(argv=["go","test","./..."])          → exit 0
 ```
 
 ## Adding more hosts
@@ -121,7 +121,7 @@ fleetctl enroll mint --name gpu-01 --address gpu-01.internal:8722 \
 
 ## Troubleshooting
 
-**Agent does not appear in `sandbox_list`.**
+**Agent does not appear in `fleet_list`.**
 Check the service is running (`fleet-agent service status`), and that your
 workstation can reach its listen address.
 
@@ -130,7 +130,7 @@ The agent was enrolled against a different CA. Re-enroll with a fresh token.
 
 **`path escapes allowed roots`.**
 The path resolved — after following symlinks — to somewhere outside the roots
-given at install time. Check `sandbox_info` for the roots actually in force.
+given at install time. Check `fleet_info` for the roots actually in force.
 Only an agent with `exec.enabled: false` produces this error at all; with exec
 on there is no jail to escape.
 

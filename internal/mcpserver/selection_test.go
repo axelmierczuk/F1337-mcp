@@ -16,12 +16,12 @@ func TestSelection_ExplicitArgumentOverridesTheStickyDefault(t *testing.T) {
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
-	f.ok("sandbox_select", map[string]any{"name": "build-box"}, "")
+	f.ok("fleet_select", map[string]any{"name": "build-box"}, "")
 
-	res := f.ok("sandbox_info", map[string]any{"sandbox": "gpu-01"}, "")
+	res := f.ok("fleet_info", map[string]any{"sandbox": "gpu-01"}, "")
 	assert.Equal(t, "gpu-01", echoOf(t, res), "the explicit argument must win")
 
-	res = f.ok("sandbox_info", map[string]any{}, "")
+	res = f.ok("fleet_info", map[string]any{}, "")
 	assert.Equal(t, "build-box", echoOf(t, res), "an override is for one call only")
 }
 
@@ -33,9 +33,9 @@ func TestSelection_NoTargetIsAStructuredError(t *testing.T) {
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 
-	text := f.fails("sandbox_info", map[string]any{}, "")
+	text := f.fails("fleet_info", map[string]any{}, "")
 
-	assert.Contains(t, text, "sandbox_select", "the error must name the tool that fixes it")
+	assert.Contains(t, text, "fleet_select", "the error must name the tool that fixes it")
 	assert.Contains(t, text, "build-box", "and list what is available")
 
 	_, infoCalls, _ := f.clients.host("build-box").counts()
@@ -46,9 +46,9 @@ func TestSelection_NoTargetIsAStructuredError(t *testing.T) {
 // answer is not "select something" but "there is nothing to select".
 func TestSelection_EmptyFleetPointsAtEnrollment(t *testing.T) {
 	f := newFixture(t, fixtureOptions{})
-	text := f.fails("sandbox_info", map[string]any{}, "")
+	text := f.fails("fleet_info", map[string]any{}, "")
 	assert.Contains(t, text, "none are registered")
-	assert.Contains(t, text, "sandbox_add")
+	assert.Contains(t, text, "fleet_add")
 }
 
 // TestSelection_SurvivesAServerRestart. The selection lives in the registry
@@ -58,16 +58,16 @@ func TestSelection_SurvivesAServerRestart(t *testing.T) {
 	first := newFixture(t, fixtureOptions{})
 	first.add("build-box", "build-box.internal:8722", nil)
 	first.add("gpu-01", "gpu-01.internal:8722", nil)
-	first.ok("sandbox_select", map[string]any{"name": "gpu-01"}, "")
+	first.ok("fleet_select", map[string]any{"name": "gpu-01"}, "")
 
 	// A second server over the same config directory, as if the agent CLI
 	// had been restarted.
 	second := newFixture(t, fixtureOptions{configDir: first.dir})
 
-	res := second.ok("sandbox_info", map[string]any{}, "")
+	res := second.ok("fleet_info", map[string]any{}, "")
 	assert.Equal(t, "gpu-01", echoOf(t, res), "the sticky default must outlive the process")
 
-	out := structured[listResult](t, second.ok("sandbox_list", map[string]any{}, ""))
+	out := structured[listResult](t, second.ok("fleet_list", map[string]any{}, ""))
 	require.Len(t, out.Sandboxes, 2)
 	assert.Equal(t, "gpu-01", out.Sandbox)
 	assert.False(t, out.Sandboxes[0].Selected)
@@ -82,21 +82,21 @@ func TestSelection_TwoIdentitiesAreIndependent(t *testing.T) {
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
 
-	f.ok("sandbox_select", map[string]any{"name": "build-box"}, "alice")
-	f.ok("sandbox_select", map[string]any{"name": "gpu-01"}, "bob")
+	f.ok("fleet_select", map[string]any{"name": "build-box"}, "alice")
+	f.ok("fleet_select", map[string]any{"name": "gpu-01"}, "bob")
 
-	assert.Equal(t, "build-box", echoOf(t, f.ok("sandbox_info", map[string]any{}, "alice")))
-	assert.Equal(t, "gpu-01", echoOf(t, f.ok("sandbox_info", map[string]any{}, "bob")))
+	assert.Equal(t, "build-box", echoOf(t, f.ok("fleet_info", map[string]any{}, "alice")))
+	assert.Equal(t, "gpu-01", echoOf(t, f.ok("fleet_info", map[string]any{}, "bob")))
 
 	// Moving one leaves the other where it was.
-	f.ok("sandbox_select", map[string]any{"name": "gpu-01"}, "alice")
-	assert.Equal(t, "gpu-01", echoOf(t, f.ok("sandbox_info", map[string]any{}, "alice")))
-	assert.Equal(t, "gpu-01", echoOf(t, f.ok("sandbox_info", map[string]any{}, "bob")))
+	f.ok("fleet_select", map[string]any{"name": "gpu-01"}, "alice")
+	assert.Equal(t, "gpu-01", echoOf(t, f.ok("fleet_info", map[string]any{}, "alice")))
+	assert.Equal(t, "gpu-01", echoOf(t, f.ok("fleet_info", map[string]any{}, "bob")))
 
 	// And a third client that has selected nothing gets the no-target error
 	// rather than inheriting someone else's target.
-	text := f.fails("sandbox_info", map[string]any{}, "carol")
-	assert.Contains(t, text, "sandbox_select")
+	text := f.fails("fleet_info", map[string]any{}, "carol")
+	assert.Contains(t, text, "fleet_select")
 }
 
 // TestSelection_ClientsWithDistinctImplementationNamesAreDistinct covers the
@@ -106,19 +106,19 @@ func TestSelection_ClientsWithDistinctImplementationNamesAreDistinct(t *testing.
 	first := newFixture(t, fixtureOptions{clientName: "editor-a"})
 	first.add("build-box", "build-box.internal:8722", nil)
 	first.add("gpu-01", "gpu-01.internal:8722", nil)
-	first.ok("sandbox_select", map[string]any{"name": "build-box"}, "")
+	first.ok("fleet_select", map[string]any{"name": "build-box"}, "")
 
 	second := newFixture(t, fixtureOptions{clientName: "editor-b", configDir: first.dir})
-	text := second.fails("sandbox_info", map[string]any{}, "")
-	assert.Contains(t, text, "sandbox_select",
+	text := second.fails("fleet_info", map[string]any{}, "")
+	assert.Contains(t, text, "fleet_select",
 		"a different client must not inherit another's selection")
 
-	second.ok("sandbox_select", map[string]any{"name": "gpu-01"}, "")
-	assert.Equal(t, "build-box", echoOf(t, first.ok("sandbox_info", map[string]any{}, "")))
-	assert.Equal(t, "gpu-01", echoOf(t, second.ok("sandbox_info", map[string]any{}, "")))
+	second.ok("fleet_select", map[string]any{"name": "gpu-01"}, "")
+	assert.Equal(t, "build-box", echoOf(t, first.ok("fleet_info", map[string]any{}, "")))
+	assert.Equal(t, "gpu-01", echoOf(t, second.ok("fleet_info", map[string]any{}, "")))
 }
 
-// TestSelection_HandleResolvesAsTheSandboxArgument: the handle sandbox_select
+// TestSelection_HandleResolvesAsTheSandboxArgument: the handle fleet_select
 // mints is the spec-shaped half of the design, and it has to actually work
 // when passed back.
 func TestSelection_HandleResolvesAsTheSandboxArgument(t *testing.T) {
@@ -126,19 +126,19 @@ func TestSelection_HandleResolvesAsTheSandboxArgument(t *testing.T) {
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
 
-	out := structured[selectResult](t, f.ok("sandbox_select", map[string]any{"name": "gpu-01"}, ""))
+	out := structured[selectResult](t, f.ok("fleet_select", map[string]any{"name": "gpu-01"}, ""))
 	require.NotEmpty(t, out.Handle)
 	assert.NotContains(t, out.Handle, "gpu-01", "the handle is opaque")
 	assert.Equal(t, selection.HandleFor("gpu-01"), out.Handle)
 
-	f.ok("sandbox_select", map[string]any{"name": "build-box"}, "")
-	res := f.ok("sandbox_info", map[string]any{"sandbox": out.Handle}, "")
+	f.ok("fleet_select", map[string]any{"name": "build-box"}, "")
+	res := f.ok("fleet_info", map[string]any{"sandbox": out.Handle}, "")
 	assert.Equal(t, "gpu-01", echoOf(t, res), "a handle must resolve back to its sandbox")
 
 	// A handle for a sandbox that no longer exists fails like any unknown
 	// reference, with the valid names listed.
-	f.ok("sandbox_remove", map[string]any{"name": "gpu-01"}, "")
-	text := f.fails("sandbox_info", map[string]any{"sandbox": out.Handle}, "")
+	f.ok("fleet_remove", map[string]any{"name": "gpu-01"}, "")
+	text := f.fails("fleet_info", map[string]any{"sandbox": out.Handle}, "")
 	assert.Contains(t, text, "build-box")
 }
 
@@ -149,22 +149,22 @@ func TestSelection_StaleSelectionIsDistinctFromATypo(t *testing.T) {
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
-	f.ok("sandbox_select", map[string]any{"name": "gpu-01"}, "alice")
+	f.ok("fleet_select", map[string]any{"name": "gpu-01"}, "alice")
 
 	// Removing via a different identity leaves alice's selection dangling
 	// unless removal reaches every client.
-	f.ok("sandbox_remove", map[string]any{"name": "gpu-01"}, "bob")
+	f.ok("fleet_remove", map[string]any{"name": "gpu-01"}, "bob")
 
-	text := f.fails("sandbox_info", map[string]any{}, "alice")
-	assert.Contains(t, text, "sandbox_select")
+	text := f.fails("fleet_info", map[string]any{}, "alice")
+	assert.Contains(t, text, "fleet_select")
 	assert.Contains(t, text, "build-box")
 
 	// And with the registry edited underneath the server — the case removal
 	// cannot clean up — the message says the target is gone rather than that
 	// the model got the name wrong.
-	f.ok("sandbox_select", map[string]any{"name": "build-box"}, "alice")
+	f.ok("fleet_select", map[string]any{"name": "build-box"}, "alice")
 	require.NoError(t, f.fleet.Remove("build-box"))
-	text = f.fails("sandbox_info", map[string]any{}, "alice")
+	text = f.fails("fleet_info", map[string]any{}, "alice")
 	assert.Contains(t, text, "no longer registered")
 }
 
@@ -180,36 +180,36 @@ var echoFixtures = map[string]struct {
 	echoes   string
 	targeted bool
 }{
-	"sandbox_list":   {args: map[string]any{}, echoes: "build-box"},
-	"sandbox_select": {args: map[string]any{"name": "gpu-01"}, echoes: "gpu-01"},
-	"sandbox_add":    {args: map[string]any{"name": "new-box", "address": "new-box.internal:8722"}, echoes: "new-box"},
-	"sandbox_remove": {args: map[string]any{"name": "gpu-01"}, echoes: "gpu-01"},
-	"sandbox_info":   {args: map[string]any{"sandbox": "build-box"}, echoes: "build-box", targeted: true},
+	"fleet_list":   {args: map[string]any{}, echoes: "build-box"},
+	"fleet_select": {args: map[string]any{"name": "gpu-01"}, echoes: "gpu-01"},
+	"fleet_add":    {args: map[string]any{"name": "new-box", "address": "new-box.internal:8722"}, echoes: "new-box"},
+	"fleet_remove": {args: map[string]any{"name": "gpu-01"}, echoes: "gpu-01"},
+	"fleet_info":   {args: map[string]any{"sandbox": "build-box"}, echoes: "build-box", targeted: true},
 
-	"sandbox_exec":  {args: map[string]any{"sandbox": "build-box", "argv": []any{"echo", "hi"}}, echoes: "build-box", targeted: true},
-	"sandbox_read":  {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go"}, echoes: "build-box", targeted: true},
-	"sandbox_write": {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go", "content": "package main\n"}, echoes: "build-box", targeted: true},
-	"sandbox_edit":  {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go", "old_string": "old", "new_string": "new"}, echoes: "build-box", targeted: true},
-	"sandbox_ls":    {args: map[string]any{"sandbox": "build-box", "path": "/srv/app"}, echoes: "build-box", targeted: true},
-	"sandbox_glob":  {args: map[string]any{"sandbox": "build-box", "pattern": "**/*.go"}, echoes: "build-box", targeted: true},
-	"sandbox_grep":  {args: map[string]any{"sandbox": "build-box", "pattern": "func main"}, echoes: "build-box", targeted: true},
+	"fleet_exec":  {args: map[string]any{"sandbox": "build-box", "argv": []any{"echo", "hi"}}, echoes: "build-box", targeted: true},
+	"fleet_read":  {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go"}, echoes: "build-box", targeted: true},
+	"fleet_write": {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go", "content": "package main\n"}, echoes: "build-box", targeted: true},
+	"fleet_edit":  {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go", "old_string": "old", "new_string": "new"}, echoes: "build-box", targeted: true},
+	"fleet_ls":    {args: map[string]any{"sandbox": "build-box", "path": "/srv/app"}, echoes: "build-box", targeted: true},
+	"fleet_glob":  {args: map[string]any{"sandbox": "build-box", "pattern": "**/*.go"}, echoes: "build-box", targeted: true},
+	"fleet_grep":  {args: map[string]any{"sandbox": "build-box", "pattern": "func main"}, echoes: "build-box", targeted: true},
 	// A source that exists wherever the test binary runs: the package's own
 	// directory is the working directory of a `go test` process. Nothing is
 	// written on this side — the destination is on the (faked) sandbox.
-	"sandbox_transfer": {args: map[string]any{
+	"fleet_transfer": {args: map[string]any{
 		"sandbox": "build-box", "direction": "push", "source": "server.go", "destination": "/srv/app/server.go",
 	}, echoes: "build-box", targeted: true},
 
-	"sandbox_process_start": {
+	"fleet_process_start": {
 		args:     map[string]any{"sandbox": "build-box", "argv": []any{"npm", "run", "dev"}, "name": "web-dev"},
 		echoes:   "build-box",
 		targeted: true,
 	},
-	"sandbox_process_list":    {args: map[string]any{"sandbox": "build-box"}, echoes: "build-box", targeted: true},
-	"sandbox_process_logs":    {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
-	"sandbox_process_signal":  {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1", "graceful_stop": true}, echoes: "build-box", targeted: true},
-	"sandbox_process_restart": {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
-	"sandbox_forward":         {args: map[string]any{"sandbox": "build-box", "remote_port": 3000}, echoes: "build-box", targeted: true},
+	"fleet_process_list":    {args: map[string]any{"sandbox": "build-box"}, echoes: "build-box", targeted: true},
+	"fleet_process_logs":    {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
+	"fleet_process_signal":  {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1", "graceful_stop": true}, echoes: "build-box", targeted: true},
+	"fleet_process_restart": {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
+	"fleet_forward":         {args: map[string]any{"sandbox": "build-box", "remote_port": 3000}, echoes: "build-box", targeted: true},
 }
 
 // TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox is the walk the
@@ -250,7 +250,7 @@ func TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox(t *testing.T) {
 			f := newFixture(t, fixtureOptions{})
 			f.add("build-box", "build-box.internal:8722", nil)
 			f.add("gpu-01", "gpu-01.internal:8722", nil)
-			f.ok("sandbox_select", map[string]any{"name": "build-box"}, "")
+			f.ok("fleet_select", map[string]any{"name": "build-box"}, "")
 
 			res := f.ok(tool.Name, fixture.args, "")
 			assert.Equal(t, fixture.echoes, echoOf(t, res),
@@ -279,7 +279,7 @@ func TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox(t *testing.T) {
 func TestEcho_SynthesisedCallsAlsoEcho(t *testing.T) {
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
-	f.ok("sandbox_select", map[string]any{"name": "build-box"}, "")
+	f.ok("fleet_select", map[string]any{"name": "build-box"}, "")
 
 	listed, err := f.session.ListTools(t.Context(), &mcp.ListToolsParams{})
 	require.NoError(t, err)
@@ -326,7 +326,7 @@ func TestEcho_NoTargetedToolRunsWithoutResolution(t *testing.T) {
 		}
 		checked++
 		text := f.fails(tool.Name, argsFromSchema(t, input), "")
-		assert.Containsf(t, text, "sandbox_select",
+		assert.Containsf(t, text, "fleet_select",
 			"tool %s ran (or failed for another reason) without a resolved target", tool.Name)
 	}
 	assert.Positive(t, checked, "no targeted tool was found; the walk proved nothing")

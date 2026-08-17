@@ -183,7 +183,7 @@ func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequ
 		sendErr := stream.Send(&sandboxdv1.ForwardResponse{
 			Event: &sandboxdv1.ForwardResponse_Opened{Opened: &sandboxdv1.ForwardOpened{
 				Success: false,
-				Error: fmt.Sprintf("could not connect to %s on the sandbox: %s. Check something is listening there — sandbox_process_list reports the ports each supervised process holds",
+				Error: fmt.Sprintf("could not connect to %s on the sandbox: %s. Check something is listening there — fleet_process_list reports the ports each supervised process holds",
 					net.JoinHostPort(call.reportedHost(), strconv.FormatUint(uint64(call.port), 10)), dialMessage(err)),
 			}},
 		})

@@ -273,7 +273,7 @@ if [ -n "$TOKEN" ]; then
       || warn "service did not start; check 'fleet-agent service status'"
   fi
 
-  log "done. This host should now appear in sandbox_list."
+  log "done. This host should now appear in fleet_list."
 else
   cat >&2 <<EOF
 

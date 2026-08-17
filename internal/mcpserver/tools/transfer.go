@@ -22,7 +22,7 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 )
 
-// Directions for sandbox_transfer.
+// Directions for fleet_transfer.
 const (
 	directionPush = "push"
 	directionPull = "pull"
@@ -66,10 +66,10 @@ var defaultExcludes = []string{
 	"*.pyc", "*.class",
 }
 
-// registerTransfer adds sandbox_transfer.
+// registerTransfer adds fleet_transfer.
 func registerTransfer(r *Registrar) {
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_transfer",
+		Name:  "fleet_transfer",
 		Title: "Transfer files",
 		Description: "Copy files or directories between this workstation and the selected sandbox. " +
 			"push sends local to remote, pull the reverse. Executable bits are preserved. " +
@@ -77,7 +77,7 @@ func registerTransfer(r *Registrar) {
 	}, r.sandboxTransfer)
 }
 
-// TransferArgs are the arguments to sandbox_transfer.
+// TransferArgs are the arguments to fleet_transfer.
 type TransferArgs struct {
 	TargetArgs
 	// Direction is push or pull.
@@ -104,7 +104,7 @@ type TransferSkip struct {
 	Reason string `json:"reason" jsonschema:"why it was skipped"`
 }
 
-// TransferResult is the sandbox_transfer result.
+// TransferResult is the fleet_transfer result.
 type TransferResult struct {
 	// Echo carries the sandbox the transfer went to or came from.
 	Echo

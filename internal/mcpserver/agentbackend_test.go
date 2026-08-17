@@ -137,7 +137,7 @@ type backendClients struct {
 	// thing every one of these handlers does and so the earliest point in a
 	// tool call a test can observe from the outside. The memory tests take
 	// their baseline here: by this moment the protocol has decoded the
-	// request's arguments — for sandbox_write that is the content itself,
+	// request's arguments — for fleet_write that is the content itself,
 	// which nothing on this side can avoid holding — and the handler has not
 	// yet touched them, so everything measured after it is the handler's own.
 	onFiles func()
@@ -220,7 +220,7 @@ func newAgentFixture(t *testing.T, opts backendOptions) *agentFixture {
 	require.NoError(t, fleet.Add(registry.Sandbox{Name: "build-box", Address: "build-box.internal:8722"}))
 
 	session := connect(t, server)
-	callTool(t, session, "sandbox_select", map[string]any{"name": "build-box"}, false)
+	callTool(t, session, "fleet_select", map[string]any{"name": "build-box"}, false)
 
 	return &agentFixture{t: t, session: session, backend: backend, clients: clients, remote: remote}
 }

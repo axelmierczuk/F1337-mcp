@@ -102,10 +102,10 @@ func (s *heapSampler) growth() int64 {
 // guessed, on this branch, over three runs each under -race:
 //
 //	                          streaming (observed)   buffering (observed)
-//	sandbox_transfer pull      7.7 – 9.8 MiB          87 MiB
-//	sandbox_transfer push      9.1 – 10.1 MiB         89 MiB
-//	sandbox_write              0 – 12.6 MiB           90 MiB
-//	sandbox_exec               0.12 MiB               (whole 256 MiB stream)
+//	fleet_transfer pull      7.7 – 9.8 MiB          87 MiB
+//	fleet_transfer push      9.1 – 10.1 MiB         89 MiB
+//	fleet_write              0 – 12.6 MiB           90 MiB
+//	fleet_exec               0.12 MiB               (whole 256 MiB stream)
 //
 // The streaming floor is not the tools' own memory — it is gRPC's buffer
 // pools, bufconn's 1 MiB pipe and the SDK's encoding, none of which this side
@@ -131,7 +131,7 @@ const heapBound = 48 << 20
 // size, so an implementation that holds it whole is unmistakable against
 // heapBound.
 //
-// It is not larger, and sandbox_write is the reason. That tool takes its
+// It is not larger, and fleet_write is the reason. That tool takes its
 // content as a tool argument, so its payload is a JSON string the protocol has
 // already decoded whole — the test process holds several copies of it before
 // the handler is even reached, and doubling it doubles the memory the test
