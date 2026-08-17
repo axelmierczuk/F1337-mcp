@@ -133,9 +133,20 @@ resolved, and only then is containment under an allowed root checked. Doing it
 in that order is the whole point: checking for `..` in the requested path before
 resolution is a jail that any symlink inside it walks straight out of.
 
+Resolving and then opening are two operations, and between them a component can
+be replaced with a symlink pointing anywhere. On Linux the jail hands the check
+to the kernel instead, opening through `openat2` with `RESOLVE_BENEATH`, so the
+check and the use are one operation and no window exists. Everywhere else — and
+on Linux kernels before 5.6, or under a seccomp filter that blocks the syscall —
+it falls back to resolve-then-open and the window is real. The daemon logs which
+one it got at startup rather than letting an operator assume the stronger of the
+two.
+
 An exec-disabled agent with no allowed roots has no jail either. It refuses to
 start that way unless explicitly forced, and reports the condition in
-`sandbox_info`.
+`sandbox_info`. It also refuses to start on an allowed root that does not exist:
+a missing path can be created later, as a symlink to anywhere, and a jail that
+had accepted it would then confine to whatever it pointed at.
 
 If you want a filesystem boundary on an agent that runs commands, it has to come
 from outside the agent: a container, a VM, a `ProtectSystem=strict` unit with

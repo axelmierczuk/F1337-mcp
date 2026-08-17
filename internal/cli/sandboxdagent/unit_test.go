@@ -100,11 +100,11 @@ func TestSystemdUnit_HardeningLevels(t *testing.T) {
 // An allowed root that does not exist yet must not stop the service starting.
 //
 // systemd fails a unit's whole mount namespace when a ReadWritePaths= entry is
-// absent, and a root the operator creates after enrolling is a shape this agent
-// deliberately supports — it is the same case the jail resolves through its
-// nearest existing ancestor. systemd's "-" prefix is what reconciles the two.
-// The state and log directories are created by `install`, so one of those
-// missing is a real fault and is left to fail.
+// absent, and a configured root that does not exist is an ordinary state on the
+// default configuration: exec is on, so the roots are never handed to the jail
+// and nothing checks whether they are there. systemd's "-" prefix is what
+// reconciles the two. The state and log directories are created by `install`,
+// so one of those missing is a real fault and is left to fail.
 func TestSystemdUnit_StrictToleratesARootThatDoesNotExistYet(t *testing.T) {
 	p := params()
 	p.Hardening = sandboxdagent.HardeningStrict

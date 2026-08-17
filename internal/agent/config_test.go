@@ -273,6 +273,15 @@ func TestValidate_Problems(t *testing.T) {
 	}
 }
 
+// absRoot is an absolute path in this platform's own spelling. Validate insists
+// allowed roots are absolute, and "absolute" on Windows means a drive letter.
+func absRoot() string {
+	if runtime.GOOS == "windows" {
+		return `C:\workspace`
+	}
+	return "/workspace"
+}
+
 // A bare number in a duration field is read as seconds rather than as
 // nanoseconds, which is what an operator writing "30" means.
 func TestDuration_AcceptsBareSeconds(t *testing.T) {

@@ -9,30 +9,44 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
 )
 
 // Deps is everything the daemon hands a service implementation. It is passed
 // to a Factory once, before the listener opens.
 //
-// Every field is populated for every service. Jail is never nil — a --no-jail
-// daemon supplies one whose Enabled reports false — so a service can call
-// Resolve unconditionally instead of nil-checking on the request path.
+// Every field is populated for every service. Jail is never nil — a daemon
+// running without confinement supplies jail.Unconfined() rather than nothing,
+// so a service can resolve unconditionally instead of nil-checking on the
+// request path.
 type Deps struct {
 	// Config is the loaded, validated agent configuration. Services read
 	// their own section of it: exec.* for #7, process.* for #11, audit.* for
 	// #17.
 	Config *Config
 
-	// Jail confines filesystem access to the configured roots. Resolve every
-	// caller-supplied path through it before any syscall, and use the path it
-	// returns.
+	// Jail confines filesystem access to the configured roots. It is never
+	// nil: a daemon with no confinement is handed jail.Unconfined(), which
+	// normalises paths and permits all of them, so a service can call it
+	// unconditionally instead of nil-checking on the request path.
+	//
+	// Prefer Jail.OpenFile over Jail.Resolve followed by os.OpenFile. On Linux
+	// OpenFile hands the containment check to the kernel through openat2 with
+	// RESOLVE_BENEATH, so no interval exists in which a component can be
+	// swapped for a symlink pointing out of the jail; Jail.Atomic reports
+	// whether this host got that or the portable fallback. Resolve is still
+	// the right call for stat, readdir, rename and remove, and for deciding
+	// whether a path is acceptable before acting on it — use the path it
+	// returns, never the one you passed in. Map jail.ErrOutsideJail to
+	// codes.PermissionDenied.
 	//
 	// It is only ever confining on an agent with exec disabled: a caller who
 	// can run commands reaches any path without FileService, so the daemon
 	// hands out an unconfined jail whenever exec is on. Do not read
-	// Config.AllowedRoots as an answer about what is enforced — ask this. That
-	// is also what GetHostInfo reports.
-	Jail Jail
+	// Config.AllowedRoots as an answer about what is enforced — ask
+	// Jail.Confined() and Jail.Roots(). That is also what GetHostInfo reports.
+	Jail *jail.Jail
 
 	// Log is the daemon logger. Services should scope it, conventionally with
 	// Log.With("service", "<name>").

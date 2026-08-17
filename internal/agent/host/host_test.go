@@ -16,20 +16,21 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent/host"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
 )
 
 func newService(t *testing.T, roots ...string) (*host.Service, agent.Deps) {
 	t.Helper()
-	jail := agent.Unconfined()
+	confinement := jail.Unconfined()
 	if len(roots) > 0 {
 		var err error
-		jail, err = agent.NewJail(roots)
+		confinement, err = jail.New(jail.Config{Roots: roots})
 		require.NoError(t, err)
 	}
 
 	deps := agent.Deps{
 		Config:    &agent.Config{AllowedRoots: roots},
-		Jail:      jail,
+		Jail:      confinement,
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Status:    agent.NewStatus(),
 		Version:   "1.2.3-test",
@@ -107,7 +108,7 @@ func TestGetHostInfo_ReportsTheJailNotTheConfig(t *testing.T) {
 	root := t.TempDir()
 	deps := agent.Deps{
 		Config:    &agent.Config{AllowedRoots: []string{root}}, // exec on by default
-		Jail:      agent.Unconfined(),
+		Jail:      jail.Unconfined(),
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Status:    agent.NewStatus(),
 		Version:   "1.2.3-test",

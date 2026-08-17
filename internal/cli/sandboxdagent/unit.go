@@ -204,12 +204,18 @@ func (p UnitParams) systemdHardening() []string {
 //
 // The roots carry systemd's "-" prefix, which means "ignore this one if it does
 // not exist". Without it a unit naming a directory that is not there fails to
-// set up its mount namespace and the service will not start at all — and a root
-// that does not exist yet is a shape this agent deliberately supports: an
-// installer may name a workspace the operator creates afterwards, which is the
-// same case the jail resolves through its nearest existing ancestor. The state
-// and log directories are not prefixed: `install` creates them, so one of those
-// missing is a real fault and worth failing on.
+// set up its mount namespace and the service will not start at all.
+//
+// A configured root that does not exist is an ordinary state on a running
+// agent, because on the default configuration the roots are never handed to
+// the jail: exec is on, so internal/security/jail is not constructed and
+// nothing ever checks whether they are there. Only an exec-disabled agent
+// builds a jail, and that one refuses a missing root outright — but by then it
+// has refused to start, which is a far better failure than a service that
+// cannot enter its own namespace for a reason systemd states obliquely.
+//
+// The state and log directories are not prefixed: `install` creates them, so
+// one of those missing is a real fault and worth failing on.
 func (p UnitParams) readWritePaths() []string {
 	seen := map[string]bool{}
 	var paths []string

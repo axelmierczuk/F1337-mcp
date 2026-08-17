@@ -19,6 +19,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
 )
 
 // Services registered through the seam are constructed once, before the
@@ -50,7 +51,7 @@ func TestServer_ServiceRegistrationSeam(t *testing.T) {
 	assert.NotNil(t, got.Jail)
 	assert.Equal(t, "0.0.0-test", got.Version)
 	assert.False(t, got.StartedAt.IsZero())
-	assert.True(t, got.Jail.Enabled())
+	assert.True(t, got.Jail.Confined())
 	assert.Equal(t, []string{resolved(t, root)}, got.Jail.Roots())
 	assert.Equal(t, []string{"host"}, h.server.ServiceNames())
 }
@@ -71,17 +72,20 @@ func TestServer_ExecEnabledDisablesTheJail(t *testing.T) {
 	h := start(t, fleet.agentConfig(t, root), []agent.Registration{registration("host", newCountingService())},
 		func(o *agent.Options) { o.Log = log })
 
-	jail := h.server.Deps().Jail
-	assert.False(t, jail.Enabled(), "exec is enabled, so there is no jail")
-	assert.Empty(t, jail.Roots(),
+	j := h.server.Deps().Jail
+	assert.False(t, j.Confined(), "exec is enabled, so there is no jail")
+	assert.Empty(t, j.Roots(),
 		"an agent whose jail is off must report no roots: this is what sandbox_select tells the model it may write to")
 
 	// Resolution still works — services call Resolve unconditionally — it just
-	// permits everything.
+	// permits everything. An unconfined jail normalises rather than resolves:
+	// there is no containment decision to make, so there is nothing symlink
+	// resolution would be protecting.
 	outside := filepath.Join(t.TempDir(), "elsewhere")
-	got, err := jail.Resolve(outside)
+	got, err := j.Resolve(outside)
 	require.NoError(t, err)
-	assert.Equal(t, resolved(t, filepath.Dir(outside))+string(filepath.Separator)+"elsewhere", got)
+	assert.Equal(t, filepath.Clean(outside), got)
+	assert.False(t, j.Atomic(), "an unconfined jail has no containment to make atomic")
 
 	// And it is never silent: configured roots that are being ignored are said
 	// out loud, with the reason, at every start.
@@ -99,12 +103,55 @@ func TestServer_ExecDisabledEnforcesTheJail(t *testing.T) {
 
 	h := start(t, fleet.jailedConfig(t, root), []agent.Registration{registration("host", newCountingService())})
 
-	jail := h.server.Deps().Jail
-	require.True(t, jail.Enabled())
-	assert.Equal(t, []string{resolved(t, root)}, jail.Roots())
+	j := h.server.Deps().Jail
+	require.True(t, j.Confined())
+	assert.Equal(t, []string{resolved(t, root)}, j.Roots())
 
-	_, err := jail.Resolve(filepath.Join(t.TempDir(), "elsewhere"))
-	require.ErrorIs(t, err, agent.ErrOutsideJail)
+	_, err := j.Resolve(filepath.Join(t.TempDir(), "elsewhere"))
+	require.ErrorIs(t, err, jail.ErrOutsideJail)
+}
+
+// A root that does not exist is a startup failure, not a jail that quietly
+// confines to nothing.
+//
+// internal/security/jail refuses it at construction rather than tolerating it,
+// and the reason is worth keeping asserted: a path that is missing now can be
+// created later — as a symlink to anywhere — and a jail that had accepted it
+// would then confine to whatever it pointed at. The provisional jail this
+// replaced kept such a root, resolved through its nearest existing ancestor.
+// The daemon's error has to name both the root and the way out.
+func TestServer_MissingAllowedRootRefusesStartup(t *testing.T) {
+	fleet := newTestFleet(t)
+	missing := filepath.Join(t.TempDir(), "not-created-yet")
+
+	_, err := agent.New(agent.Options{
+		Config:   fleet.jailedConfig(t, missing),
+		Log:      discardLogger(),
+		Version:  "0.0.0-test",
+		Services: []agent.Registration{registration("host", newCountingService())},
+		Listener: newBufconn(t),
+	})
+	require.Error(t, err, "an allowed root that does not exist must not become a jail")
+	assert.Contains(t, err.Error(), missing)
+	assert.Contains(t, err.Error(), "must already exist")
+}
+
+// The same config with exec enabled starts, because there is no jail to build.
+//
+// This is the decision itself, asserted through the swap: with exec on the
+// roots are not merely unenforced, they are never handed to the jail at all —
+// so a root that would have failed construction cannot fail startup either.
+func TestServer_MissingAllowedRootIsIrrelevantWhenExecIsEnabled(t *testing.T) {
+	fleet := newTestFleet(t)
+	missing := filepath.Join(t.TempDir(), "not-created-yet")
+
+	log, logs := capturedLogger()
+	h := start(t, fleet.agentConfig(t, missing), []agent.Registration{registration("host", newCountingService())},
+		func(o *agent.Options) { o.Log = log })
+
+	assert.False(t, h.server.Deps().Jail.Confined())
+	assert.Empty(t, h.server.Deps().Jail.Roots())
+	assert.Contains(t, logs.String(), "ALLOWED_ROOTS ARE IGNORED")
 }
 
 // An exec-disabled agent with no roots is the --no-jail case, and it says so.

@@ -17,6 +17,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
 )
 
 // DefaultDrainTimeout bounds how long shutdown waits for in-flight RPCs.
@@ -60,7 +61,7 @@ type Options struct {
 
 	// Jail overrides the path jail built from Config.AllowedRoots. Nil builds
 	// one from the config.
-	Jail Jail
+	Jail *jail.Jail
 
 	// GRPCOptions are appended to the server options this package builds.
 	GRPCOptions []grpc.ServerOption
@@ -178,7 +179,12 @@ func New(opts Options) (*Server, error) {
 // wrote allowed_roots into their config and never heard otherwise reasonably
 // concludes the agent is confined to them, and that belief is the thing this
 // wiring exists to remove.
-func jailFor(cfg *Config, log *slog.Logger) (Jail, error) {
+//
+// This is the single place that decides whether the jail is in force. Nothing
+// downstream reads Config.AllowedRoots to answer that question — they ask the
+// jail, which is why an exec-enabled agent reports itself unconfined all the
+// way out to sandbox_select.
+func jailFor(cfg *Config, log *slog.Logger) (*jail.Jail, error) {
 	if !cfg.JailEnforced() {
 		if len(cfg.AllowedRoots) > 0 {
 			log.Warn("ALLOWED_ROOTS ARE IGNORED",
@@ -191,7 +197,7 @@ func jailFor(cfg *Config, log *slog.Logger) (Jail, error) {
 				"reason", "exec is enabled, and an agent that runs arbitrary commands cannot be confined by a path check",
 				"consequence", "every path this account can reach is reachable through this agent")
 		}
-		return Unconfined(), nil
+		return jail.Unconfined(), nil
 	}
 
 	if len(cfg.AllowedRoots) == 0 {
@@ -203,9 +209,19 @@ func jailFor(cfg *Config, log *slog.Logger) (Jail, error) {
 		log.Warn("STARTING WITHOUT A PATH JAIL",
 			"reason", "exec is disabled but allowed_roots is empty and --no-jail was passed",
 			"consequence", "every path on this host is reachable through FileService")
-		return Unconfined(), nil
+		return jail.Unconfined(), nil
 	}
-	return NewJail(cfg.AllowedRoots)
+
+	confined, err := jail.New(jail.Config{Roots: cfg.AllowedRoots})
+	if err != nil {
+		// A root that does not exist is a configuration error the jail refuses
+		// rather than tolerates, and the reason is worth repeating where an
+		// operator will read it: a path that is missing now can be created
+		// later, as a symlink to anywhere, and the jail would then confine to
+		// whatever it pointed at.
+		return nil, fmt.Errorf("agent: build path jail: %w\n\nEvery allowed root must already exist and be a directory. Create it, or start with exec enabled, where the roots are not a boundary anyway", err)
+	}
+	return confined, nil
 }
 
 // Addr returns the address the server accepts on.
@@ -245,11 +261,15 @@ func (s *Server) Serve(ctx context.Context) error {
 		"address", s.lis.Addr().String(),
 		"services", s.ServiceNames(),
 		"exec_enabled", s.cfg.Exec.IsEnabled(),
-		"jail", s.deps.Jail.Enabled(),
+		"jail", s.deps.Jail.Confined(),
 		// The jail's roots, not the config's: with exec enabled those differ,
 		// and this line should say what is in force rather than what was
 		// written down.
 		"allowed_roots", s.deps.Jail.Roots(),
+		// Whether a path check and the open that follows it are one operation
+		// or two. It is false off Linux and on kernels without openat2, and
+		// saying so beats letting an operator assume the stronger guarantee.
+		"jail_atomic", s.deps.Jail.Atomic(),
 		"require_client_ou", s.cfg.TLS.RequireClientOU,
 		"version", s.deps.Version,
 	)
