@@ -155,6 +155,74 @@ func TestEvaluate_SubcommandRuleMatchesTheCommandsArguments(t *testing.T) {
 	require.False(t, pushed.Allowed)
 }
 
+// A subcommand rule matches whatever spelling of argv[0] the caller used.
+//
+// This is the same defect the resolved-path matching exists to prevent, one
+// level down. The executable is matched by every name it answers to, but the
+// command lines offered alongside it were built from the argument as given
+// alone — so "go test" caught `go test ./...` and not
+// `/usr/local/go/bin/go test ./...`, which is the same command, and
+// `/bin/../bin/git push` walked past "git push" exactly the way
+// `/bin/../bin/sh` used to walk past "sh".
+//
+// An operator who denies a subcommand has denied it. Spelling out the path to
+// the interpreter is the first thing anyone tries.
+func TestEvaluate_SubcommandRuleIsNotWalkedPastByArgv0Spelling(t *testing.T) {
+	p, err := policy.New(policy.Config{Deny: []string{"go test", "git push"}})
+	require.NoError(t, err)
+
+	for name, cmd := range map[string]policy.Command{
+		"the bare name": {
+			Requested: "go", Path: "/usr/local/go/bin/go", Target: "/usr/local/go/bin/go",
+			Argv: []string{"go", "test", "./..."},
+		},
+		"an absolute argv[0]": {
+			Requested: "/usr/local/go/bin/go", Path: "/usr/local/go/bin/go", Target: "/usr/local/go/bin/go",
+			Argv: []string{"/usr/local/go/bin/go", "test", "./..."},
+		},
+		"a relative argv[0]": {
+			Requested: "./go", Path: "/usr/local/go/bin/go", Target: "/usr/local/go/bin/go",
+			Argv: []string{"./go", "test", "-run", "TestFoo"},
+		},
+		"a path that cleans to the same file": {
+			Requested: "/bin/../bin/git", Path: "/bin/git", Target: "/bin/git",
+			Argv: []string{"/bin/../bin/git", "push", "origin", "main"},
+		},
+		"a symlink whose target is the denied name": {
+			Requested: "/usr/bin/scm", Path: "/usr/bin/scm", Target: "/usr/bin/git",
+			Argv: []string{"/usr/bin/scm", "push"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			decision := p.Evaluate(cmd)
+			require.Falsef(t, decision.Allowed,
+				"argv %v is the denied subcommand however argv[0] is spelled", cmd.Argv)
+		})
+	}
+
+	// And the widened match is still about the subcommand: another one of the
+	// same tool, spelled the same way, is untouched.
+	build := p.Evaluate(policy.Command{
+		Requested: "/usr/local/go/bin/go", Path: "/usr/local/go/bin/go", Target: "/usr/local/go/bin/go",
+		Argv: []string{"/usr/local/go/bin/go", "build", "./..."},
+	})
+	require.True(t, build.Allowed, "a rule naming one subcommand must not refuse the others")
+}
+
+// A command that resolved to nothing offers no name a rule can match by
+// accident.
+//
+// filepath.Base("") is ".", so an unresolvable command used to answer to a
+// name it never had — and a rule of "." or "?" would refuse every one of them
+// for a reason an operator could not read in their own config.
+func TestEvaluate_AnUnresolvedCommandDoesNotAnswerToDot(t *testing.T) {
+	p, err := policy.New(policy.Config{Deny: []string{"."}})
+	require.NoError(t, err)
+
+	decision := p.Evaluate(policy.Command{Requested: "no-such-command", Argv: []string{"no-such-command"}})
+	require.True(t, decision.Allowed, "the empty path is not a name")
+}
+
 // A rule that filepath.Match cannot evaluate refuses the command instead of
 // quietly matching nothing.
 //

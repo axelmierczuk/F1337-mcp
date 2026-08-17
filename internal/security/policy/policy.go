@@ -233,14 +233,17 @@ type Decision struct {
 //
 // Matching is on every name the command answers to — the argument as given,
 // the path it resolved to, the path that resolves to after symlinks, and the
-// base name of each — plus the whole argv joined by spaces, so an entry may
-// name a subcommand ("go test") rather than only an executable. Entries are
-// exact matches or filepath.Match globs, compared case-insensitively where the
-// platform's paths are.
+// base name of each — and on the leading runs of the argv built from each of
+// those, so an entry may name a subcommand ("go test") rather than only an
+// executable. Entries are exact matches or filepath.Match globs, compared
+// case-insensitively where the platform's paths are.
 //
 // Matching the resolved path rather than the string as given is the point: a
 // deny entry for "sh" that only compared argv[0] is walked past by
-// "/bin/../bin/sh", and by any other spelling of the same file.
+// "/bin/../bin/sh", and by any other spelling of the same file. The command
+// lines are built from every one of those spellings for the same reason — a
+// rule reading "go test" that saw only the caller's own argv[0] would be
+// walked past by "/usr/local/go/bin/go test", which is the same command.
 //
 // Two consequences are worth stating plainly, because they are the reason this
 // is a guardrail and not a boundary:
@@ -251,7 +254,12 @@ type Decision struct {
 //   - An allowed interpreter allows everything it can run. "python3" on an
 //     allow list is a shell by another name.
 func (p *Policy) Evaluate(cmd Command) Decision {
-	names := cmd.names()
+	// Folded once here rather than inside matchAny's rule loop. The names are
+	// built from the argv, so on a platform that folds they are the one thing
+	// in this comparison whose size the caller chooses — refolding them per
+	// rule multiplies a request's own argv by the length of the operator's
+	// list, and does it twice over for an agent with both lists set.
+	names := foldAll(cmd.names())
 
 	rule, matched, err := matchAny(p.deny, names)
 	if err != nil {
@@ -302,25 +310,33 @@ func (p *Policy) Check(cmd Command) error {
 	return nil
 }
 
-// matchAny reports the first rule that matches any of the command's names.
+// foldAll folds every name once, dropping the empty ones.
+func foldAll(names []string) []string {
+	folded := make([]string, 0, len(names))
+	for _, name := range names {
+		if name != "" {
+			folded = append(folded, fold(name))
+		}
+	}
+	return folded
+}
+
+// matchAny reports the first rule that matches any of the command's names,
+// which must already be folded.
 //
 // A pattern that cannot be evaluated is returned as an error rather than read
 // as a non-match. Match reports a malformed pattern only for the candidates its
 // scan reaches, so the same rule can error against one name and quietly match
 // nothing against another — which would make a broken deny list look like an
 // empty one for most commands and a working one for the occasional other.
-func matchAny(rules []string, names []string) (string, bool, error) {
+func matchAny(rules []string, folded []string) (string, bool, error) {
 	for _, rule := range rules {
-		folded := fold(rule)
-		for _, name := range names {
-			if name == "" {
-				continue
-			}
-			candidate := fold(name)
-			if folded == candidate {
+		pattern := fold(rule)
+		for _, candidate := range folded {
+			if pattern == candidate {
 				return rule, true, nil
 			}
-			ok, err := filepath.Match(folded, candidate)
+			ok, err := filepath.Match(pattern, candidate)
 			if err != nil {
 				return rule, false, fmt.Errorf("rule %q: %w", rule, err)
 			}

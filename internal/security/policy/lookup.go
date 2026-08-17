@@ -46,39 +46,99 @@ const maxArgvPrefixes = 16
 
 // names is every spelling of this command that a policy rule may match.
 func (c Command) names() []string {
-	names := make([]string, 0, 6+min(len(c.Argv), maxArgvPrefixes))
-	add := func(s string) {
-		if s != "" && !contains(names, s) {
-			names = append(names, s)
-		}
-	}
-	add(c.Requested)
-	add(c.Path)
-	add(filepath.Base(c.Path))
-	add(c.Target)
-	add(filepath.Base(c.Target))
+	heads := c.heads()
 
-	if len(c.Argv) > 1 {
-		// Every leading run of the argv, so a rule can name a subcommand — "go
-		// test", "git push" — and still match a command that carries arguments
-		// after it.
-		//
-		// Prefixes rather than one joined line with a glob on the end, because
-		// filepath.Match's * does not cross a path separator: "go test*"
-		// matches "go test" and "go test -v", and not "go test ./...". A rule
-		// about a subcommand is at its most useful for exactly the commands
-		// whose arguments are paths, so a line-glob would work right up until
-		// it mattered.
-		line := c.Argv[0]
-		for _, arg := range c.Argv[1:min(len(c.Argv), maxArgvPrefixes)] {
+	names := make([]string, 0, len(heads)*(1+min(len(c.Argv), maxArgvPrefixes)))
+	seen := make(map[string]struct{}, cap(names))
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		if _, dup := seen[s]; dup {
+			return
+		}
+		seen[s] = struct{}{}
+		names = append(names, s)
+	}
+
+	for _, head := range heads {
+		add(head)
+	}
+	if len(c.Argv) < 2 {
+		return names
+	}
+
+	// Every leading run of the argv, so a rule can name a subcommand — "go
+	// test", "git push" — and still match a command that carries arguments
+	// after it.
+	//
+	// Prefixes rather than one joined line with a glob on the end, because
+	// filepath.Match's * does not cross a path separator: "go test*" matches
+	// "go test" and "go test -v", and not "go test ./...". A rule about a
+	// subcommand is at its most useful for exactly the commands whose
+	// arguments are paths, so a line-glob would work right up until it
+	// mattered.
+	//
+	// One run per spelling of argv[0], not one from the argument as given.
+	// Offering only the caller's spelling makes a subcommand rule exactly as
+	// weak as the argv[0] comparison the rest of this list exists to replace:
+	// "go test" is walked past by "/usr/local/go/bin/go test", and "git push"
+	// by "/bin/../bin/git push".
+	tail := c.Argv[1:min(len(c.Argv), maxArgvPrefixes)]
+	for _, head := range heads {
+		line := head
+		for _, arg := range tail {
 			line += " " + arg
 			add(line)
 		}
-		// And the whole command line, which the cap above may have stopped
-		// short of. add dedupes, so a short argv contributes it once.
-		add(strings.Join(c.Argv, " "))
+	}
+	// And the whole command line, for an argv the cap above stopped short of.
+	// Only then: for a shorter one the runs already produced it.
+	if len(c.Argv) > maxArgvPrefixes {
+		rest := " " + strings.Join(c.Argv[1:], " ")
+		for _, head := range heads {
+			add(head + rest)
+		}
 	}
 	return names
+}
+
+// heads is every spelling of argv[0]: the argument as given, the file it
+// resolved to, that file with its symlinks followed, and the base name of
+// each.
+//
+// This is the list that makes matching be about the file rather than about the
+// string — a deny entry for "sh" that only compared argv[0] is walked past by
+// "/bin/../bin/sh", and by any other spelling of the same file.
+//
+// Argv[0] is listed as well as Requested, which Resolve sets from it. They are
+// the same string for every Command this package builds, and dedupe collapses
+// them; carrying both means a Command assembled by hand cannot end up with a
+// command line nothing in this list starts with.
+func (c Command) heads() []string {
+	spellings := make([]string, 0, 6)
+	if len(c.Argv) > 0 {
+		spellings = append(spellings, c.Argv[0])
+	}
+	spellings = append(spellings, c.Requested, c.Path, base(c.Path), c.Target, base(c.Target))
+
+	heads := make([]string, 0, len(spellings))
+	for _, name := range spellings {
+		if name != "" && !contains(heads, name) {
+			heads = append(heads, name)
+		}
+	}
+	return heads
+}
+
+// base is filepath.Base without its answer for an empty path. Base("") is ".",
+// which is not a name any command answers to and is one a rule could match by
+// accident on every command that resolved to nothing.
+func base(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Base(path)
 }
 
 func contains(list []string, s string) bool {
