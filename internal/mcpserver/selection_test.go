@@ -209,6 +209,7 @@ var echoFixtures = map[string]struct {
 	"sandbox_process_logs":    {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
 	"sandbox_process_signal":  {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1", "graceful_stop": true}, echoes: "build-box", targeted: true},
 	"sandbox_process_restart": {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
+	"sandbox_forward":         {args: map[string]any{"sandbox": "build-box", "remote_port": 3000}, echoes: "build-box", targeted: true},
 }
 
 // TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox is the walk the

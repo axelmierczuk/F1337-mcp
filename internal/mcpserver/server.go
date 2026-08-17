@@ -177,6 +177,11 @@ func New(opts Options) (*Server, error) {
 		ProbeTimeout: opts.ProbeTimeout,
 		CallTimeout:  opts.CallTimeout,
 	})
+	// Some tools own state that outlives the call that created it —
+	// sandbox_forward's local listeners, which is the whole point of a
+	// forward. Released here, so a listener cannot survive the process that
+	// opened it and hold its port against the next one.
+	s.closers = append(s.closers, s.registrar.Close)
 
 	logger.Debug("mcp server ready",
 		"registry", registryPath, "tools", len(s.registrar.Registrations()))

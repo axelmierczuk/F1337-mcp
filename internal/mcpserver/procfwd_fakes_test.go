@@ -3,6 +3,7 @@ package mcpserver_test
 import (
 	"context"
 	"io"
+	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -10,14 +11,14 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 )
 
-// A minimal ProcessService client for the fleet-wide walks in
-// selection_test.go.
+// Minimal ProcessService and ForwardService clients for the fleet-wide walks
+// in selection_test.go.
 //
 // Those tests call every registered tool with synthesised arguments and assert
 // on the echo, so they need every tool to reach its handler and come back with
-// something. They are not testing what the process tools do — the tests that
-// are stand up the real agent ProcessService over bufconn, in
-// procfwd_harness_test.go — so this answers the shape of each RPC and nothing
+// something. They are not testing what the process or forward tools do — the
+// tests that are stand up the real agent services over bufconn, in
+// procfwd_harness_test.go — so these answer the shape of each RPC and nothing
 // more.
 
 // fakeProcess answers the six ProcessService RPCs with one canned process.
@@ -82,3 +83,47 @@ func (s *fakeLogStream) Recv() (*sandboxdv1.GetProcessLogsResponse, error) {
 	s.next++
 	return resp, nil
 }
+
+// fakeForward accepts an open and reports success, which is all the preflight
+// in sandbox_forward asks of it.
+type fakeForward struct{}
+
+func (fakeForward) Forward(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], error) {
+	return &fakeForwardStream{}, nil
+}
+
+type fakeForwardStream struct {
+	grpc.ClientStream
+
+	mu     sync.Mutex
+	opened bool
+	done   bool
+}
+
+func (s *fakeForwardStream) Send(req *sandboxdv1.ForwardRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if req.GetOpen() != nil {
+		s.opened = true
+	}
+	return nil
+}
+
+func (s *fakeForwardStream) Recv() (*sandboxdv1.ForwardResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case !s.opened:
+		return nil, io.EOF
+	case s.done:
+		return nil, io.EOF
+	}
+	s.done = true
+	return &sandboxdv1.ForwardResponse{
+		Event: &sandboxdv1.ForwardResponse_Opened{Opened: &sandboxdv1.ForwardOpened{
+			Success: true, LocalAddress: "127.0.0.1:54321",
+		}},
+	}, nil
+}
+
+func (s *fakeForwardStream) CloseSend() error { return nil }

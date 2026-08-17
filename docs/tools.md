@@ -461,17 +461,50 @@ sized for a question, so the cap above is a size a transfer can actually reach
 on a link slower than a laboratory's. The same applies to `sandbox_write`.
 
 ### `sandbox_forward`
-Forward a sandbox port to the workstation.
+Forward a sandbox port to the workstation. **This is `ssh -L`.**
+
+```
+sandbox_forward(remote_port=3000, local_port=3000)
+  ==  ssh -L 3000:localhost:3000 sandbox
+```
 
 | Argument | Type | Notes |
 | --- | --- | --- |
-| `remote_port` | int | **Required.** |
-| `local_port` | int | 0 picks a free port. |
+| `remote_port` | int | **Required.** Port on the sandbox. |
+| `local_port` | int | 0 (the default) picks a free port and reports it. |
 | `remote_host` | string | Defaults to loopback on the sandbox. |
-| `stop` | bool | Tear down an existing forward. |
+| `stop` | bool | Tear down the forward for this `remote_port`. |
 
-Returns the local address. Defaulting `remote_host` to loopback keeps the agent
-from being turned into a general-purpose network pivot by accident.
+Returns `local_address`, plus `active_forwards`: every forward this MCP server
+holds, on every sandbox, in the result of **every** call — so the model can see
+what is already open without a tool that does nothing else.
 
 Closes the remote dev loop: start a server with `sandbox_process_start`, forward
 its port, then reach it over `localhost` exactly as if it were local.
+
+**Not implemented, deliberately.** There is no reverse forward (`ssh -R`) and no
+dynamic SOCKS proxy (`ssh -D`). The `ssh -L` framing above is the right mental
+model precisely because it is exact, and it would stop being useful if the two
+modes it does not cover were left ambiguous.
+
+**Lifetime is owned by the MCP server, not by the call.** A forward stays open
+across unrelated tool calls until `stop: true` or the MCP server exits; the
+server releases every local listener on the way out, so a port cannot be held
+by a process that is gone.
+
+**Loopback on both ends.**
+
+- The **local** listener binds `127.0.0.1` only. Binding every interface would
+  publish a tunnel into the sandbox to everyone on the workstation's network.
+- `remote_host` defaults to the sandbox's own loopback, and anything else is
+  refused unless the operator listed it in `forward.allowed_hosts` in the agent
+  config. An agent that will connect anywhere on request is a general-purpose
+  pivot into whatever network it sits in, usable by anyone who can reach it —
+  and forwarding a dev server works identically without that capability, so
+  nothing legitimate notices the restriction. The check resolves the requested
+  host and requires *every* address it resolves to to be loopback, then dials
+  the address that passed.
+
+The sandbox-side port is checked before a local listener is opened, so a
+forward pointed at a port nothing is serving fails with an error naming it,
+rather than leaving a local port that accepts connections and then drops them.

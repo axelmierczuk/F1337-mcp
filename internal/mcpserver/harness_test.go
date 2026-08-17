@@ -199,16 +199,16 @@ func (c *fakeClients) Files(string, string) (sandboxdv1.FileServiceClient, error
 	return fakeFiles{}, nil
 }
 
-// Process answers with the canned client in procfwd_fakes_test.go, so the
-// fleet-wide echo walks can call the process tools. What those tools actually
-// do is tested against the real agent ProcessService over bufconn; see
-// procfwd_harness_test.go.
+// Process and Forward answer with the canned clients in procfwd_fakes_test.go,
+// so the fleet-wide echo walks can call the process and forward tools. What
+// those tools actually do is tested against the real agent services over
+// bufconn; see procfwd_harness_test.go.
 func (c *fakeClients) Process(string, string) (sandboxdv1.ProcessServiceClient, error) {
 	return fakeProcess{}, nil
 }
 
 func (c *fakeClients) Forward(string, string) (sandboxdv1.ForwardServiceClient, error) {
-	return nil, status.Error(codes.Unimplemented, "forwarding is milestone M2 issue #26")
+	return fakeForward{}, nil
 }
 
 func (c *fakeClients) Health(name string) (client.HealthStatus, bool) {
