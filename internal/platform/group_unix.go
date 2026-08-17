@@ -76,6 +76,22 @@ func (g *ProcessGroup) ConfigurePTYCommand(cmd *pty.Cmd) {
 	g.Configure(cmd.SysProcAttr)
 }
 
+// ConfigureInteractivePTYCommand is ConfigurePTYCommand for a session whose
+// interrupts arrive through the terminal rather than from the agent.
+//
+// On Unix it is ConfigurePTYCommand: the child leads its own session with the
+// pty as its controlling terminal, the line discipline turns a 0x03 byte into a
+// SIGINT for whichever process group is in the foreground of that terminal, and
+// the session's own group is what a kill reaches. All of that is what
+// ConfigurePTYCommand already asks for.
+//
+// The two differ on Windows, where the console process group flag that makes an
+// agent-sent CTRL_BREAK aimable is also what stops a Ctrl-C typed into the
+// terminal being delivered at all. See the Windows file.
+func (g *ProcessGroup) ConfigureInteractivePTYCommand(cmd *pty.Cmd) {
+	g.ConfigurePTYCommand(cmd)
+}
+
 // Adopt records the started child. It reads the child's real process group id
 // from the kernel rather than assuming Configure was applied, because assuming
 // it is how a supervisor ends up sending SIGKILL to its own group.
