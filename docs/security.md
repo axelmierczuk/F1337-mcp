@@ -76,21 +76,83 @@ operator                control plane              new host
 - `EnrollmentService` is the one endpoint an unauthenticated caller may reach,
   because the enrolling host has no certificate yet. It is server-authenticated
   TLS plus the bearer token.
-- **Pin the CA fingerprint.** Without `--ca-fingerprint`, enrollment trusts
-  whatever certificate the control plane presents, and a network attacker can
-  impersonate it. The installer warns when you omit it.
+- **Pin the CA fingerprint.** `enroll` requires `--ca-fingerprint` and refuses
+  to run without it. Unpinned, enrollment would trust whatever certificate the
+  control plane presents, and a network attacker who can answer on that address
+  collects the token. The installers require it for the same reason, and refuse
+  before they download anything.
+
+## The account the agent runs as
+
+Every command the agent executes runs as the account the daemon runs as, and
+every file it writes is owned by it. **Running the agent as root means every
+sandbox command a model issues runs as root**, and the path jail is the only
+thing between it and the rest of the machine.
+
+So `service install` does not default to a superuser: a dedicated `sandboxd`
+system account on Linux, the invoking user on macOS, and `NT
+AUTHORITY\NetworkService` rather than `LocalSystem` on Windows. `--user root`
+is available, warns loudly, and is a decision rather than a default. See
+[docs/service.md](service.md).
+
+The systemd unit sets `KillMode=process` and the launchd job sets
+`AbandonProcessGroup`. Those are not hardening — they are what stops a routine
+`systemctl restart` from killing every background process the agent supervises.
 
 ## Filesystem confinement
 
-Paths are resolved to absolute form, symlinks are resolved, and only then is
-containment under an allowed root checked.
+**The path jail and `exec` are mutually exclusive, and `exec` is on by
+default.** An agent that can run commands is not confined by a path check:
 
-Doing it in that order is the whole point. Checking for `..` in the requested
-path before resolution is a jail that any symlink inside it walks straight out
-of.
+```
+argv: ["sh", "-c", "echo pwned > /etc/passwd"]
+```
 
-An agent configured with no allowed roots has no jail. It refuses to start that
-way unless explicitly forced, and reports the condition in `sandbox_info`.
+That is one `ExecService` call. It needs no `shell: true` — you exec `sh`
+directly — and `tee`, `cp`, `dd` and `python -c` all do the same job. So with
+exec enabled the jail stops **nothing** an attacker would do, while an operator
+who reads `allowed_roots` in their config reasonably concludes the agent is
+confined to them. A control that stops honest mistakes but not dishonest ones,
+while looking like a security control, is worse than no control, because it is
+what people plan around.
+
+So:
+
+| `exec.enabled` | `allowed_roots` | `GetHostInfo.allowed_roots` |
+| --- | --- | --- |
+| `true` (default) | ignored, with a warning at every start naming why | empty — the agent reports itself unconfined |
+| `false` | enforced on every `FileService` path | the resolved roots |
+
+The wire behaviour matters as much as the enforcement. `allowed_roots` is what
+`sandbox_info` and `sandbox_select` show the model to tell it where it may
+write; reporting roots that constrain nothing is the model-facing version of
+the same lie.
+
+When the jail *is* in force, paths are resolved to absolute form, symlinks are
+resolved, and only then is containment under an allowed root checked. Doing it
+in that order is the whole point: checking for `..` in the requested path before
+resolution is a jail that any symlink inside it walks straight out of.
+
+Resolving and then opening are two operations, and between them a component can
+be replaced with a symlink pointing anywhere. On Linux the jail hands the check
+to the kernel instead, opening through `openat2` with `RESOLVE_BENEATH`, so the
+check and the use are one operation and no window exists. Everywhere else — and
+on Linux kernels before 5.6, or under a seccomp filter that blocks the syscall —
+it falls back to resolve-then-open and the window is real. The daemon logs which
+one it got at startup rather than letting an operator assume the stronger of the
+two.
+
+An exec-disabled agent with no allowed roots has no jail either. It refuses to
+start that way unless explicitly forced, and reports the condition in
+`sandbox_info`. It also refuses to start on an allowed root that does not exist:
+a missing path can be created later, as a symlink to anywhere, and a jail that
+had accepted it would then confine to whatever it pointed at.
+
+If you want a filesystem boundary on an agent that runs commands, it has to come
+from outside the agent: a container, a VM, a `ProtectSystem=strict` unit with
+`ReadWritePaths` (see [docs/service.md](service.md)), or a user account that
+cannot read what you care about. Those are enforced by something the agent
+cannot talk its way past.
 
 ## Execution
 
@@ -121,8 +183,11 @@ changes that. What the script does do:
 
 - Verifies the artifact's SHA-256 against the checksum file published with the
   same release, and refuses to install on a mismatch.
-- Supports `--ca-fingerprint` to pin the control plane.
-- Warns when it is enrolling without pinning, or installing without a path jail.
+- **Requires `--ca-fingerprint` alongside `--token`**, and refuses before it
+  downloads anything. `enroll` has always refused to run unpinned, so an
+  installer that warned and carried on could only fail later, after installing a
+  binary on a host that never joined the fleet.
+- Warns, every time, that `--root` is not a jail on an exec-enabled agent.
 
 Releases carry build provenance attestations. To skip the pipe entirely,
 download the archive, verify it against `checksums.txt`, and run the binary

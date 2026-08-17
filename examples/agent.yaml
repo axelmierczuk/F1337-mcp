@@ -18,13 +18,25 @@ tls:
   require_client_ou: "sandboxd-control"
 
 # Filesystem confinement. Every path in every FileService call is resolved and
-# then checked for containment under one of these roots. An empty list disables
-# the jail, which the agent refuses to do unless explicitly forced.
+# then checked for containment under one of these roots.
+#
+# THIS APPLIES ONLY WHEN exec.enabled IS false. With exec on, a caller runs
+#
+#   ["sh", "-c", "echo pwned > /etc/passwd"]
+#
+# and never touches FileService, so these roots would confine nothing an
+# attacker would do. The agent ignores them rather than pretending, says so at
+# every start, and reports itself as unconfined over the wire. With exec
+# disabled they are enforced, and an empty list is then refused unless `serve`
+# is given --no-jail.
 allowed_roots:
   - "/home/build/workspace"
   - "/tmp/sandboxd"
 
 exec:
+  # Running commands is what this product is for, so this defaults to true.
+  # Setting it to false is what makes allowed_roots above a real boundary.
+  enabled: true
   # Default wall-clock limit for sandbox_exec.
   default_timeout: "120s"
   max_timeout: "3600s"
@@ -48,3 +60,14 @@ audit:
   # Append-only JSONL record of every exec and every write.
   path: "/var/log/sandboxd/audit.jsonl"
   enabled: true
+
+# Supervised process records live here, so they survive a daemon restart — and
+# an uninstall, which deliberately leaves this directory alone.
+state_dir: "/var/lib/sandboxd"
+
+log:
+  # debug, info, warn, or error.
+  level: "info"
+  # "text" or "json". Logs go to stderr, which is what journald, launchd's
+  # StandardErrorPath, and the Windows event log all capture.
+  format: "text"

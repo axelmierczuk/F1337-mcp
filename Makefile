@@ -27,6 +27,10 @@ AGENT_PLATFORMS := \
 	darwin/amd64 darwin/arm64 \
 	windows/amd64 windows/arm64
 
+# Every GOOS that `vet` and `lint` must be run under. Build tags mean a
+# single-platform pass over this tree checks roughly two thirds of it.
+CHECK_GOOSES := linux darwin windows
+
 .DEFAULT_GOAL := help
 
 ## help: list available targets
@@ -101,17 +105,21 @@ build-agent-all:
 test:
 	go test -race -count=1 ./...
 
-# A host-only lint cannot see another platform's build-tagged files, and this
-# repo has shipped two green-locally, red-in-CI pushes that way: a gosec finding
-# inside a _linux.go file, and a test that did not compile on Windows. CI's test
-# matrix already runs `go vet` on all three runners; the linters only ever saw
-# the host. Loop here so the gap closes before the push rather than after it.
-## lint: run golangci-lint for every target OS
+## lint: run golangci-lint for every GOOS the agent ships for
+#
+# Once per GOOS, not once. A host-only run structurally cannot see a file
+# guarded by a build tag for another platform: `golangci-lint run` on macOS
+# never loads svcpid_linux.go, so a gosec finding in it is invisible locally
+# and lands in CI instead. This repo has shipped two green-locally,
+# red-in-CI pushes exactly that way — that gosec finding, and a test that did
+# not compile on Windows. CI's own lint job runs on one runner and sees one
+# GOOS too; only its test matrix vets all three, and only after the push. The
+# extra passes cost seconds and close the gap before it.
 .PHONY: lint
 lint:
-	@for os in linux darwin windows; do \
-		echo "  linting GOOS=$$os"; \
-		GOOS=$$os $(TOOLS_DIR)/golangci-lint run || exit 1; \
+	@for os in $(CHECK_GOOSES); do \
+		echo "  golangci-lint GOOS=$$os"; \
+		GOOS=$$os CGO_ENABLED=0 $(TOOLS_DIR)/golangci-lint run || exit 1; \
 	done
 
 ## fmt: format Go sources and proto definitions
@@ -120,12 +128,24 @@ fmt:
 	gofmt -w $$(git ls-files '*.go' | grep -v '^gen/')
 	$(TOOLS_DIR)/buf format -w
 
-## vet: run go vet
+## vet: run go vet for every GOOS the agent ships for
+#
+# Same reasoning as lint, and it catches the other half of the problem: a test
+# that references syscall.Kill compiles everywhere except Windows, and a
+# runtime `if runtime.GOOS == "windows" { t.Skip() }` does not help, because
+# the package has to typecheck before any test can skip itself.
 .PHONY: vet
 vet:
-	go vet ./...
+	@for os in $(CHECK_GOOSES); do \
+		echo "  go vet GOOS=$$os"; \
+		GOOS=$$os CGO_ENABLED=0 go vet ./... || exit 1; \
+	done
 
-## check: everything CI runs
+## check: the local gate — what CI runs, across every GOOS
+#
+# CI's own lint job runs on one runner, so it sees one GOOS too; the test
+# matrix is what catches the rest, after a push. Running all three here means
+# finding it before.
 .PHONY: check
 check: proto-lint proto-check vet lint test
 

@@ -94,7 +94,12 @@ release:
 
     ```sh
     curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
-      | sh -s -- --token <enrollment-token> --control <control-host:9443>
+      | sh -s -- --token <enrollment-token> --control <control-host:9443> \
+          --ca-fingerprint <sha256-of-the-fleet-CA>
     ```
+
+    `--ca-fingerprint` is not optional: enrollment refuses to run unpinned, and
+    the installer refuses before it downloads anything. Read it on the control
+    host with `sandboxctl ca fingerprint`.
 
     Verify `checksums.txt` against the artifact you downloaded before running anything.

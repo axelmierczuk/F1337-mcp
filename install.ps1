@@ -10,36 +10,43 @@
     Piping a script from the network into a shell is trust-on-first-use no
     matter how careful the script is. This one at least refuses to install an
     artifact whose checksum does not match the one published alongside it, and
-    it pins the control-plane CA when you give it a fingerprint.
+    it always pins the control-plane CA: enrollment will not run without a
+    fingerprint.
 
 .EXAMPLE
     irm https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.ps1 | iex
 
 .EXAMPLE
     $s = irm https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.ps1
-    & ([scriptblock]::Create($s)) -Token abc123 -Control control.local:9443 -Root C:\workspace
+    & ([scriptblock]::Create($s)) -Token abc123 -Control control.local:9443 `
+        -CaFingerprint 9f86d0...  -Root C:\workspace
 #>
 [CmdletBinding()]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
     Justification = 'Installer progress must be visible when this script is piped into iex; the information stream is not shown by default there.')]
 param(
     # Enrollment token from `sandboxctl enroll mint`. When set, the host
-    # enrolls after installation.
+    # enrolls after installation, and -Control and -CaFingerprint are required.
     [string] $Token,
 
     # Control-plane enrollment endpoint, host:port.
     [string] $Control,
 
-    # SHA-256 fingerprint of the control-plane CA to pin. Strongly recommended.
+    # SHA-256 fingerprint of the control-plane CA to pin, from
+    # `sandboxctl ca fingerprint`. Required with -Token: enrollment refuses to
+    # run unpinned.
     [string] $CaFingerprint,
 
     # Address the agent serves gRPC on.
     [string] $Listen = '0.0.0.0:8722',
 
-    # Sandbox name to request. Defaults to the computer name.
+    # Sandbox name to request. Only for a token that reserved none; the control
+    # plane refuses a name other than the one its token authorizes.
     [string] $Name,
 
-    # Filesystem roots the agent may access. Without any, no path jail applies.
+    # Filesystem roots the agent may access. Enforced only when exec.enabled is
+    # false in the config: a caller that can run commands reaches any path
+    # without going through FileService.
     [string[]] $Root = @(),
 
     # Release to install.
@@ -88,6 +95,24 @@ function Resolve-ReleaseVersion {
         throw 'Could not resolve the latest release tag; pass -Version explicitly.'
     }
     return $release.tag_name
+}
+
+# Checked before anything is downloaded: an invocation that cannot possibly
+# enroll should cost nothing, rather than leaving a binary installed on a host
+# that never joined the fleet.
+if ($Token) {
+    if (-not $Control) { throw '-Token requires -Control <host:port>.' }
+    if (-not $CaFingerprint) {
+        throw @'
+-Token requires -CaFingerprint <hex>.
+
+`sandboxd-agent enroll` refuses to run unpinned. Without the fingerprint,
+anything that can answer on the network collects the token, and the token is
+the only thing between an attacker and a fleet identity.
+
+Get it from the control host with: sandboxctl ca fingerprint
+'@
+    }
 }
 
 $arch      = Resolve-Architecture
@@ -171,19 +196,20 @@ This means the download was corrupted or tampered with. Not installing.
     }
 
     if ($Token) {
-        if (-not $Control) { throw '-Token requires -Control.' }
-
-        $enrollArgs = @('enroll', '--token', $Token, '--control', $Control, '--listen', $Listen)
-        if ($Name)          { $enrollArgs += @('--name', $Name) }
-        if ($CaFingerprint) { $enrollArgs += @('--ca-fingerprint', $CaFingerprint) }
+        $enrollArgs = @(
+            'enroll',
+            '--token', $Token,
+            '--control', $Control,
+            '--ca-fingerprint', $CaFingerprint,
+            '--listen', $Listen
+        )
+        if ($Name) { $enrollArgs += @('--name', $Name) }
         foreach ($r in $Root) { $enrollArgs += @('--root', $r) }
 
-        if (-not $CaFingerprint) {
-            Write-Warn 'Enrolling without -CaFingerprint: the control plane certificate is not pinned.'
-        }
-        if ($Root.Count -eq 0) {
-            Write-Warn 'No -Root given: the agent will start without a filesystem jail.'
-        }
+        # Said whether or not roots were given, because it is true either way:
+        # the default config has exec on, and an agent that runs commands is
+        # not confined by a path check. See docs/security.md.
+        Write-Warn 'Exec is enabled, so allowed_roots is not enforced: this agent can read and write every path its account can. Set exec.enabled to false in the config to make -Root a real jail.'
 
         Write-Step "enrolling with $Control"
         & $target @enrollArgs
@@ -211,9 +237,11 @@ This means the download was corrupted or tampered with. Not installing.
     $target enroll ``
       --token <enrollment-token> ``
       --control <control-host:9443> ``
+      --ca-fingerprint <sha256-of-the-fleet-CA> ``
       --root C:\path\to\workspace
 
   Mint a token on the control host with: sandboxctl enroll mint
+  Read its CA fingerprint with:          sandboxctl ca fingerprint
 "@
     }
 } finally {

@@ -11,7 +11,11 @@ Nineteen tools. Conventions that apply to all of them:
 - **Truncation is explicit.** Any capped output carries
   `{truncated, bytes_omitted, lines_omitted}`. Output is never silently cut.
 - **Paths** are absolute on the sandbox, or relative to its configured working
-  directory. They are resolved through the path jail before use.
+  directory. They are resolved through the path jail before use — on an agent
+  with `exec.enabled: false`, which is the only configuration where the jail is
+  wired in. With exec enabled, one `sandbox_exec` call reaches any path the
+  agent's account can, so there are no allowed roots and the tools report none.
+  See [security.md](security.md#filesystem-confinement).
 
 ---
 
@@ -36,7 +40,9 @@ Choose the default target for subsequent calls.
 | `name` | string | **Required.** Sandbox name. |
 
 Returns a handle, plus the resolved host's platform and allowed roots — so the
-model learns where it can write without a second call.
+model learns where it can write without a second call. An agent whose jail is
+off returns no roots, which is the honest answer: it can write anywhere its
+account can.
 
 An agent that enforces no path jail returns `unconfined: true` and no
 `allowed_roots`. That is "every path is writable", not "none is": the path jail

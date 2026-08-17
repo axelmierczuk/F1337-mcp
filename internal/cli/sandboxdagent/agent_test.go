@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"gopkg.in/yaml.v3"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdagent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
@@ -122,15 +122,18 @@ func TestEnroll_FullLoop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, cp.ca.CertPEM(), caPEM)
 
-	// The config the daemon will read points at all three.
-	var cfg sandboxdagent.Config
-	cfgData, err := os.ReadFile(filepath.Join(agentDir, "agent.yaml"))
+	// The config the daemon will read points at all three, and loads through
+	// the same path the daemon loads it by.
+	cfg, err := agent.Load(filepath.Join(agentDir, "agent.yaml"))
 	require.NoError(t, err)
-	require.NoError(t, yaml.Unmarshal(cfgData, &cfg))
 	assert.Equal(t, "build-box", cfg.Name)
-	assert.FileExists(t, cfg.CertFile)
-	assert.FileExists(t, cfg.KeyFile)
-	assert.FileExists(t, cfg.CAFile)
+	assert.FileExists(t, cfg.TLS.Certificate)
+	assert.FileExists(t, cfg.TLS.PrivateKey)
+	assert.FileExists(t, cfg.TLS.CABundle)
+	// The OU the agent will demand of clients is the one the CA stamps on a
+	// control leaf. If enroll wrote anything else, every control plane in the
+	// fleet would be rejected at the handshake.
+	assert.Equal(t, "sandboxd-control", cfg.TLS.RequireClientOU)
 
 	// And the control plane recorded the host, including what it reported
 	// about itself.
@@ -269,6 +272,57 @@ func TestEnroll_WithoutNameUsesTheTokensReservation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"build-box"}, leaf.DNSNames)
 	require.NoError(t, leaf.VerifyHostname("127.0.0.1"))
+}
+
+// A relative --dir must still produce a config the daemon can load.
+//
+// agent.yaml names the certificate, key, CA bundle, state directory and audit
+// path, and Load resolves any relative one of those against the config file's
+// own directory. Writing them relative therefore doubles the directory:
+// "out/agent.crt" inside "out/agent.yaml" is read back as "out/out/agent.crt",
+// and the daemon fails to start on a certificate it wrote itself.
+func TestEnroll_RelativeDirWritesLoadablePaths(t *testing.T) {
+	dir := t.TempDir()
+	cp := startControlPlane(t, dir)
+	token, _, err := cp.tokens.Mint(enroll.MintOptions{Name: "build-box"})
+	require.NoError(t, err)
+
+	// --dir is interpreted against the working directory, so run from one the
+	// test owns rather than from the package directory.
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	// The expectation is built from the working directory as the process sees
+	// it, which is the base filepath.Abs resolves --dir against. It is not
+	// always the string t.TempDir returned: macOS reports /private/var where
+	// TempDir said /var, and a Windows runner reports the 8.3 short form
+	// (C:\Users\RUNNER~1) where TempDir said C:\Users\runneradmin. Both name
+	// the same directory, so comparing against the wrong spelling tests the
+	// platform's naming rather than this command's behaviour.
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	code := sandboxdagent.Main([]string{"enroll",
+		"--server", cp.address,
+		"--token", token,
+		"--ca-fingerprint", ca.FormatFingerprint(cp.ca.Fingerprint()),
+		"--dir", "enrollment",
+	}, &out)
+	require.Equal(t, 0, code, out.String())
+
+	cfg, err := agent.Load(filepath.Join(dir, "enrollment", "agent.yaml"))
+	require.NoError(t, err)
+	for _, path := range []string{cfg.TLS.Certificate, cfg.TLS.PrivateKey, cfg.TLS.CABundle} {
+		assert.FileExists(t, path, "the daemon must find the material enroll just wrote")
+	}
+	assert.Equal(t, filepath.Join(cwd, "enrollment", "state"), cfg.StateDir)
+	assert.DirExists(t, filepath.Join(cwd, "enrollment"),
+		"a relative --dir must not have written a second level of the same name")
+	assert.NoDirExists(t, filepath.Join(cwd, "enrollment", "enrollment"),
+		"the directory must not have been rebased through itself")
 }
 
 // The agent asks for what it was told to listen on; the control plane decides
