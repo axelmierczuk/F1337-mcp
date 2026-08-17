@@ -59,9 +59,45 @@ survive a restart.
 
 `sandbox_select` sets (2) and returns a handle usable as (1).
 
+There is deliberately no fourth rule. A fleet of exactly one sandbox does not
+resolve implicitly either: a fleet grows from one to two without anyone
+revisiting the calls written while it had one member.
+
+**Client identity** is taken from `_meta`, in order: the `io.sandboxd/clientId`
+key, if the client sets one; otherwise the client implementation name, which
+protocol `2026-07-28` carries in `_meta` as
+`io.modelcontextprotocol/clientInfo`; otherwise a per-process fallback. Keying
+on the name rather than name-and-version means upgrading a client does not
+silently drop its selection. A client that runs several concurrent sessions and
+wants each to hold its own target sets `io.sandboxd/clientId`.
+
+A selection made under the per-process fallback is held in memory and never
+written to the registry. The fallback is `process:<pid>`, and a pid is reused:
+persisting under one would let an unrelated later process inherit a target
+chosen by a session that ended weeks ago. That is implicit targeting reached by
+a different route, and it is the failure this whole ordering exists to prevent.
+An identity that cannot be keyed to anything stable gets a selection that lasts
+as long as the process and no longer.
+
+**Handles** are derived from the sandbox name — `sbx_` plus a truncated
+SHA-256 — rather than minted and stored. That makes them stable across a
+restart of both the server and the registry with nothing extra to persist, and
+opaque enough that a model cannot construct one for a sandbox it was never
+given.
+
+A reference carrying the `sbx_` prefix resolves as a handle first and only then
+as a name. `sandbox_add` refuses to register a name with that prefix, but it is
+not the only way a name reaches the registry: an enrollment token that reserves
+no name lets the enrolling host choose its own. Matching names first would let
+such a host name itself after another sandbox's handle and receive every call
+aimed at it.
+
 Every tool result carries the resolved sandbox name. This is not diagnostic
 garnish — silent target confusion is the most destructive failure mode
-available to this system, and it is invisible without an echo.
+available to this system, and it is invisible without an echo. The echo is
+enforced structurally rather than by convention: a tool's output type must
+embed the echo field to satisfy the registration helper's type constraint, and
+the helper overwrites it with the resolved name after the handler returns.
 
 ## Transport
 

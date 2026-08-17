@@ -38,6 +38,13 @@ Choose the default target for subsequent calls.
 Returns a handle, plus the resolved host's platform and allowed roots — so the
 model learns where it can write without a second call.
 
+An agent that enforces no path jail returns `unconfined: true` and no
+`allowed_roots`. That is "every path is writable", not "none is": the path jail
+and `ExecService` are mutually exclusive, because a caller with exec can write
+anywhere its user can regardless of the roots, so the jail is enforced only on
+an agent with exec disabled. The flag is explicit rather than implied by an
+absent list, which reads the wrong way round.
+
 ### `sandbox_add`
 Register an already-enrolled agent that is not in the local registry.
 
@@ -45,20 +52,35 @@ Register an already-enrolled agent that is not in the local registry.
 | --- | --- | --- |
 | `name` | string | **Required.** |
 | `address` | string | **Required.** `host:port`. |
-| `labels` | object | Free-form `key=value`. |
+| `labels` | object | Free-form `key=value`, bounded: at most 32, keys printable ASCII with no spaces. |
 
 Does not enroll. Enrollment mints credentials and is an operator action via
 `sandboxctl`.
 
+Name, address and labels are all validated before the registry is touched, so a
+rejected call leaves nothing behind. Labels are bounded because they are paid
+for twice: in the registry file, and in every `sandbox_list` result.
+
 ### `sandbox_remove`
 Deregister a sandbox locally. Does not uninstall the agent.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `name` | string | **Required.** Sandbox name or handle. |
+
+Clears the sticky selection of **every** client pointing at it, not just the
+caller's — a selection left aimed at a sandbox that no longer exists is worse
+than no selection.
 
 ### `sandbox_info`
 Full detail for one sandbox: platform, kernel, CPU and memory, disk, detected
 toolchains, allowed roots, agent version and uptime, running process count.
+Reports `unconfined: true` for an agent with no path jail, on the same terms as
+`sandbox_select`.
 
 | Argument | Type | Notes |
 | --- | --- | --- |
+| `sandbox` | string | Name or handle. Defaults to the current selection. |
 | `include_toolchains` | bool | Probes the filesystem; measurably slower. |
 
 ---

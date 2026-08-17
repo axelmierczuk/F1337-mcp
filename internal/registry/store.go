@@ -260,13 +260,34 @@ func (r *Registry) UpdateHostInfo(name string, platform Platform, agentVersion s
 	})
 }
 
+// maxClientIDLength bounds an identity that becomes a key in the registry
+// file. See [Registry.SetSelection].
+const maxClientIDLength = 256
+
 // SetSelection records the sticky default sandbox for a client identity,
 // persisted so it survives a process restart. Two different client
 // identities against the same registry never observe each other's
 // selection.
+//
+// The identity is bounded here as well as by its producer. Whether an identity
+// is durable enough to persist is the caller's judgement — this file has no way
+// to tell "client:some-editor" from "process:4242", and teaching it would put
+// one package's naming scheme inside another's storage — but whether a string
+// is fit to become a key in a YAML file that every later operation rewrites
+// whole is this file's business, exactly as refusing an empty sandbox name is.
+// A megabyte of identity, or one carrying a NUL, is a caller's bug wherever it
+// came from, and it costs every subsequent read and write once it is on disk.
 func (r *Registry) SetSelection(clientID, sandboxName string) error {
 	if clientID == "" {
 		return fmt.Errorf("registry: client identity is required")
+	}
+	if len(clientID) > maxClientIDLength {
+		return fmt.Errorf("registry: client identity is %d bytes, limit is %d", len(clientID), maxClientIDLength)
+	}
+	for _, ch := range clientID {
+		if ch < ' ' || ch == 0x7f {
+			return fmt.Errorf("registry: client identity contains a control character %q", ch)
+		}
 	}
 	return r.mutate(func(s *state) error {
 		if s.Selections == nil {
@@ -298,4 +319,31 @@ func (r *Registry) ClearSelection(clientID string) error {
 		delete(s.Selections, clientID)
 		return nil
 	})
+}
+
+// ClearSelectionsFor removes every client's sticky default that points at
+// sandboxName, returning how many were cleared.
+//
+// Selections are keyed by client identity, so deregistering a sandbox has to
+// reach all of them: the client that ran sandbox_remove is rarely the only
+// one that had it selected, and a selection left pointing at a sandbox that
+// no longer exists is worse than no selection at all. Callers should clear
+// before removing, so the intermediate state is "registered but unselected"
+// rather than "selected but missing".
+func (r *Registry) ClearSelectionsFor(sandboxName string) (int, error) {
+	cleared := 0
+	err := r.mutate(func(s *state) error {
+		cleared = 0
+		for clientID, selected := range s.Selections {
+			if selected == sandboxName {
+				delete(s.Selections, clientID)
+				cleared++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return cleared, nil
 }

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -201,6 +202,65 @@ func TestSelection_Clear(t *testing.T) {
 	_, ok, err := r.GetSelection("client-1")
 	require.NoError(t, err)
 	assert.False(t, ok)
+}
+
+// TestSelection_ClearForSandboxReachesEveryClient covers what deregistering
+// a sandbox has to do. Selections are keyed by client identity, so the client
+// running the removal is rarely the only one pointing at it, and a selection
+// left pointing at a sandbox that no longer exists is worse than none.
+func TestSelection_ClearForSandboxReachesEveryClient(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	require.NoError(t, r.SetSelection("client-1", "build-box"))
+	require.NoError(t, r.SetSelection("client-2", "build-box"))
+	require.NoError(t, r.SetSelection("client-3", "gpu-01"))
+
+	cleared, err := r.ClearSelectionsFor("build-box")
+	require.NoError(t, err)
+	assert.Equal(t, 2, cleared)
+
+	for _, client := range []string{"client-1", "client-2"} {
+		_, ok, err := r.GetSelection(client)
+		require.NoError(t, err)
+		assert.Falsef(t, ok, "%s should no longer have a selection", client)
+	}
+
+	name, ok, err := r.GetSelection("client-3")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "gpu-01", name, "a selection pointing elsewhere must be left alone")
+
+	cleared, err = r.ClearSelectionsFor("build-box")
+	require.NoError(t, err)
+	assert.Zero(t, cleared, "clearing again is not an error and clears nothing")
+}
+
+// TestSelection_RefusesAnIdentityUnfitToBeAKey. The identity comes from
+// whatever calls this, and it becomes a key in a file every later operation
+// reads and rewrites whole. Whether an identity is durable enough to persist is
+// the caller's judgement; whether a string is fit to be a YAML key is this
+// package's.
+func TestSelection_RefusesAnIdentityUnfitToBeAKey(t *testing.T) {
+	r, path := newTestRegistry(t)
+
+	for name, id := range map[string]string{
+		"empty":            "",
+		"a megabyte of it": strings.Repeat("A", 1<<20),
+		"a newline":        "line\nbreak",
+		"a NUL":            "nul\x00byte",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, r.SetSelection(id, "build-box"))
+		})
+	}
+
+	// Nothing was written by any of them.
+	if data, err := os.ReadFile(path); err == nil {
+		assert.NotContains(t, string(data), "build-box")
+	}
+
+	// A realistic identity, namespace prefix included, is well inside the
+	// bound: the producer already caps its own half at 128 bytes.
+	require.NoError(t, r.SetSelection("client:"+strings.Repeat("a", 128), "build-box"))
 }
 
 func TestMalformedFile_ClearErrorNamingPath(t *testing.T) {
