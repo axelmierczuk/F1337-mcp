@@ -2,7 +2,9 @@ package exec
 
 import (
 	"os"
+	osexec "os/exec"
 	"strings"
+	"syscall"
 )
 
 // shellArgv wraps a command for the platform shell.
@@ -14,6 +16,30 @@ import (
 // not survive the other. Shell mode is opt-in for these reasons.
 func shellArgv(argv []string) []string {
 	return []string{shellPath(), "/c", strings.Join(argv, " ")}
+}
+
+// applyShellCommandLine hands cmd.exe the command line verbatim.
+//
+// os/exec otherwise builds the line by quoting each argument the way the C
+// runtime parses them, and cmd.exe does not parse them that way. `cmd /c` gets
+// a single argument holding the whole command, so it arrives quoted —
+// `cmd /c "go build ./..."` — and cmd's documented recovery is to strip the
+// first quote and the *last* quote on the line. That is harmless for a command
+// with no quotes of its own and wrong the moment there is one:
+// `echo "hi there"` comes back through it mangled, and the backslash-escaped
+// quotes os/exec would emit are not something cmd understands at all.
+//
+// Setting CmdLine bypasses that construction, so the shell receives exactly the
+// string the caller's arguments joined to, which is the whole contract of shell
+// mode. Only the interpreter's own path is escaped, because it is a path and
+// may contain spaces.
+//
+// argv is shellArgv's output: [comspec, "/c", command].
+func applyShellCommandLine(cmd *osexec.Cmd, argv []string) {
+	if len(argv) != 3 || cmd.SysProcAttr == nil {
+		return
+	}
+	cmd.SysProcAttr.CmdLine = syscall.EscapeArg(argv[0]) + " /c " + argv[2]
 }
 
 // shellPath resolves cmd.exe.

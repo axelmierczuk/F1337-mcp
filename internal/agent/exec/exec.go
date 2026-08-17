@@ -253,6 +253,7 @@ func (s *Service) Exec(req *sandboxdv1.ExecRequest, stream sandboxdv1.ExecServic
 		env:     env,
 		stdin:   req.GetStdin(),
 		timeout: timeout,
+		shell:   req.GetShell(),
 		sink:    sink,
 	})
 	if err != nil {
@@ -326,6 +327,7 @@ type runSpec struct {
 	env     []string
 	stdin   []byte
 	timeout time.Duration
+	shell   bool
 	sink    *sink
 }
 
@@ -416,6 +418,10 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 		cmd.Stdin = bytes.NewReader(spec.stdin)
 	}
 	group.ConfigureCommand(cmd)
+	if spec.shell {
+		// After ConfigureCommand, which is what allocates SysProcAttr.
+		applyShellCommandLine(cmd, spec.cmd.Argv)
+	}
 
 	started := time.Now()
 	if err := cmd.Start(); err != nil {

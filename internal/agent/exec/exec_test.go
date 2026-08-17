@@ -525,6 +525,26 @@ func TestExec_ShellModeRoutesThroughThePlatformShell(t *testing.T) {
 		"the record shows the argv that actually ran")
 }
 
+// A quoted argument survives the trip through the shell.
+//
+// The two platforms render it differently — sh strips the quotes, cmd's echo
+// keeps them — so the assertion is on the text, not on the quoting. What it
+// rules out is the command line being mangled on the way in: os/exec quotes
+// each argument the way the C runtime parses them, cmd.exe does not parse them
+// that way, and `cmd /c` would otherwise receive the whole command wrapped in
+// quotes it recovers from by stripping the wrong ones.
+func TestExec_ShellModeSurvivesAQuotedArgument(t *testing.T) {
+	h := newHarness(t)
+
+	stream, err := h.run(t, &sandboxdv1.ExecRequest{
+		Argv:  []string{"echo", `"hi there"`},
+		Shell: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), stream.result().GetExitCode())
+	require.Contains(t, stream.output(sandboxdv1.Stream_STREAM_STDOUT), "hi there")
+}
+
 func TestExec_TimeoutAboveTheMaximumIsRefusedRatherThanClamped(t *testing.T) {
 	h := newHarness(t, withCaps(policy.Caps{
 		DefaultTimeout: time.Second,

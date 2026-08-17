@@ -2,7 +2,15 @@
 
 package exec
 
-import "strings"
+import (
+	osexec "os/exec"
+	"strings"
+)
+
+// applyShellCommandLine does nothing on Unix: the shell takes its command as an
+// ordinary third argument, and execve passes an argument vector rather than a
+// string for anything to re-parse. Windows needs the hook; see its file.
+func applyShellCommandLine(*osexec.Cmd, []string) {}
 
 // shellArgv wraps a command for the platform shell.
 //
