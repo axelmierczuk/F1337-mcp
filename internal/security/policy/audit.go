@@ -120,6 +120,10 @@ type Audit struct {
 	mu   sync.Mutex
 	file *os.File
 	size int64
+
+	// needsSeparator records that the file does not end in a newline, so the
+	// next record must start one. See ensureOpenLocked.
+	needsSeparator bool
 }
 
 // NewAudit builds the log. It does not open the file: see Preflight.
@@ -190,9 +194,13 @@ func (a *Audit) Write(rec Record) error {
 	if err := a.rotateIfNeededLocked(int64(len(line))); err != nil {
 		return err
 	}
+	if a.needsSeparator {
+		line = append([]byte{'\n'}, line...)
+	}
 
 	n, err := a.file.Write(line)
 	a.size += int64(n)
+	a.needsSeparator = n != len(line)
 	if err != nil {
 		// Drop the handle so the next write retries the open. A file on a
 		// volume that went away does not come back by being written to again.
@@ -239,8 +247,9 @@ func (a *Audit) ensureOpenLocked() error {
 
 	// O_APPEND, so every write lands at the end whatever else is holding the
 	// file open, and 0600, because the records name the principal and the
-	// commands a fleet is running.
-	f, err := os.OpenFile(a.cfg.Path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // the path is operator configuration, not caller input
+	// commands a fleet is running. O_RDWR rather than O_WRONLY only so the
+	// last byte can be read back below; appends still go to the end.
+	f, err := os.OpenFile(a.cfg.Path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // the path is operator configuration, not caller input
 	if err != nil {
 		return fmt.Errorf("policy: open audit log %s: %w", a.cfg.Path, err)
 	}
@@ -250,7 +259,31 @@ func (a *Audit) ensureOpenLocked() error {
 		size = info.Size()
 	}
 	a.file, a.size = f, size
+	a.needsSeparator = !endsInNewline(f, size)
 	return nil
+}
+
+// endsInNewline reports whether the log's last byte terminates a record.
+//
+// A file that does not end in a newline was cut mid-record: os.File.Write can
+// return a positive count together with an error — a full disk is the ordinary
+// way — and a process killed between two write syscalls does the same thing.
+// Appending straight onto that stump would splice two records into one
+// unparseable line, losing the new record as well as the broken one. Starting a
+// fresh line instead costs a byte and confines the damage to the record that
+// was actually interrupted.
+//
+// A read failure reads as "ends in a newline": the alternative is a stray blank
+// line at the head of every segment on a filesystem that will not seek.
+func endsInNewline(f *os.File, size int64) bool {
+	if size == 0 {
+		return true
+	}
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], size-1); err != nil {
+		return true
+	}
+	return last[0] == '\n'
 }
 
 // rotateIfNeededLocked rotates when appending would take the file past

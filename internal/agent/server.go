@@ -86,7 +86,7 @@ type Server struct {
 //
 // Everything that can fail does so here, before the daemon claims to be
 // serving. Nothing is accepted until Serve is called.
-func New(opts Options) (*Server, error) {
+func New(opts Options) (srv *Server, err error) {
 	if opts.Config == nil {
 		return nil, errors.New("agent: Options.Config is required")
 	}
@@ -124,6 +124,15 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 	auditLog := auditFor(opts.Config, opts.Log)
+	// Preflight has the log open by now. Every later failure here returns
+	// before anything owns it, and a handle nobody will close is a file that
+	// cannot be removed or renamed on Windows for as long as the process
+	// lives — including by the test that created it.
+	defer func() {
+		if err != nil {
+			_ = auditLog.Close()
+		}
+	}()
 
 	deps := Deps{
 		Config:    opts.Config,

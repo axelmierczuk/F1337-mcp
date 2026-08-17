@@ -209,6 +209,64 @@ func TestAudit_RecoversWhenThePathBecomesWritable(t *testing.T) {
 	require.Len(t, readRecords(t, path), 1)
 }
 
+// A record cut short does not take the next one with it.
+//
+// os.File.Write can return a positive count together with an error — a full
+// disk does exactly that — and a process killed between two write syscalls
+// leaves the same stump. Appending onto it would splice two records into one
+// unparseable line: the interrupted record is lost either way, the next one
+// need not be.
+func TestAudit_StartsAFreshLineAfterAnInterruptedRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	// A whole record, then half of one, as an interrupted write leaves it.
+	stump := `{"time":"2026-01-01T00:00:00Z","principal":"a","rpc":"x","outcome":"ok"}` + "\n" +
+		`{"time":"2026-01-01T00:00:01Z","principal":"b","rp`
+	require.NoError(t, os.WriteFile(path, []byte(stump), 0o600))
+
+	log := policy.NewAudit(policy.AuditConfig{Path: path, Enabled: true})
+	require.NoError(t, log.Write(policy.Record{
+		Principal: "c",
+		RPC:       "sandboxd.v1.ExecService/Exec",
+		Outcome:   policy.OutcomeOK,
+	}))
+	require.NoError(t, log.Close())
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	require.Len(t, lines, 3, "the truncated record stays on its own line")
+
+	var first, third policy.Record
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &first))
+	require.Equal(t, "a", first.Principal)
+
+	require.Error(t, json.Unmarshal([]byte(lines[1]), &third), "the interrupted record is still broken; only it")
+
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &third))
+	require.Equal(t, "c", third.Principal, "the record written after the stump is intact")
+}
+
+// The recovery does not fire on a healthy log: no blank lines between records.
+func TestAudit_NoSeparatorOnAWellTerminatedLog(t *testing.T) {
+	log, path := newAudit(t, nil)
+	for range 3 {
+		require.NoError(t, log.Write(policy.Record{Outcome: policy.OutcomeOK}))
+	}
+	require.NoError(t, log.Close())
+
+	// Reopening mid-life must not insert one either.
+	again := policy.NewAudit(policy.AuditConfig{Path: path, Enabled: true})
+	require.NoError(t, again.Write(policy.Record{Outcome: policy.OutcomeOK}))
+	require.NoError(t, again.Close())
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "\n\n")
+	require.Len(t, readRecords(t, path), 4)
+}
+
 func TestAudit_AppendsRatherThanTruncating(t *testing.T) {
 	log, path := newAudit(t, nil)
 	require.NoError(t, log.Write(policy.Record{Outcome: policy.OutcomeOK, Argv: []string{"first"}}))
