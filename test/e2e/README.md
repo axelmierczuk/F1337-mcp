@@ -55,6 +55,10 @@ Everything except one scenario.
 | `TestEnrollmentRefusesWhatTheTokenDoesNotAuthorize` | A host cannot enroll as a name or an address its token does not authorize, and a spent token cannot be replayed. |
 | `TestEnrollmentRequiresThePinnedFingerprint` | Enrollment refuses to proceed unpinned, and a wrong pin fails the handshake before the token is sent. |
 | `TestARefusedEnrollmentSpendsItsToken` | Records a defect, not a requirement. See the comment on the test. |
+| `TestConcurrentCallsKeepTheirTargets` | Two dozen calls in flight across both sandboxes each run where they were aimed. |
+| `TestListReportsAnUnreachableSandboxWithoutWaitingForIt` | A dead sandbox is reported dead in the same listing that still reports its neighbour live. |
+| `TestFileSearchToolsWalkTheSandbox` | `fleet_ls`, `fleet_glob` and `fleet_grep` — the last of which is a server stream — over a real tree. |
+| `TestExecIsAudited` | The exec reaches the audit log, attributed to the authenticated principal, with no output in it. |
 | `TestLargeFileTransferRoundTrips` | 24 MiB pushed and pulled back with matching digests, and a repeat push that moves nothing. |
 | `TestTransferTreeRoundTrips` | A directory transfer with the default exclusions applied. |
 
