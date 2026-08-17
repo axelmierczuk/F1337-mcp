@@ -6,6 +6,8 @@ import (
 	"time"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
@@ -13,107 +15,34 @@ import (
 // strings rather than an enum name because they land in model context on
 // every fleet check, and "unreachable" says everything STATUS_UNREACHABLE
 // does in a third of the tokens.
+//
+// They are defined in internal/client rather than here because fleetctl
+// reports the same states to the operator, and the two must not drift.
 const (
-	healthServing     = "serving"
-	healthDegraded    = "degraded"
-	healthDraining    = "draining"
-	healthUnreachable = "unreachable"
+	healthServing     = client.HealthServing
+	healthDegraded    = client.HealthDegraded
+	healthDraining    = client.HealthDraining
+	healthUnreachable = client.HealthUnreachable
 	// healthUnknown means nothing has probed this sandbox yet — not that the
 	// probe failed. fleet_list without refresh reports it for a sandbox no
 	// call has touched since the server started.
-	healthUnknown = "unknown"
+	healthUnknown = client.HealthUnknown
 )
 
 // healthString renders a gRPC health status.
 func healthString(status sandboxdv1.HealthResponse_Status) string {
-	switch status {
-	case sandboxdv1.HealthResponse_STATUS_SERVING:
-		return healthServing
-	case sandboxdv1.HealthResponse_STATUS_DEGRADED:
-		return healthDegraded
-	case sandboxdv1.HealthResponse_STATUS_DRAINING:
-		return healthDraining
-	default:
-		return healthUnknown
-	}
+	return client.HealthName(status)
 }
 
 // platformString renders a platform as "os/arch", or the empty string when
 // nothing has ever reported one.
-func platformString(p registry.Platform) string {
-	switch {
-	case p.OS != "" && p.Arch != "":
-		return p.OS + "/" + p.Arch
-	case p.OS != "":
-		return p.OS
-	default:
-		return p.Arch
-	}
-}
+func platformString(p registry.Platform) string { return p.String() }
 
-// relativeTime renders how long ago t was, compactly. An unset time reads
-// "never", which is what a sandbox that has not answered a probe deserves.
-func relativeTime(t time.Time, now time.Time) string {
-	if t.IsZero() {
-		return "never"
-	}
-	d := now.Sub(t)
-	if d < 0 {
-		d = 0
-	}
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds ago", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	}
-}
-
-// humanBytes renders a byte count in the largest unit that keeps it under
-// four digits. Raw byte counts of a disk are unreadable and, at three or four
-// per sandbox, not cheap either.
-func humanBytes(n uint64) string {
-	if n == 0 {
-		return ""
-	}
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := uint64(unit), 0
-	for v := n / unit; v >= unit && exp < 4; v /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
-}
-
-// humanDuration renders an uptime without the sub-second noise
-// time.Duration's own formatting carries.
-func humanDuration(d time.Duration) string {
-	if d <= 0 {
-		return ""
-	}
-	d = d.Round(time.Second)
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	mins := int(d.Minutes()) % 60
-	secs := int(d.Seconds()) % 60
-	switch {
-	case days > 0:
-		return fmt.Sprintf("%dd%dh", days, hours)
-	case hours > 0:
-		return fmt.Sprintf("%dh%dm", hours, mins)
-	case mins > 0:
-		return fmt.Sprintf("%dm%ds", mins, secs)
-	default:
-		return fmt.Sprintf("%ds", secs)
-	}
-}
+// The remaining renderings are shared with fleetctl, so that an operator
+// comparing `fleetctl list` with fleet_list is comparing the same numbers.
+func relativeTime(t time.Time, now time.Time) string { return cli.RelativeTime(t, now) }
+func humanBytes(n uint64) string                     { return cli.HumanBytes(n) }
+func humanDuration(d time.Duration) string           { return cli.HumanDuration(d) }
 
 // parseLabelFilter splits a "key=value" filter, rejecting anything else with
 // a message that shows the shape rather than restating that it is invalid.

@@ -7,7 +7,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/axelmierczuk/fleet-mcp/internal/cli/fleetctl"
@@ -15,13 +14,10 @@ import (
 )
 
 func main() {
+	// Before the command tree is built: the root command's --version and the
+	// `version` subcommand both read these, and a `go install` build has its
+	// commit only in the embedded VCS stamp.
 	version.FromBuildInfo()
 
-	args := os.Args[1:]
-	if len(args) > 0 && (args[0] == "--version" || args[0] == "version") {
-		fmt.Println("fleetctl", version.String())
-		return
-	}
-
-	os.Exit(fleetctl.Main(args, os.Stdout))
+	os.Exit(fleetctl.Main(os.Args[1:], os.Stdout))
 }

@@ -3,12 +3,6 @@
 package e2e
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,49 +103,35 @@ func (f *fleet) configEnv(dir string) []string {
 // issueControlLeaf gives fleet-mcp the client certificate it presents to
 // agents.
 //
-// This is the one step of the documented flow that no shipped command performs
-// end to end: `fleetctl ca sign --profile control` — the command the MCP
-// server's own error message names — signs a CSR, and nothing in the product
-// produces one. An operator has to reach for openssl. See README.md and the
-// PR body; the CSR is built here rather than shelling out to openssl so the
-// suite has no dependency the product does not, but the signing itself goes
-// through the real command so that half of the path is genuinely covered.
+// One shipped command, run with the argv docs/quickstart.md prints and nothing
+// else: `fleetctl ca sign --profile control` with no --csr generates the
+// keypair here — the leaf identifies this workstation, so its key has nowhere
+// else to be made — and writes control.crt and control.key into the config
+// directory, which is where fleet-mcp and `fleetctl list` look for them.
 //
-// The workaround is pinned by TestNoShippedCommandIssuesTheControlLeaf, which
-// fails when the gap closes. When it does — PR #54 gives `ca sign --profile
-// control` a mode that generates the keypair — delete that test and replace the
-// CSR building below with the shipped command, so this suite walks the path an
-// operator walks rather than one it built for itself.
+// This step used to be the one part of the documented flow no command
+// performed: `ca sign` signed a CSR and nothing produced one, so the suite
+// built the CSR itself with crypto/x509 and covered only the signing. That gap
+// was pinned by TestNoShippedCommandIssuesTheControlLeaf until #54 closed it,
+// and both the test and the workaround went with it. Do not reintroduce a
+// hand-built CSR here: the point of this call is that the suite walks the
+// operator's path rather than one it built for itself, and a workaround nothing
+// fails on is a workaround nobody removes.
 func (f *fleet) issueControlLeaf() {
 	f.t.Helper()
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		f.t.Fatalf("generate control key: %v", err)
-	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "fleet-mcp"},
-	}, key)
-	if err != nil {
-		f.t.Fatalf("build control CSR: %v", err)
-	}
-	csrPath := filepath.Join(f.ctlDir, "control.csr")
-	writeFile(f.t, csrPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
+	runCLI(f.t, bins.fleetctl, []string{"ca", "sign", "--profile", "control"}, f.ctlEnv())
 
-	runCLI(f.t, bins.fleetctl, []string{
-		"ca", "sign",
-		"--profile", "control",
-		"--subject", "fleet-mcp",
-		"--csr", csrPath,
-		"--out", filepath.Join(f.ctlDir, "control.crt"),
-	}, f.ctlEnv())
-
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		f.t.Fatalf("marshal control key: %v", err)
+	// The command was given no paths, so where it put them is part of what the
+	// operator's flow promises: fleet-mcp reads these two names out of the
+	// config directory and reaches no agent without them. Asserted here so a
+	// regression in the defaults reads as itself rather than as every scenario
+	// failing to connect.
+	for _, name := range []string{"control.crt", "control.key"} {
+		if _, err := os.Stat(filepath.Join(f.ctlDir, name)); err != nil {
+			f.t.Fatalf("`fleetctl ca sign --profile control` left no %s in the config directory: %v", name, err)
+		}
 	}
-	writeFile(f.t, filepath.Join(f.ctlDir, "control.key"),
-		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
 }
 
 // startControlPlane runs `fleetctl serve` on an ephemeral port and reads back

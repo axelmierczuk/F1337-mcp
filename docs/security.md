@@ -82,6 +82,136 @@ operator                control plane              new host
   collects the token. The installers require it for the same reason, and refuse
   before they download anything.
 
+## Rotating the CA
+
+The fleet CA is the root of every identity in the system. Replacing it is
+`fleetctl ca rotate`, and it is deliberately **three commands over three
+sittings**, not one.
+
+**Stop `fleetctl serve` before you start, and leave it stopped until you are
+done.** It loads the CA and the bundle once, at startup, and keeps signing with
+what it loaded: a host that enrolls through a `serve` started before a rotation
+is issued a leaf under the outgoing CA and handed a bundle with no new root in
+it — a fleet member built to break at step 3, created after you began the
+rotation to avoid exactly that. `serve` is meant to be short-lived anyway; this
+is one more reason.
+
+The reason is the trust that runs in both directions. Each fleet member holds a
+bundle of roots it trusts and a leaf signed by whichever root was issuing when
+it enrolled. The control plane verifies an agent's leaf against its bundle; the
+agent verifies the control plane's leaf against *its* bundle. Start signing
+under a new root before every agent trusts that root and the second direction
+breaks: every agent rejects the control plane, and an agent that has stopped
+answering is one you can no longer reach over this transport to fix.
+
+So trust is distributed first, issuers switch second, the old root is dropped
+last — and the middle of that is you copying a file to machines this tool
+cannot reach, which is why no single command claims to do the whole thing.
+
+### 1. Stage
+
+```sh
+fleetctl ca rotate
+```
+
+Generates the next CA and adds it to `~/.config/fleet/ca/ca.crt`, which is a
+bundle rather than a single certificate. Nothing is signed under the new root
+yet — the old CA is still the issuer — so this step cannot invalidate anything.
+`fleetctl ca fingerprint` keeps printing the old fingerprint, because that is
+still the one an enrolling host must pin.
+
+Now distribute the widened bundle. On each host, replace the file its
+`agent.yaml` names as `tls.ca_bundle` (`/etc/fleet/ca.crt` on a Linux install)
+with the control plane's `ca.crt`, then restart the agent:
+
+```sh
+scp ~/.config/fleet/ca/ca.crt build-box:/tmp/ca.crt
+ssh build-box 'sudo install -m 0644 /tmp/ca.crt /etc/fleet/ca.crt && sudo fleet-agent service restart'
+```
+
+Restart `fleet-mcp` too — it reads the bundle at startup.
+
+Re-enrolling a host achieves the same thing, since the enrollment response
+carries the whole bundle. Copying the file is cheaper and does not spend a token.
+
+**Do not go on until every agent has the new bundle.** This is the only step
+where getting ahead of yourself breaks the fleet.
+
+### 2. Activate
+
+```sh
+fleetctl ca rotate --activate
+```
+
+The staged CA becomes the issuer, and the outgoing private key is replaced
+rather than kept — a spare CA signing key on disk is precisely what this
+directory's handling exists to avoid.
+
+Certificates issued by the old CA still verify, because the old root is still in
+everyone's bundle. The fleet keeps working, and you re-issue leaves at your own
+pace:
+
+```sh
+fleetctl ca sign --profile control                       # this workstation's own leaf
+fleetctl ca sign --csr build-box.csr --subject build-box \
+  --address build-box.internal:8722 --out build-box.crt  # a host that sent a CSR
+```
+
+or simply re-enroll a host, which issues it a fresh leaf under the new CA.
+
+From here on, `fleetctl ca fingerprint` prints the **new** fingerprint. Hand
+that one to every host enrolling from now on; the old one no longer names a CA
+that signs anything. While both roots are trusted, `ca fingerprint` says so and
+lists the others explicitly, so there is no guessing which to pin.
+
+### 3. Retire
+
+```sh
+fleetctl ca rotate --retire
+```
+
+Drops every root but the issuer from the bundle. **This is the step that breaks
+things** — anything still holding a certificate from the old CA stops verifying
+the moment you distribute the narrowed bundle.
+
+Run it only once nothing depends on the old root. `fleetctl list --json` shows
+every sandbox and its health, and a host still on an old leaf will start failing
+as soon as the retired root is gone from *its* bundle — so retire on the control
+plane first, confirm the fleet is still healthy, and only then distribute the
+narrowed `ca.crt` back out.
+
+If in doubt, do not retire. A bundle holding one extra root is a small cost; a
+fleet that cannot authenticate itself is an afternoon with a console on every
+machine.
+
+### If a step is interrupted
+
+Each step writes more than one file, so a crash or a `^C` in the middle leaves a
+CA directory part-way through. Every case is recoverable, and none of them needs
+you to edit the directory by hand:
+
+- **Interrupted stage** — `ca-next.crt` exists but is not yet in `ca.crt`.
+  Nothing trusts the staged root, so nothing has changed for the fleet. Delete
+  `ca-next.crt` and `ca-next.key` and run `fleetctl ca rotate` again; the
+  commands that notice say exactly this.
+- **Interrupted activation** — the incoming key has replaced `ca.key` but the
+  bundle still names the outgoing CA as the issuer. Commands that need to sign
+  refuse to run at all, and say so: a certificate and a key from different CAs
+  is the shape of a half-restored backup, and this tool will not guess. Run
+  `fleetctl ca rotate --activate` again. It reads the trust bundle rather than
+  the mismatched pair, finishes the two writes, and the directory is whole.
+- **Interrupted retirement** — `ca.crt` is written atomically, so it holds
+  either the old bundle or the narrowed one. Re-run the step.
+
+### What rotation does not fix
+
+Rotation replaces the CA. It does not revoke anything. A leaf issued by the old
+CA remains valid until the old root leaves every bundle — which is step 3, and
+is why step 3 exists at all. If the concern is a *compromised* CA key rather
+than an aging one, the overlap window is the window in which the attacker's
+certificates are still honoured: rotate, distribute, activate, and retire as
+fast as you can move, and treat every leaf issued by the old CA as suspect.
+
 ## The account the agent runs as
 
 Every command the agent executes runs as the account the daemon runs as, and

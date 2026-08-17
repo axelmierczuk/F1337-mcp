@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -42,8 +41,12 @@ func newServeCommand(out io.Writer) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Serve the enrollment endpoint for hosts joining the fleet",
+		Short: "Serve the enrollment endpoint for hosts joining the fleet — then stop it",
 		Long: "serve exposes EnrollmentService over server-authenticated TLS.\n\n" +
+			"Run it while you are enrolling hosts and stop it afterwards. It is the one\n" +
+			"endpoint an unauthenticated caller can reach, and a fleet is enrolled in\n" +
+			"minutes and runs for months — so an enrollment endpoint left listening is\n" +
+			"attack surface that buys nothing for almost all of its uptime.\n\n" +
 			"The listener presents a CA-signed leaf rather than the CA certificate\n" +
 			"itself, so the key that underwrites every identity in the fleet is not\n" +
 			"loaded into the one process unauthenticated hosts can reach.",
@@ -53,7 +56,7 @@ func newServeCommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			authority, err := ca.Load(dir)
+			authority, err := loadCA(dir)
 			if err != nil {
 				return err
 			}
@@ -100,26 +103,74 @@ func newServeCommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("listen on %s: %w", listen, err)
 			}
+			// Serve closes the listener itself, so this is normally a no-op —
+			// but not every path from here reaches Serve. Returning because the
+			// banner could not be written used to leave the socket open and the
+			// port bound for as long as the process lived, which for the shell
+			// that drives this through MainContext is until the operator quits.
+			defer func() { _ = lis.Close() }()
 
 			p := cli.NewPrinter(out)
 			p.Printf("enrollment endpoint listening on %s\n", lis.Addr())
 			p.Printf("serving certificate valid for: %v\n", hosts)
 			p.Printf("ca-fingerprint: %s\n", ca.FormatFingerprint(authority.Fingerprint()))
+			// Said here as well as in the docs and the help text, because this
+			// is the only one of the three an operator is looking at while the
+			// endpoint is actually up.
+			p.Printf("\nStop this once your hosts have enrolled (Ctrl-C). It is the only endpoint\n")
+			p.Printf("an unauthenticated caller can reach, and it is needed for minutes, not months.\n")
 			if err := p.Err(); err != nil {
 				return err
 			}
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
+			stopped := make(chan struct{})
 			go func() {
+				defer close(stopped)
 				<-ctx.Done()
 				// GracefulStop lets an enrollment already in flight finish:
 				// its token is marked used, so cutting the connection would
 				// spend it for nothing.
 				server.GracefulStop()
 			}()
+			// stop() releases the signal handler and cancels ctx; waiting on
+			// stopped means the goroutine it started is gone too. serve owns no
+			// goroutine once it returns — which matters because MainContext
+			// exists so a long-lived process can drive this, and a watcher that
+			// outlives each invocation accumulates one per run.
+			defer func() {
+				stop()
+				<-stopped
+			}()
 
-			if err := server.Serve(lis); err != nil {
+			// Already told to stop before serving began: let the watcher's
+			// GracefulStop land before Serve rather than racing it.
+			//
+			// This endpoint is the one an unauthenticated caller can reach, so
+			// opening its accept loop after the operator has asked for it to
+			// close is the wrong direction to lose a race in — and lose it we
+			// did, roughly 999 times in 1000, because Serve is a few
+			// instructions after the `go` above. Waiting here means a serve that
+			// was cancelled first accepts nothing at all.
+			//
+			// It also makes the outcome deterministic: Serve now always finds
+			// the server stopped and always returns ErrServerStopped, so the
+			// branch below is exercised by every run rather than by the rare
+			// scheduling that used to reach it.
+			if ctx.Err() != nil {
+				<-stopped
+			}
+
+			// ErrServerStopped means the watcher above stopped this server
+			// before Serve reached its accept loop — a Ctrl-C, or a caller
+			// cancelling the context, landing in the window between starting
+			// the watcher and starting the server. Nothing else holds this
+			// server, so it can only mean the command was asked to stop, and a
+			// command that stopped when it was told to has not failed. Without
+			// this, stopping serve in its first instant exited non-zero with
+			// "the server has been stopped" while stopping it an instant later
+			// exited 0.
+			if err := server.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 				return fmt.Errorf("serve: %w", err)
 			}
 			return nil
@@ -185,53 +236,4 @@ func (f fleetRecorder) Record(sb enroll.EnrolledSandbox) error {
 		return fmt.Errorf("%w: %s", enroll.ErrNameTaken, sb.Name)
 	}
 	return err
-}
-
-func newListCommand(out io.Writer) *cobra.Command {
-	var registryPath string
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List the sandboxes recorded in the fleet registry",
-		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			fleet, err := openRegistry(registryPath)
-			if err != nil {
-				return err
-			}
-			sandboxes, err := fleet.List()
-			if err != nil {
-				return err
-			}
-			p := cli.NewPrinter(out)
-			if len(sandboxes) == 0 {
-				p.Println("no sandboxes enrolled")
-				return p.Err()
-			}
-
-			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			table := cli.NewPrinter(tw)
-			table.Println("NAME\tADDRESS\tPLATFORM\tAGENT\tENROLLED")
-			for _, sb := range sandboxes {
-				platform := sb.Platform.OS
-				if sb.Platform.Arch != "" {
-					platform += "/" + sb.Platform.Arch
-				}
-				if platform == "" {
-					platform = "-"
-				}
-				agentVersion := sb.AgentVersion
-				if agentVersion == "" {
-					agentVersion = "-"
-				}
-				table.Printf("%s\t%s\t%s\t%s\t%s\n",
-					sb.Name, sb.Address, platform, agentVersion, formatTime(sb.EnrolledAt))
-			}
-			if err := table.Err(); err != nil {
-				return err
-			}
-			return tw.Flush()
-		},
-	}
-	cmd.Flags().StringVar(&registryPath, "registry", "", "path to the fleet registry (default: <config dir>/registry.yaml)")
-	return cmd
 }

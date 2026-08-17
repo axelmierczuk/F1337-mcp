@@ -33,6 +33,21 @@ type Platform struct {
 	PathSeparator string `json:"path_separator,omitempty" yaml:"path_separator,omitempty"`
 }
 
+// String renders a platform as "os/arch", or the empty string when nothing has
+// ever reported one. Both the MCP tools and fleetctl print it, and a sandbox
+// that reads "linux/amd64" in one view and "linux amd64" in the other is a
+// difference an operator has to stop and account for.
+func (p Platform) String() string {
+	switch {
+	case p.OS != "" && p.Arch != "":
+		return p.OS + "/" + p.Arch
+	case p.OS != "":
+		return p.OS
+	default:
+		return p.Arch
+	}
+}
+
 // Sandbox is a single fleet member as persisted in the registry.
 type Sandbox struct {
 	// Name is the fleet-unique identifier used to target this sandbox.

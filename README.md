@@ -49,25 +49,35 @@ go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
 **2. Create a CA and mint an enrollment token:**
 
 ```sh
-fleetctl ca init
-fleetctl serve &                    # enrollment endpoint, :9443
-fleetctl enroll mint --name build-box
-# → token: sbx_ey...   ca fingerprint: 9f2c...
+fleetctl ca init                       # prints the CA fingerprint — keep it
+fleetctl ca sign --profile control     # this workstation's own identity
+fleetctl serve &                       # enrollment endpoint, :9443 — stop it after
+fleetctl enroll mint --name build-box --address build-box.internal:8722
 ```
 
 **3. Enroll a machine as a sandbox:**
 
+`enroll mint` prints the command to run, with the token, control address and CA
+fingerprint already filled in. Paste it on the host:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
   | sh -s -- --token sbx_ey... \
-             --control your-workstation:9443 \
-             --ca-fingerprint 9f2c... \
-             --root /home/build/workspace
+      --control your-workstation:9443 \
+      --ca-fingerprint 9F:2C:8A:1E:... \
+      --listen 0.0.0.0:8722
 ```
 
 This detects the platform, verifies the release checksum, enrolls the host
 (the private key is generated locally and never leaves the machine), and
-installs a system service. Use `install.ps1` on Windows.
+installs a system service. Use `install.ps1` on Windows — the PowerShell form
+is printed too.
+
+Then stop `fleetctl serve`, and check the fleet:
+
+```sh
+fleetctl list
+```
 
 **4. Point your agent at the MCP server:**
 
