@@ -449,7 +449,12 @@ func (ts *testSupervisor) helperSpec(name, mode string, args ...string) startSpe
 // and a hundred of them at once on a four-vCPU CI runner starves the whole job.
 // It did — internal/mcpserver, which this branch does not touch, went from 20
 // seconds to 77 on the Windows runner, and a PowerShell-based test in
-// internal/platform blew a 60-second budget waiting to start.
+// internal/platform blew a 60-second budget waiting to start. That second one
+// went on failing intermittently even with this batching in place, because
+// batching bounds what this package contributes and nothing bounds what four
+// concurrent test binaries add up to; internal/platform stopped waiting on
+// PowerShell instead. The batch stays: the load it removes is real, and it is
+// this package's to remove.
 const shortLivedBatchSize = 8
 
 // startShortLived runs total short-lived helpers, at most shortLivedBatchSize
