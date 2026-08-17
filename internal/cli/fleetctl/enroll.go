@@ -117,6 +117,18 @@ func newEnrollMintCommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Both endpoints are checked before anything is minted. A token is
+			// single-use and the store is what records it, so failing after the
+			// mint costs the operator a token and a re-run to learn about a
+			// typo in a flag.
+			//
+			// An empty host is allowed here and not for --control: this one
+			// says which interfaces the agent binds, and ":8722" means all.
+			if listen != "" {
+				if err := checkEndpoint("--listen", listen, false); err != nil {
+					return err
+				}
+			}
 
 			token, rec, err := store.Mint(enroll.MintOptions{
 				Name:      name,
@@ -200,8 +212,8 @@ func newEnrollMintCommand(out io.Writer) *cobra.Command {
 // keep them in step.
 func controlAddress(flagValue string) (addr string, guessed bool, err error) {
 	if flagValue != "" {
-		if _, _, splitErr := net.SplitHostPort(flagValue); splitErr != nil {
-			return "", false, fmt.Errorf("--control %q is not host:port (e.g. workstation.internal:%s)", flagValue, defaultControlPort)
+		if err := checkEndpoint("--control", flagValue, true); err != nil {
+			return "", false, err
 		}
 		return flagValue, false, nil
 	}
@@ -209,7 +221,42 @@ func controlAddress(flagValue string) (addr string, guessed bool, err error) {
 	if err != nil {
 		return "", false, fmt.Errorf("determine this machine's hostname for the install command: %w (pass --control HOST:PORT)", err)
 	}
-	return net.JoinHostPort(hostname, defaultControlPort), true, nil
+	guess := net.JoinHostPort(hostname, defaultControlPort)
+	if err := checkEndpoint("--control", guess, true); err != nil {
+		return "", false, fmt.Errorf("this machine's hostname does not make a usable control address: %w", err)
+	}
+	return guess, true, nil
+}
+
+// checkEndpoint rejects a host:port that would not survive the trip into the
+// generated install command.
+//
+// Quoting keeps a shell from *acting* on an odd value, and shellQuote does
+// that. What quoting cannot do is stop a value beginning with "-" from being
+// read as a flag by the installer it is handed to — `--control -x:9443` reaches
+// install.sh as an option, not as an address — so that shape is refused here,
+// where the operator is still in front of the command, rather than on a host
+// they are about to walk away from. The numeric port is the same argument in
+// milder form: net.SplitHostPort is happy with "workstation:https", and the
+// agent that has to dial it is not.
+func checkEndpoint(flag, value string, requireHost bool) error {
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("%s %q starts with '-', which the installer would read as a flag rather than an address", flag, value)
+	}
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return fmt.Errorf("%s %q is not host:port (e.g. workstation.internal:%s)", flag, value, defaultControlPort)
+	}
+	if strings.HasPrefix(host, "-") {
+		return fmt.Errorf("%s %q names a host starting with '-', which the installer would read as a flag", flag, value)
+	}
+	if requireHost && host == "" {
+		return fmt.Errorf("%s %q names no host; the enrolling machine has to have something to dial", flag, value)
+	}
+	if n, convErr := strconv.Atoi(port); convErr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("%s %q does not name a port between 1 and 65535", flag, value)
+	}
+	return nil
 }
 
 // listenFor derives the agent's listen address from the endpoints the token

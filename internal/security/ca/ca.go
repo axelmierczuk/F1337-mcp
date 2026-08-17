@@ -188,12 +188,9 @@ func Load(dir string) (*CA, error) {
 		return nil, fmt.Errorf("ca: read %s: %w", keyPath, err)
 	}
 
-	trusted, err := decodeBundle(certPEM)
+	trusted, err := parseBundle(certPath, certPEM)
 	if err != nil {
-		return nil, fmt.Errorf("ca: parse %s: %w", certPath, err)
-	}
-	if len(trusted) == 0 {
-		return nil, fmt.Errorf("ca: %s does not contain a PEM certificate", certPath)
+		return nil, err
 	}
 	cert := trusted[0]
 
@@ -233,6 +230,37 @@ func (c *CA) TrustedRoots() []*x509.Certificate {
 	out := make([]*x509.Certificate, len(c.trusted))
 	copy(out, c.trusted)
 	return out
+}
+
+// readBundle reads ca.crt as a trust bundle, without the signing key beside it.
+//
+// [Load] is what almost every caller wants, because a CA that cannot sign is no
+// use to them. Rotation is the exception: [Activate] replaces the signing key,
+// so it has to be able to read a directory in which the key and the certificate
+// have not yet been brought back into agreement.
+func readBundle(dir string) ([]*x509.Certificate, error) {
+	certPath := filepath.Join(dir, certFileName)
+	certPEM, err := os.ReadFile(certPath) //nolint:gosec // dir is operator-supplied, not attacker input
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrNotInitialized, dir)
+		}
+		return nil, fmt.Errorf("ca: read %s: %w", certPath, err)
+	}
+	return parseBundle(certPath, certPEM)
+}
+
+// parseBundle decodes a trust bundle read from path, refusing an empty one:
+// a ca.crt with no certificate in it names no authority at all.
+func parseBundle(path string, certPEM []byte) ([]*x509.Certificate, error) {
+	trusted, err := decodeBundle(certPEM)
+	if err != nil {
+		return nil, fmt.Errorf("ca: parse %s: %w", path, err)
+	}
+	if len(trusted) == 0 {
+		return nil, fmt.Errorf("ca: %s does not contain a PEM certificate", path)
+	}
+	return trusted, nil
 }
 
 // decodeBundle parses every CERTIFICATE block in a PEM bundle, in file order.

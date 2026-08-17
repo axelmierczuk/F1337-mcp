@@ -206,6 +206,85 @@ func TestInfo_ReportsAnUnreachableSandboxRatherThanFailing(t *testing.T) {
 	assert.NotEmpty(t, doc.EnrolledAt)
 }
 
+// hostileStrings are what a compromised sandbox would put in the fields it gets
+// to choose, and what each has to be reduced to before it reaches a terminal.
+// The escape byte goes and its parameters stay as literal text; a carriage
+// return becomes a separator rather than a way to overwrite the line; a bidi
+// override goes entirely.
+var hostileStrings = []string{"\x1b", "\r", "\u202e"}
+
+// `list` defuses the platform and agent version it reads out of the registry.
+// `info` reads the same two fields from the same place and did not, so a
+// sandbox that had once answered a fleet_info call could write escape sequences
+// into the operator's terminal simply by not answering the next one.
+//
+// The registry is not a clean source for these: enrollment bounds what a host
+// says about itself, but fleet_info overwrites both from a live GetHostInfo
+// every time the model asks, and nothing checks them on that path — which is
+// what UpdateHostInfo below is standing in for.
+func TestInfo_DefusesAgentSuppliedStringsCachedInTheRegistry(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+	_, code = run(t, dir, "ca", "sign", "--profile", "control")
+	require.Equal(t, 0, code)
+
+	addSandbox(t, dir, registry.Sandbox{
+		Name: "build-box", Address: "127.0.0.1:1", EnrolledAt: time.Now().UTC(),
+	})
+	fleet, err := registry.Open(filepath.Join(dir, "registry.yaml"))
+	require.NoError(t, err)
+	require.NoError(t, fleet.UpdateHostInfo("build-box", registry.Platform{
+		OS:            "linux\x1b[2K",
+		Arch:          "amd64",
+		KernelVersion: "6.1.0\rserving",
+		Hostname:      "build\u202ekcatta",
+	}, "v0.3.0\x1b[31m"))
+
+	// The host is unreachable, which is the reading that comes out of the
+	// registry rather than off the wire — and the one nothing sanitised.
+	text, code := run(t, dir, "info", "build-box", "--timeout", "300ms")
+	require.Equal(t, 0, code, text)
+	for _, hostile := range hostileStrings {
+		assert.NotContains(t, text, hostile, "info passed %q from the registry to the terminal", hostile)
+	}
+	// Still a description of the host, not a blank one.
+	assert.Contains(t, text, "linux")
+	assert.Contains(t, text, "amd64")
+
+	// JSON is checked on the decoded values rather than on the document text:
+	// the encoder writes an escape byte as the six characters \u001b, so a
+	// document that reads clean can still hand a live escape to whatever
+	// prints the field after unmarshalling it.
+	outJSON, code := run(t, dir, "info", "build-box", "--json", "--timeout", "300ms")
+	require.Equal(t, 0, code, outJSON)
+	var doc struct {
+		Platform string `json:"platform"`
+		Kernel   string `json:"kernel"`
+		Hostname string `json:"hostname"`
+		Agent    string `json:"agent"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(outJSON), &doc), "info --json did not parse:\n%s", outJSON)
+	for field, value := range map[string]string{
+		"platform": doc.Platform, "kernel": doc.Kernel, "hostname": doc.Hostname, "agent": doc.Agent,
+	} {
+		require.NotEmpty(t, value, "%s was dropped rather than defused", field)
+		for _, hostile := range hostileStrings {
+			assert.NotContains(t, value, hostile, "info --json carried %q through in %s", hostile, field)
+		}
+	}
+
+	// `list` reads the same two fields from the same registry and already
+	// defused them. Asserted here rather than left to the sanitiser's own unit
+	// test, which passes just as happily when nothing calls it.
+	listed, code := run(t, dir, "list", "--timeout", "300ms")
+	require.Equal(t, 0, code, listed)
+	for _, hostile := range hostileStrings {
+		assert.NotContains(t, listed, hostile, "list passed %q from the registry to the terminal", hostile)
+	}
+	assert.Contains(t, listed, "linux")
+}
+
 // An unknown name is answered with the names that do exist. "no sandbox named
 // typo-box" alone leaves the operator to go and look the answer up.
 func TestInfo_UnknownSandboxListsTheFleet(t *testing.T) {

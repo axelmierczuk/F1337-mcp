@@ -103,6 +103,12 @@ func newServeCommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("listen on %s: %w", listen, err)
 			}
+			// Serve closes the listener itself, so this is normally a no-op —
+			// but not every path from here reaches Serve. Returning because the
+			// banner could not be written used to leave the socket open and the
+			// port bound for as long as the process lived, which for the shell
+			// that drives this through MainContext is until the operator quits.
+			defer func() { _ = lis.Close() }()
 
 			p := cli.NewPrinter(out)
 			p.Printf("enrollment endpoint listening on %s\n", lis.Addr())
@@ -118,13 +124,23 @@ func newServeCommand(out io.Writer) *cobra.Command {
 			}
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
+			stopped := make(chan struct{})
 			go func() {
+				defer close(stopped)
 				<-ctx.Done()
 				// GracefulStop lets an enrollment already in flight finish:
 				// its token is marked used, so cutting the connection would
 				// spend it for nothing.
 				server.GracefulStop()
+			}()
+			// stop() releases the signal handler and cancels ctx; waiting on
+			// stopped means the goroutine it started is gone too. serve owns no
+			// goroutine once it returns — which matters because MainContext
+			// exists so a long-lived process can drive this, and a watcher that
+			// outlives each invocation accumulates one per run.
+			defer func() {
+				stop()
+				<-stopped
 			}()
 
 			if err := server.Serve(lis); err != nil {

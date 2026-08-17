@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/axelmierczuk/fleet-mcp/internal/cli"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 
 	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
@@ -464,7 +465,7 @@ func newCARotateCommand(out io.Writer) *cobra.Command {
 				Step:        step,
 				Directory:   caDir,
 				Fingerprint: ca.FormatFingerprint(ca.Fingerprint(state.Issuer)),
-				Retired:     len(before.Superseded) - len(state.Superseded),
+				Retired:     retiredCount(step, before, state),
 			}
 			if state.Staged != nil {
 				result.Staged = ca.FormatFingerprint(ca.Fingerprint(state.Staged))
@@ -483,6 +484,19 @@ func newCARotateCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().BoolVar(&activate, "activate", false, "step 2: start signing under the staged CA")
 	cmd.Flags().BoolVar(&retire, "retire", false, "step 3: drop every root but the issuing CA — breaks anything still on an old certificate")
 	return cmd
+}
+
+// retiredCount is how many roots this step dropped from the trust bundle.
+//
+// Only a retirement can drop one, so only a retirement is counted. Reading it
+// as the difference in superseded roots across any step made `--json` report a
+// negative retirement for `--activate`, which *gains* a superseded root: the
+// outgoing issuer becomes one.
+func retiredCount(step string, before, after ca.Rotation) int {
+	if step != "retire" {
+		return 0
+	}
+	return len(before.Superseded) - len(after.Superseded)
 }
 
 func runRotationStep(caDir string, activate, retire bool) (string, ca.Rotation, error) {
@@ -526,7 +540,9 @@ func printRotationStep(p *cli.Printer, caDir, step string, result caRotateResult
 		p.Printf("  - `fleetctl ca sign --csr <fresh CSR> --subject <name>` on the host's CSR.\n")
 		p.Printf("  - `fleetctl ca sign --profile control` for this workstation's own leaf.\n\n")
 		p.Printf("Run `fleetctl ca rotate --retire` only once nothing holds a certificate from\n")
-		p.Printf("the old CA. `fleetctl list --json` reports each agent's issuer.\n")
+		p.Printf("the old CA. Nothing here can tell you that: a leaf's issuer lives on the host\n")
+		p.Printf("that holds it, not in this registry, so keep track of the re-issues yourself.\n")
+		p.Printf("docs/security.md has the order that keeps step 3 recoverable.\n")
 	case "retire":
 		if result.Retired == 0 {
 			p.Printf("Nothing to retire: %s is already the only trusted root.\n", result.Fingerprint)
@@ -542,11 +558,18 @@ func printRotationStep(p *cli.Printer, caDir, step string, result caRotateResult
 func caDirFile(caDir string) string { return filepath.Join(caDir, "ca.crt") }
 
 // writeSecret writes private key material at 0600, replacing whatever was
-// there. It goes through a plain create rather than an atomic rename because
-// the destination is a file the operator may be watching; the mode is what
-// matters.
+// there.
+//
+// It goes through fsutil.WriteAtomic rather than os.WriteFile because
+// os.WriteFile applies its mode only when it *creates* the file: re-issuing
+// over a control.key that something had left group- or world-readable — a
+// restored backup, an rsync without -p — wrote the new key straight into the
+// old permissions and reported success. WriteAtomic creates a fresh 0600 file
+// beside the destination and renames it over, so the mode is the one asked for
+// whatever was there before, and the bytes never exist at any other mode or
+// through any path an attacker could have pre-created.
 func writeSecret(path string, data []byte) error {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := fsutil.WriteAtomic(path, data, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil

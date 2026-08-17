@@ -461,14 +461,24 @@ func newInfoCommand(out io.Writer) *cobra.Command {
 				return err
 			}
 
+			// The platform and the agent version are the host's own words even
+			// here: enrollment bounded what it said about itself once, but
+			// fleet_info overwrites both from a live GetHostInfo every time the
+			// model asks, and nothing checks them on that path. So the registry
+			// is not a clean source for them, and this — the reading a host that
+			// does not answer produces — is the one place they reach a terminal
+			// without the live path's safeText.
+			//
+			// The name and the address are not in that class: they come from
+			// `enroll mint`, and enrollment is what writes them.
 			result := infoResult{
 				Name:       sb.Name,
 				Address:    sb.Address,
 				Health:     client.HealthUnknown,
-				Platform:   sb.Platform.String(),
-				Kernel:     sb.Platform.KernelVersion,
-				Hostname:   sb.Platform.Hostname,
-				Agent:      sb.AgentVersion,
+				Platform:   safeText(sb.Platform.String()),
+				Kernel:     safeText(sb.Platform.KernelVersion),
+				Hostname:   safeText(sb.Platform.Hostname),
+				Agent:      safeText(sb.AgentVersion),
 				Labels:     sb.Labels,
 				EnrolledAt: formatTime(sb.EnrolledAt),
 				LastSeen:   cli.RelativeTime(sb.LastSeenAt, time.Now()),

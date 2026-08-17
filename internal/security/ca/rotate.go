@@ -80,17 +80,25 @@ func Status(dir string) (Rotation, error) {
 	return authority.rotation()
 }
 
-// rotation classifies this CA's trust bundle. Everything after the issuer is a
-// root that no longer issues; the one that matches ca-next.crt, if any, is the
-// staged incoming CA rather than a superseded outgoing one.
-func (c *CA) rotation() (Rotation, error) {
-	staged, err := readStagedCert(c.dir)
+// rotation classifies this CA's trust bundle.
+func (c *CA) rotation() (Rotation, error) { return classify(c.dir, c.trusted) }
+
+// classify sorts a trust bundle into the rotation state it represents.
+// Everything after the issuer is a root that no longer issues; the one that
+// matches ca-next.crt, if any, is the staged incoming CA rather than a
+// superseded outgoing one.
+//
+// It takes the bundle rather than a loaded CA because [Activate] has to be able
+// to classify a directory whose signing key does not match its certificate; see
+// the comment there.
+func classify(dir string, trusted []*x509.Certificate) (Rotation, error) {
+	staged, err := readStagedCert(dir)
 	if err != nil {
 		return Rotation{}, err
 	}
 
-	out := Rotation{Issuer: c.cert, Staged: staged}
-	for _, root := range c.trusted[1:] {
+	out := Rotation{Issuer: trusted[0], Staged: staged}
+	for _, root := range trusted[1:] {
 		if staged != nil && root.Equal(staged) {
 			continue
 		}
@@ -99,9 +107,9 @@ func (c *CA) rotation() (Rotation, error) {
 	// A staged certificate that is not in the bundle is a stage that was
 	// interrupted between writing the file and rewriting the bundle. Say so
 	// rather than reporting a rotation whose root nothing trusts.
-	if staged != nil && !containsCert(c.trusted, staged) {
+	if staged != nil && !containsCert(trusted, staged) {
 		return out, fmt.Errorf("ca: %s holds a staged CA that is missing from %s; re-run the rotation after removing %s",
-			filepath.Join(c.dir, nextCertFileName), filepath.Join(c.dir, certFileName), nextCertFileName)
+			filepath.Join(dir, nextCertFileName), filepath.Join(dir, certFileName), nextCertFileName)
 	}
 	return out, nil
 }
@@ -155,11 +163,26 @@ func Stage(dir string) (Rotation, error) {
 // by the new one, and a spare CA signing key left on disk is exactly the thing
 // the split between this directory and everything else exists to avoid.
 func Activate(dir string) (Rotation, error) {
-	current, err := Load(dir)
+	// The bundle is read directly rather than through Load, and the outgoing
+	// signing key is deliberately neither read nor required to match it.
+	//
+	// That is what makes the repair below possible. Activate replaces ca.key,
+	// so a crash between its two writes leaves the incoming key beside the
+	// outgoing certificate — precisely the mismatch Load refuses. Loading first
+	// meant the one command that could finish an interrupted activation was the
+	// one command that could not run, and the CA directory stayed unloadable:
+	// not just `ca rotate`, but `ca fingerprint`, `serve`, `enroll mint` and
+	// `list` too, because all of them go through Load.
+	//
+	// Everything Activate actually needs — the bundle, and the staged
+	// certificate and key — is still on disk in that state, and the pair it
+	// writes is checked below, so the invariant Load enforces is re-established
+	// by this function rather than assumed by it.
+	trusted, err := readBundle(dir)
 	if err != nil {
 		return Rotation{}, err
 	}
-	state, err := current.rotation()
+	state, err := classify(dir, trusted)
 	if err != nil {
 		return Rotation{}, err
 	}
@@ -179,11 +202,12 @@ func Activate(dir string) (Rotation, error) {
 	// The bundle is rebuilt from scratch rather than reordered in place, so an
 	// interrupted Stage that never reached the bundle still activates onto a
 	// bundle that holds the root now doing the issuing.
-	roots := append([]*x509.Certificate{state.Staged, current.cert}, state.Superseded...)
+	roots := append([]*x509.Certificate{state.Staged, state.Issuer}, state.Superseded...)
 
-	// Key first: a crash between the two writes leaves a certificate that does
-	// not match its key, which Load refuses — and re-running Activate repairs
-	// it, because the staged files are removed only once both writes are done.
+	// Key first, and the staged files are removed only once both writes are
+	// done, so re-running Activate finishes an activation that was interrupted
+	// between them: it recomputes the same roots from the same inputs and
+	// rewrites both files.
 	if err := writeFileAtomic(filepath.Join(dir, keyFileName), nextKeyPEM, 0o600); err != nil {
 		return Rotation{}, err
 	}

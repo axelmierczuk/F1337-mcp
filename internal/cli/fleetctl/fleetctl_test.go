@@ -7,6 +7,9 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -272,6 +275,37 @@ func TestEnrollMint_JSONParsesAndCarriesTheInstallCommand(t *testing.T) {
 	assert.NotEmpty(t, doc.TokenID)
 }
 
+// The generated command's whole claim is that it can be pasted unedited, so an
+// endpoint that would change how the installer parses its own arguments is
+// refused where the operator can still see it. Single quotes stop a shell
+// acting on a value; nothing stops "-x:9443" being read as a flag.
+//
+// And nothing may be minted on the way to that refusal: a token is single-use,
+// so a mint that failed after recording one would cost the operator a token to
+// learn about a typo.
+func TestEnrollMint_RefusesAnEndpointTheInstallerWouldReadAsAFlag(t *testing.T) {
+	for name, args := range map[string][]string{
+		"control leading dash": {"--control", "-oProxyCommand=x:9443"},
+		"control no port":      {"--control", "workstation.internal"},
+		"control named port":   {"--control", "workstation.internal:https"},
+		"listen leading dash":  {"--listen", "-x"},
+		"listen named port":    {"--control", "workstation.internal:9443", "--listen", "0.0.0.0:agent"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, code := run(t, dir, "ca", "init")
+			require.Equal(t, 0, code)
+
+			out, code := runCapturingErrors(t, dir, append([]string{"enroll", "mint", "--name", "build-box"}, args...)...)
+			require.NotEqual(t, 0, code, "mint accepted %v:\n%s", args, out)
+
+			listed, code := run(t, dir, "enroll", "list")
+			require.Equal(t, 0, code, listed)
+			assert.Contains(t, listed, "no enrollment tokens", "a refused mint spent a token anyway:\n%s", listed)
+		})
+	}
+}
+
 // A token minted without a CA would be unusable: `fleet-agent enroll` refuses
 // to run without the fingerprint, so the operator would have burnt a mint and
 // have to do it again.
@@ -397,6 +431,42 @@ func fingerprintDoc(t *testing.T, out string) struct {
 	return doc
 }
 
+// "retired" counts roots this step dropped, so only a retirement can be
+// non-zero. Reading it as a difference in superseded roots across any step made
+// --activate report -1: activating *gains* a superseded root, because the
+// outgoing issuer becomes one.
+func TestCARotate_OnlyARetirementReportsARetirement(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+
+	retiredIn := func(out string) int {
+		t.Helper()
+		var doc struct {
+			Step    string `json:"step"`
+			Retired int    `json:"retired"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(out), &doc), "ca rotate --json did not parse:\n%s", out)
+		return doc.Retired
+	}
+
+	staged, code := run(t, dir, "ca", "rotate", "--json")
+	require.Equal(t, 0, code, staged)
+	assert.Equal(t, 0, retiredIn(staged), "staging retires nothing")
+
+	activated, code := run(t, dir, "ca", "rotate", "--activate", "--json")
+	require.Equal(t, 0, code, activated)
+	assert.Equal(t, 0, retiredIn(activated), "activating retires nothing; it supersedes the outgoing root")
+
+	retired, code := run(t, dir, "ca", "rotate", "--retire", "--json")
+	require.Equal(t, 0, code, retired)
+	assert.Equal(t, 1, retiredIn(retired), "retiring dropped the one superseded root")
+
+	again, code := run(t, dir, "ca", "rotate", "--retire", "--json")
+	require.Equal(t, 0, code, again)
+	assert.Equal(t, 0, retiredIn(again), "a retirement with nothing to drop retires nothing")
+}
+
 func TestCARotate_BeforeCAInitNamesTheCommandToRun(t *testing.T) {
 	out, code := runCapturingErrors(t, t.TempDir(), "ca", "rotate")
 	assert.NotEqual(t, 0, code)
@@ -437,6 +507,33 @@ func TestCASign_GeneratesTheControlLeafWithoutACSR(t *testing.T) {
 	}
 }
 
+// Re-issuing over an existing control.key has to leave 0600 behind, not the
+// mode the file already had. os.WriteFile applies its mode only when it creates
+// the file, so a key that something had left readable — a restored backup, an
+// rsync without -p — was overwritten with a fresh secret at the old permissions
+// and reported as written.
+func TestCASign_TightensAControlKeyThatWasLeftReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+	_, code = run(t, dir, "ca", "sign", "--profile", "control")
+	require.Equal(t, 0, code)
+
+	keyPath := filepath.Join(dir, "control.key")
+	require.NoError(t, os.Chmod(keyPath, 0o644))
+
+	out, code := run(t, dir, "ca", "sign", "--profile", "control")
+	require.Equal(t, 0, code, out)
+
+	info, err := os.Stat(keyPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
+		"re-issuing wrote a private key into permissions it found rather than the ones it promises")
+}
+
 // An agent's private key must never leave the host it identifies, so this
 // convenience is deliberately unavailable for an agent leaf.
 func TestCASign_RefusesToGenerateAnAgentKeypair(t *testing.T) {
@@ -447,6 +544,33 @@ func TestCASign_RefusesToGenerateAnAgentKeypair(t *testing.T) {
 	out, code := runCapturingErrors(t, dir, "ca", "sign", "--subject", "build-box")
 	assert.NotEqual(t, 0, code)
 	assert.Contains(t, out, "--csr is required")
+}
+
+// The keypair generation is reachable for exactly one profile string. Anything
+// that is not literally "control" has to end without a key being written —
+// whether it names the agent profile outright or arrives in a spelling somebody
+// hoped would be folded into one.
+//
+// The refusal is written as "not the control profile" rather than as a list of
+// what to reject, so this asserts the shape rather than the list: an unknown
+// profile is refused at parse, and the only profile that reaches the generator
+// is the one whose key belongs on this machine anyway.
+func TestCASign_GeneratesAKeypairForNoProfileButControl(t *testing.T) {
+	for _, profile := range []string{"agent", "Agent", "AGENT", "control-plane", "Control", "CONTROL", "", " control"} {
+		t.Run("profile="+profile, func(t *testing.T) {
+			dir := t.TempDir()
+			_, code := run(t, dir, "ca", "init")
+			require.Equal(t, 0, code)
+
+			out, code := runCapturingErrors(t, dir, "ca", "sign", "--profile", profile, "--subject", "build-box")
+			require.NotEqual(t, 0, code, "--profile %q produced a keypair:\n%s", profile, out)
+
+			for _, name := range []string{"control.key", "build-box.key"} {
+				_, err := os.Stat(filepath.Join(dir, name))
+				assert.True(t, os.IsNotExist(err), "--profile %q wrote %s", profile, name)
+			}
+		})
+	}
 }
 
 // Rotation: re-issuing a leaf before expiry must not require a fresh
@@ -505,6 +629,42 @@ func TestCASign_RejectsAWildcardAddress(t *testing.T) {
 
 	_, code = run(t, dir, "ca", "sign", "--csr", csrPath, "--subject", "build-box", "--address", "*.internal:9443")
 	assert.NotEqual(t, 0, code, "the CA must refuse a wildcard even when the operator asks for one")
+}
+
+// failingWriter is standard output that has gone away — a closed pipe, a full
+// disk. cli.Printer records the first such failure and the command reports it,
+// which is right; what it must not do is leave the socket it had already opened
+// bound on the way out.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+// serve opens its listener before it prints its banner, so a banner that cannot
+// be written returns from a function holding an open listening socket. In the
+// binary the process exits and the kernel cleans up; in the shell that drives
+// this through MainContext it does not, and the port stays bound for the life
+// of that process.
+func TestServe_ReleasesTheListenerWhenItCannotPrintItsBanner(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+
+	// A port this test holds, then releases, so the address is known to be free
+	// and serve is the only thing that could still be holding it afterwards.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := probe.Addr().String()
+	require.NoError(t, probe.Close())
+
+	t.Setenv("FLEET_CONFIG_DIR", dir)
+	root := fleetctl.NewRootCommand(failingWriter{})
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"serve", "--listen", address, "--advertise", "127.0.0.1"})
+	require.Error(t, root.Execute(), "a banner that could not be written must fail the command")
+
+	again, err := net.Listen("tcp", address)
+	require.NoError(t, err, "serve returned still holding %s", address)
+	require.NoError(t, again.Close())
 }
 
 func TestUnknownCommand_ExitsNonZero(t *testing.T) {
