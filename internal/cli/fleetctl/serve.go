@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -42,8 +41,12 @@ func newServeCommand(out io.Writer) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Serve the enrollment endpoint for hosts joining the fleet",
+		Short: "Serve the enrollment endpoint for hosts joining the fleet — then stop it",
 		Long: "serve exposes EnrollmentService over server-authenticated TLS.\n\n" +
+			"Run it while you are enrolling hosts and stop it afterwards. It is the one\n" +
+			"endpoint an unauthenticated caller can reach, and a fleet is enrolled in\n" +
+			"minutes and runs for months — so an enrollment endpoint left listening is\n" +
+			"attack surface that buys nothing for almost all of its uptime.\n\n" +
 			"The listener presents a CA-signed leaf rather than the CA certificate\n" +
 			"itself, so the key that underwrites every identity in the fleet is not\n" +
 			"loaded into the one process unauthenticated hosts can reach.",
@@ -53,7 +56,7 @@ func newServeCommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			authority, err := ca.Load(dir)
+			authority, err := loadCA(dir)
 			if err != nil {
 				return err
 			}
@@ -105,6 +108,11 @@ func newServeCommand(out io.Writer) *cobra.Command {
 			p.Printf("enrollment endpoint listening on %s\n", lis.Addr())
 			p.Printf("serving certificate valid for: %v\n", hosts)
 			p.Printf("ca-fingerprint: %s\n", ca.FormatFingerprint(authority.Fingerprint()))
+			// Said here as well as in the docs and the help text, because this
+			// is the only one of the three an operator is looking at while the
+			// endpoint is actually up.
+			p.Printf("\nStop this once your hosts have enrolled (Ctrl-C). It is the only endpoint\n")
+			p.Printf("an unauthenticated caller can reach, and it is needed for minutes, not months.\n")
 			if err := p.Err(); err != nil {
 				return err
 			}
@@ -185,53 +193,4 @@ func (f fleetRecorder) Record(sb enroll.EnrolledSandbox) error {
 		return fmt.Errorf("%w: %s", enroll.ErrNameTaken, sb.Name)
 	}
 	return err
-}
-
-func newListCommand(out io.Writer) *cobra.Command {
-	var registryPath string
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List the sandboxes recorded in the fleet registry",
-		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			fleet, err := openRegistry(registryPath)
-			if err != nil {
-				return err
-			}
-			sandboxes, err := fleet.List()
-			if err != nil {
-				return err
-			}
-			p := cli.NewPrinter(out)
-			if len(sandboxes) == 0 {
-				p.Println("no sandboxes enrolled")
-				return p.Err()
-			}
-
-			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			table := cli.NewPrinter(tw)
-			table.Println("NAME\tADDRESS\tPLATFORM\tAGENT\tENROLLED")
-			for _, sb := range sandboxes {
-				platform := sb.Platform.OS
-				if sb.Platform.Arch != "" {
-					platform += "/" + sb.Platform.Arch
-				}
-				if platform == "" {
-					platform = "-"
-				}
-				agentVersion := sb.AgentVersion
-				if agentVersion == "" {
-					agentVersion = "-"
-				}
-				table.Printf("%s\t%s\t%s\t%s\t%s\n",
-					sb.Name, sb.Address, platform, agentVersion, formatTime(sb.EnrolledAt))
-			}
-			if err := table.Err(); err != nil {
-				return err
-			}
-			return tw.Flush()
-		},
-	}
-	cmd.Flags().StringVar(&registryPath, "registry", "", "path to the fleet registry (default: <config dir>/registry.yaml)")
-	return cmd
 }
