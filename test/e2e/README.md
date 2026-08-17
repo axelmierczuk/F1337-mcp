@@ -90,6 +90,14 @@ It asserts on the inner run's `--- PASS: <scenario>` line, not on the word
 skipped everything and for a `-run` pattern that matched nothing, so the
 cheaper check would report success for a container that ran no scenario at all.
 
+The same hole exists one level up, and the assertion above cannot see it:
+`make test-integration-docker` selects the outer scenario with `-run
+InContainer`, free text that duplicates a test name with nothing tying the two
+together, and an unmatched `-run` exits zero. `TestMain` closes it — with
+`FLEET_E2E_DOCKER=1` set, a run in which no container scenario reported itself
+fails. That is the only place it can be closed, because by the time any test
+body runs the pattern has already decided which bodies there are.
+
 ## What is not covered
 
 - **Windows sandboxes.** Every scenario skips on Windows: the workloads are

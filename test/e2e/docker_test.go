@@ -92,6 +92,11 @@ func TestExecTimeoutKillsTheWholeProcessTreeInContainer(t *testing.T) {
 		t.Fatalf("the containerised scenario did not run and pass (%q is missing; a skip or an unmatched -run also prints a bare PASS):\n%s",
 			pass, out)
 	}
+
+	// The assertion above proves the inner run happened. This proves the outer
+	// one did: without it, a -run pattern that stops selecting this scenario
+	// leaves nothing behind to notice. See containerScenarioRan.
+	containerScenarioRan.Store(true)
 }
 
 // TestNoProcessSurvivesTheTimeoutInsideThisNamespace is the inner half: the

@@ -40,12 +40,29 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // bins are the three binaries under test, built once by TestMain.
 var bins binaries
+
+// containerScenarioRan is set by the container scenario when it has actually
+// run, so that a run which asked for a container and got none fails.
+//
+// The container scenario already asserts that the *inner* run executed, because
+// `go test` prints a bare PASS for a run that skipped everything. The same hole
+// exists one level up and nothing here could see it: `make test-integration-docker`
+// selects the outer scenario with `-run InContainer`, free text that duplicates a
+// test name with nothing tying the two together, and `go test` reports a pattern
+// matching nothing as "ok … [no tests to run]" and exits zero. Renaming the outer
+// scenario therefore turned the target — and the CI job that is the only place
+// the container scenario ever runs — green having containerised nothing.
+//
+// TestMain is the only place that can catch it, because by the time any test
+// body runs the pattern has already decided which bodies there are.
+var containerScenarioRan atomic.Bool
 
 // binaries locates the built commands.
 type binaries struct {
@@ -97,7 +114,23 @@ func runMain(m *testing.M) (int, error) {
 			"e2e: every scenario in this package skips on %s; this run proves nothing about a Windows agent. See test/e2e/README.md.\n",
 			runtime.GOOS)
 	}
-	return m.Run(), nil
+	code := m.Run()
+
+	// A run that asked for the container scenario and never reached one is a
+	// failure, not a pass. See containerScenarioRan. Only when the run was
+	// otherwise green: a non-zero code already says something went wrong, and
+	// the scenario does not record itself when it fails. The in-container guard
+	// is for the inner run, which is started with FLEET_E2E_IN_CONTAINER=1 and
+	// skips the outer half by design.
+	if code == 0 && os.Getenv(dockerEnv) == "1" && os.Getenv(inContainerEnv) != "1" && !containerScenarioRan.Load() {
+		return 0, fmt.Errorf(
+			"%s=1 asked for the container scenario and no container scenario ran: the -run pattern that "+
+				"selected this test binary (see the test-integration-docker target) matches nothing. `go test` "+
+				"reports an unmatched -run as \"ok … [no tests to run]\" and exits zero, so without this check "+
+				"the target and its CI job would have passed having containerised nothing",
+			dockerEnv)
+	}
+	return code, nil
 }
 
 // buildBinaries compiles the three commands into dir.
