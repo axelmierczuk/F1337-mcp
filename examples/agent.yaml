@@ -68,6 +68,9 @@ exec:
   #   - "/usr/local/go/bin/go"
 
 process:
+  # Agent-wide, not per-service: every service that starts a process takes its
+  # slots from this one number, so an agent set to 32 runs 32 processes in
+  # total rather than 32 of each kind.
   max_concurrent: 32
   # Per-process on-disk log cap before rotation.
   max_log_bytes: 33554432

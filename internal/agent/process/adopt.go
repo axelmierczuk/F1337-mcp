@@ -105,6 +105,28 @@ func (s *Supervisor) adopt(p persisted) error {
 	}
 
 	previous := parseState(p.State)
+
+	// A process that survived the last agent is a process running on this host
+	// now, so it takes a slot in the agent-wide limit before it is restored as
+	// live. Without this the limit rebuilds itself as empty on every agent
+	// restart, and a host that upgrades its agent nightly drifts further past
+	// its cap every night.
+	//
+	// A refusal here is not a reason to abandon a running process: the cap
+	// governs what the agent starts, and this one is already started. It is
+	// adopted without a slot and the condition is logged, so the agent is
+	// honestly over its limit for as long as those processes last rather than
+	// pretending by dropping them.
+	if isLive(previous) {
+		slot, err := s.acquireSlot()
+		if err != nil {
+			s.log.Warn("re-adopting a process the concurrency limit has no room for; the agent is over process.max_concurrent until enough of them exit",
+				"process_id", p.ID, "name", p.Name, "error", err)
+			r.buf.note("supervisor: re-adopted while the agent is at its process.max_concurrent limit; it is over that limit until enough processes exit")
+		} else {
+			r.holdSlot(slot)
+		}
+	}
 	r.restoreState(previous)
 
 	s.mu.Lock()

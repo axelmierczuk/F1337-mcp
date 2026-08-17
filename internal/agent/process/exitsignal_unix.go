@@ -8,8 +8,11 @@ import (
 	"syscall"
 )
 
-// exitSignal reports the signal that killed a process, spelled the way
-// ProcessStatus.signal wants it — the bare name, no "SIG" prefix.
+// exitSignal reports the signal that killed a process, in the runtime's own
+// spelling: "killed", "terminated", "interrupt", and a bare number for a signal
+// it has no name for. Not "KILL" or "TERM" — those are the request vocabulary,
+// and inventing a translation back into it would make the field claim the
+// process was stopped by this agent when it may have been stopped by anyone.
 //
 // A process that exited normally returns false, which is what separates
 // "exited 1" from "killed by SIGKILL" in the status a caller reads. Both land

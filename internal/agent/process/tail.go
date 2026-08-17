@@ -319,12 +319,19 @@ func (t *streamTail) flushPartial(buf *logBuffer) {
 // bytes are lost and, unlike a drop from the ring buffer or a follower's queue,
 // the loss cannot be counted — the agent has no way to learn how much a
 // descriptor it does not hold wrote in that instant. It is documented here
-// rather than hidden.
+// rather than hidden. It is bounded by one write, which is the smallest that
+// window can be made without a lever the OS does not offer.
 //
 // The size check is dropped once the file passes rawCap*rawHardCapFactor. A
 // process that writes continuously never satisfies it, and "lossless but
 // unbounded" is the wrong trade for a file on someone else's disk: past the
-// hard ceiling the agent truncates anyway and takes the microsecond of loss.
+// hard ceiling the agent truncates anyway. That discard is a different thing
+// from the race above and much larger — up to the whole gap between what the
+// tailer has read and where the process has got to — but it is *knowable*, so
+// it is measured and written into the process's own log rather than taken
+// silently. #13 asks for a gap in the log to be visible rather than silent,
+// and a gap the agent could have measured and did not is the one case that
+// would not have been.
 func (c *capture) maybeTruncate(t *streamTail) {
 	offset := t.offset.Load()
 	if c.rawCap <= 0 || offset < c.rawCap || len(t.partial) > 0 {
@@ -337,10 +344,30 @@ func (c *capture) maybeTruncate(t *streamTail) {
 	if info.Size() != offset && info.Size() < c.rawCap*rawHardCapFactor {
 		return
 	}
+	unread := info.Size() - offset
 	if err := os.Truncate(t.path, 0); err != nil {
 		return
 	}
 	t.offset.Store(0)
+	if unread > 0 {
+		c.buf.note(fmt.Sprintf(
+			"supervisor: dropped %d bytes of %s output that had not been read yet; the process is writing faster than the agent can capture it and its capture file had passed the %d-byte ceiling",
+			unread, streamLabel(t.stream), c.rawCap*rawHardCapFactor))
+	}
+}
+
+// streamLabel names a stream the way a reader of the log expects to see it.
+func streamLabel(s sandboxdv1.Stream) string {
+	switch s {
+	case sandboxdv1.Stream_STREAM_STDOUT:
+		return "stdout"
+	case sandboxdv1.Stream_STREAM_STDERR:
+		return "stderr"
+	case sandboxdv1.Stream_STREAM_UNSPECIFIED:
+		return "supervisor"
+	default:
+		return "unknown"
+	}
 }
 
 // rawHardCapFactor is how far past rawCap a capture file may grow before the

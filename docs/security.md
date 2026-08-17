@@ -169,6 +169,10 @@ cannot talk its way past.
   remote trigger.
 - **Caps.** Wall-clock timeout, maximum output bytes, maximum concurrent
   processes, enforced centrally so that no two services can disagree about them.
+  `process.max_concurrent` is one agent-wide number, and both `ExecService` and
+  the process supervisor take their slots from the single limiter built from it:
+  a cap each service counted for itself would let an agent set to 32 run 32 of
+  each.
   Exceeded caps are reported to the caller, never silently applied: truncated
   output is always marked as truncated, and a timeout above the agent's maximum
   is refused with the maximum named rather than quietly shortened.
@@ -176,6 +180,12 @@ cannot talk its way past.
   agent signals the process group — a session on Unix, a job object on
   Windows — not the leader. `sh -c 'make -j8'` is nine processes, and
   signalling one of them leaves eight compilers running with nobody watching.
+- **`exec.enabled: false` covers every way the agent runs a command**, not just
+  `ExecService`. `ProcessService.StartProcess` and `RestartProcess` refuse on
+  such an agent too. A supervised process is a command, and an agent that
+  honoured the flag in one service and not the other would report itself
+  confined through `GetHostInfo` while running
+  `["sh","-c","cat /etc/shadow > /tmp/x"]` on request.
 - **Command policy.** Optional per-agent allow and deny lists, matched on the
   resolved executable path rather than the string as given, so `/bin/../bin/sh`
   does not walk past a rule naming `sh`. The default is allow-all, which is

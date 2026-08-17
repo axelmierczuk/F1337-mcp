@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -193,6 +192,25 @@ func (b *logBuffer) snapshot() ([]logLine, *subscriber) {
 		close(sub.ch)
 	}
 	return b.ringLinesLocked(), sub
+}
+
+// takePending returns and clears the drops a follower has accumulated since
+// the last line it was successfully handed.
+//
+// dropped_before rides on the next line a follower receives, so a gap that
+// opens after the last delivery has nothing to ride on — and that is the
+// largest gap there is, because it is the one the follower never caught up
+// from. A summary that omitted it would report a hole smaller than the hole,
+// which is worse than reporting none: the model would believe the number.
+func (b *logBuffer) takePending(sub *subscriber) uint64 {
+	if sub == nil {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := sub.pending
+	sub.pending = 0
+	return n
 }
 
 // unsubscribe detaches a follower. It is safe to call twice.
@@ -418,17 +436,20 @@ func (r *rotatingFile) close() error {
 
 // segments lists the retained history files oldest first, ending with the live
 // one.
+//
+// .1 is the most recent rotation, so counting down from the retention gives
+// oldest first. Counting down rather than sorting the names: ".10" sorts before
+// ".2" as a string, so a sort would silently hand back the wrong order the day
+// anybody retains ten segments.
 func (r *rotatingFile) segments() []string {
-	var older []string
-	for i := 1; i <= r.retain; i++ {
+	out := make([]string, 0, r.retain+1)
+	for i := r.retain; i >= 1; i-- {
 		p := fmt.Sprintf("%s.%d", r.path, i)
 		if _, err := os.Stat(p); err == nil {
-			older = append(older, p)
+			out = append(out, p)
 		}
 	}
-	// .1 is the most recent rotation, so the numeric order is newest first.
-	sort.Sort(sort.Reverse(sort.StringSlice(older)))
-	return append(older, r.path)
+	return append(out, r.path)
 }
 
 // readSegments parses log lines back out of the on-disk history, oldest first,

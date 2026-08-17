@@ -211,10 +211,13 @@ func policyFor(cfg *Config) (*policy.Policy, error) {
 			DefaultTimeout: cfg.Exec.DefaultTimeout.Duration(),
 			MaxTimeout:     cfg.Exec.MaxTimeout.Duration(),
 			MaxOutputBytes: cfg.Exec.MaxOutputBytes,
-			// The supervisor's cap, applied to every process this agent
-			// starts. Exec is the only service spawning one today; #11 must
-			// take its slots from this same policy rather than counting its
-			// own, or the host runs two limits' worth of processes.
+			// One number for every process this agent starts, whichever
+			// service starts it: ExecService takes a slot per call, the
+			// supervisor takes one per live record. It is spelled under
+			// process.* for historical reasons and is not the supervisor's
+			// alone — a cap each service counted for itself would let an agent
+			// set to 32 run 32 of each, which is how it read before this was
+			// wired through.
 			MaxConcurrent: cfg.Process.MaxConcurrent,
 		},
 	})

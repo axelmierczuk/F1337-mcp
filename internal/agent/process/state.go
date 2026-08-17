@@ -8,11 +8,18 @@ import (
 
 // The supervisor's state machine lives here and nowhere else.
 //
-// Every state assignment in this package goes through record.setState, which
-// consults the table below. The alternative — handlers writing r.state
-// directly, each one confident about the state it is coming from — is how a
-// process ends up READY and dead at the same time: the exit path and the probe
-// path both win a race, and the last writer decides what the model is told.
+// Every state assignment a running process can cause goes through
+// record.setState, which consults the table below. The alternative — handlers
+// writing r.state directly, each one confident about the state it is coming
+// from — is how a process ends up READY and dead at the same time: the exit
+// path and the probe path both win a race, and the last writer decides what the
+// model is told.
+//
+// There is exactly one other writer, record.restoreState, and it is not a
+// transition: adoption reconstructs a record in whatever state the previous
+// agent left it, which is a starting position rather than a move from one. It
+// is called from adopt.go and nowhere else, and it is why ORPHANED needs no
+// inbound edge in the table below.
 //
 //	                ┌─────────┐
 //	                │ STARTING│ ──probe passes──► READY ──┐

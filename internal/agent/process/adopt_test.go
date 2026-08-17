@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,7 +29,7 @@ import (
 // kills the survivors itself.
 func newRawSupervisor(t *testing.T, dir string) *Supervisor {
 	t.Helper()
-	sup, err := newSupervisor(testConfig(dir), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sup, err := newSupervisor(testConfig(dir), testPolicy(t, 16), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sup.Close() })
 	return sup
@@ -102,6 +103,118 @@ func lastTick(t *testing.T, r *record) int {
 	return highest
 }
 
+// TestCloseRecordsTheOffsetsTheTailersActuallyReached.
+//
+// Close stops the tailers and waits for them, and a read already in flight
+// finishes inside that wait. An offset read before it therefore names a
+// position the agent has already gone past, and persisting it tells the next
+// agent to resume from bytes this one has already turned into log lines — so
+// a re-adopted process's history opens with a duplicate of its own last few
+// hundred lines, which is precisely the continuity #15 is about.
+//
+// The invariant is one-directional — what is persisted must never be behind
+// what was captured — but the window it is violated in is narrow: the tailer
+// advances its offset before it turns the bytes into lines, so a snapshot
+// taken during the read is short by a chunk while one taken during the
+// conversion is not. Measured against the unfixed code that is roughly one
+// shutdown in eight, which is why this runs the shutdown many times rather than
+// once. One violation in the batch fails it, and the magnitude is a whole
+// 32 KiB read rather than the trailing byte a legitimate mid-line stop leaves.
+func TestCloseRecordsTheOffsetsTheTailersActuallyReached(t *testing.T) {
+	t.Parallel()
+
+	// Enough shutdowns that a narrow window is not missed. No child process is
+	// involved in any of them, so they are cheap: what is under test is the
+	// agent's own bookkeeping when it stops reading, and a real process only
+	// makes the timing less controlled.
+	for i := range 128 {
+		persisted, captured := closeMidDrain(t, i)
+		require.Positive(t, captured, "the tailer should have captured something to be wrong about")
+		// The -1 covers a final line the tailer flushed without its newline,
+		// which is how a read that lands mid-line ends. What this guards
+		// against is a whole read chunk out, not a byte.
+		require.GreaterOrEqual(t, persisted, captured-1,
+			"shutdown %d persisted a stdout offset %d bytes behind the output it had already captured (%d); the next agent replays the difference and the re-adopted log opens with a duplicate",
+			i, captured-persisted, captured)
+	}
+}
+
+// closeMidDrain runs one agent shutdown with the tailer part-way through a
+// backlog, and reports the offset it persisted against the output it had
+// already turned into log lines.
+func closeMidDrain(t *testing.T, seq int) (persistedOffset, captured int64) {
+	t.Helper()
+	dir := t.TempDir()
+
+	cfg := testConfig(dir)
+	cfg.maxLogBytes = 64 << 20  // no rotation, so the history below is complete
+	cfg.rawCapBytes = 512 << 20 // and no truncation of the transport file either
+
+	sup, err := newSupervisor(cfg, testPolicy(t, 16), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+
+	id := fmt.Sprintf("closed-mid-drain-%04d", seq)
+	recDir, err := sup.store.dir(id)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(recDir, 0o700))
+
+	// The capture files a spawn would have left, pre-filled with a backlog
+	// larger than the tailer works through in the moment it takes Close to
+	// reach it. The tailer is therefore mid-file rather than idle at EOF when
+	// the shutdown arrives, which is the state it is in on a busy host and the
+	// only state in which the ordering here is observable at all.
+	outPath, errPath := rawPaths(recDir)
+	require.NoError(t, os.WriteFile(errPath, nil, 0o600))
+	raw, err := os.Create(outPath) //nolint:gosec // the test's own temp directory
+	require.NoError(t, err)
+	w := bufio.NewWriterSize(raw, 1<<20)
+	line := []byte(strings.Repeat("y", 120) + "\n")
+	for written := 0; written < 1<<20; written += len(line) {
+		_, err := w.Write(line)
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Flush())
+	require.NoError(t, raw.Close())
+
+	file, err := newRotatingFile(filepath.Join(recDir, "log.jsonl"), cfg.maxLogBytes, cfg.retainSegments)
+	require.NoError(t, err)
+
+	r := newRecord(sup, id, recDir)
+	r.buf = newLogBuffer(cfg.ringBufferLines, file)
+	r.name, r.argv = id, []string{"pre-filled"}
+	r.state = sandboxdv1.ProcessState_PROCESS_STATE_RUNNING
+	capt, err := newCapture(recDir, r.buf, [2]int64{}, cfg.rawCapBytes,
+		cfg.tailPollMin, cfg.tailPollMax, cfg.drainWindow)
+	require.NoError(t, err)
+	r.cap = capt
+
+	sup.mu.Lock()
+	sup.records[id] = r
+	sup.order = append(sup.order, id)
+	sup.mu.Unlock()
+	capt.start(make(chan struct{}))
+
+	waitFor(t, 20*time.Second, "the tailer to start on the backlog", func() bool {
+		_, _, produced := r.buf.stats()
+		return produced > 0
+	})
+	require.NoError(t, sup.Close())
+
+	data, err := os.ReadFile(filepath.Join(recDir, recordFileName)) //nolint:gosec // the test's own temp directory
+	require.NoError(t, err)
+	var p persisted
+	require.NoError(t, json.Unmarshal(data, &p))
+
+	lines, err := readSegments(r.buf.segments(), 0)
+	require.NoError(t, err)
+	for _, l := range lines {
+		if l.Stream == sandboxdv1.Stream_STREAM_STDOUT {
+			captured += int64(len(l.Text)) + 1 // plus the newline the tailer consumed
+		}
+	}
+	return p.CaptureOffsets[0], captured
+}
+
 // TestPIDReuseProducesOrphanedAndNoSignal is the test #15 exists for.
 //
 // The record names a pid that now belongs to an unrelated process. Adopting it
@@ -120,10 +233,7 @@ func TestPIDReuseProducesOrphanedAndNoSignal(t *testing.T) {
 	stranger.Env = helperEnviron()
 	require.NoError(t, stranger.Start())
 	strangerPID := stranger.Process.Pid
-	t.Cleanup(func() {
-		killPID(t, strangerPID)
-		_ = stranger.Wait()
-	})
+	t.Cleanup(func() { killAndReap(t, stranger) })
 
 	// Its real start identity, so the fabricated record can be given a
 	// different one — which is exactly what a reused pid looks like.
@@ -218,10 +328,7 @@ func TestAdoptionRefusesARecordWithNoStartIdentity(t *testing.T) {
 	stranger := exec.Command(exe, "-helper", "sleep") //nolint:gosec // the command is this test binary
 	stranger.Env = helperEnviron()
 	require.NoError(t, stranger.Start())
-	t.Cleanup(func() {
-		killPID(t, stranger.Process.Pid)
-		_ = stranger.Wait()
-	})
+	t.Cleanup(func() { killAndReap(t, stranger) })
 
 	st, err := newStore(dir)
 	require.NoError(t, err)
@@ -311,9 +418,15 @@ func TestStateFileIsAlwaysParseable(t *testing.T) {
 		}
 	}()
 
+	// Read until it has seen the file whole enough times to mean something,
+	// not for a fixed second. A second is a machine-speed assertion: on a
+	// loaded runner it buys fifty reads rather than a thousand, and the test
+	// then fails for being on a slow machine rather than for observing half a
+	// record — which is the only thing it is actually about.
+	const wantReads = 100
 	reads, refused := 0, 0
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.Now().Add(30 * time.Second)
+	for reads < wantReads && time.Now().Before(deadline) {
 		data, err := os.ReadFile(path) //nolint:gosec // the test's own temp directory
 		if err != nil {
 			// The open failed. That is not the failure this test is about, and
@@ -336,7 +449,7 @@ func TestStateFileIsAlwaysParseable(t *testing.T) {
 	t.Logf("%d complete reads, %d opens refused while a rename was in flight", reads, refused)
 	close(stop)
 	writer.Wait()
-	require.Greater(t, reads, 100, "the test should have observed the file many times")
+	require.GreaterOrEqual(t, reads, wantReads, "the test should have observed the file many times")
 
 	// And no temp files are left lying around for the loader to trip over.
 	entries, err := os.ReadDir(recordDir)

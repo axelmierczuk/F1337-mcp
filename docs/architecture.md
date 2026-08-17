@@ -149,9 +149,24 @@ lifetime is not useful.
 **Process groups.** On Unix a child is placed in its own session and process
 group, and signals go to the group. Signalling the leader alone routinely leaves
 orphans — killing `npm run dev` without its group leaves the bundler holding the
-port. On Windows the equivalent is a job object with
-`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; terminating `node.exe` alone leaves the
-tree running.
+port. On Windows the equivalent is a named job object; terminating `node.exe`
+alone leaves the tree running. The job is deliberately *not*
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — that flag kills every process in the job
+when the last handle closes, which is exactly what an agent upgrade does, and it
+would take down every dev server on the host at each restart. The name is what
+lets a restarted agent reopen the job instead. One-shot `exec` is the opposite
+case and does want kill-on-close; `platform.NewProcessGroup` refuses the two
+together rather than resolving them.
+
+**Concurrency.** `process.max_concurrent` is an agent-wide cap. Every service
+that spawns a process takes a slot from one shared limiter, because a limit each
+service enforced from its own count would not be a limit on the agent: two
+services each allowing 32 is a host running 64.
+
+**Command execution.** Starting a supervised process runs a command, so
+`ProcessService` is refused on an agent configured with `exec.enabled: false` —
+the one configuration in which `allowed_roots` is a real boundary. See
+[security.md](security.md).
 
 **Re-adoption after restart.** The supervisor persists
 `{process_id, pid, start_time, argv_hash}`. On startup it re-adopts a process

@@ -37,7 +37,7 @@ func TestNoGoroutineLeakAcrossTheProcessLifecycle(t *testing.T) {
 func TestNoGoroutineLeakFromProbesAndFollows(t *testing.T) {
 	leakCheck(t)
 
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxFollowDuration = 200 * time.Millisecond })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 200 * time.Millisecond })
 
 	for i := range 5 {
 		probe := testProbe(probeLogPattern, 300*time.Millisecond)
@@ -71,7 +71,9 @@ func TestNoGoroutineLeakFromProbesAndFollows(t *testing.T) {
 func TestNoGoroutineLeakAcrossRestarts(t *testing.T) {
 	leakCheck(t)
 
-	ts := newTestSupervisor(t)
+	// The stability window out of reach, so a run that happens to last on a
+	// loaded runner does not reset the budget this waits to see exhausted.
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.stabilityWindow = time.Hour })
 
 	spec := ts.helperSpec("restarting", "exit", "1", "20")
 	spec.restartPolicy = sandboxdv1.RestartPolicy_RESTART_POLICY_ALWAYS

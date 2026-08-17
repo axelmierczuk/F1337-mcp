@@ -23,6 +23,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // The tests supervise the test binary itself.
@@ -42,7 +43,38 @@ func TestMain(m *testing.M) {
 		helperMain()
 		return
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	// The package-wide reaping assertion, and the one that does not depend on
+	// test order. TestNoZombiesAfterAHundredShortLivedStarts can only see a
+	// leak that happens to overlap it; this runs once, after every test and
+	// every cleanup, so a child that any test in the package left unreaped
+	// fails the run wherever it was leaked from.
+	if zombies := awaitNoZombieChildren(10 * time.Second); len(zombies) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"FAIL: %d zombie children left in the process table after the suite: %v\n"+
+				"a test started a process and never waited on it; killing a child does not reap it\n",
+			len(zombies), zombies)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+// awaitNoZombieChildren waits for this process's zombie children to be reaped
+// and returns whatever is left.
+//
+// The wait is for the supervisor's own reapers: a process killed in a test
+// cleanup is a zombie for as long as it takes the goroutine blocked in
+// cmd.Wait to be scheduled. A leak, by contrast, has nothing that will ever
+// collect it, so it survives the whole window.
+func awaitNoZombieChildren(timeout time.Duration) []int {
+	deadline := time.Now().Add(timeout)
+	for {
+		zombies := zombieChildPIDs()
+		if len(zombies) == 0 || time.Now().After(deadline) {
+			return zombies
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // helperMain is the entry point of a supervised child. os.Args after the
@@ -82,14 +114,28 @@ func helperMain() {
 		time.Sleep(durationArg(args, 4, 0))
 
 	case "spew":
-		// spew <count> — as fast as the pipe will take it, then exit. The
-		// backpressure test asserts this still exits promptly.
+		// spew <count> [gapMs] [rounds] — count lines as fast as the pipe will
+		// take them, then exit. The backpressure test asserts this still exits
+		// promptly.
+		//
+		// rounds and the gap are for the tests that need the flood to still be
+		// flooding while they look at it: one round finishes in milliseconds,
+		// and a follower asserting that it fell behind cannot fall behind a
+		// process that has already finished. Defaults leave the one-shot
+		// behaviour exactly as it was.
 		count, _ := strconv.Atoi(argAt(args, 1, "1000"))
+		gap := durationArg(args, 2, 0)
+		rounds, _ := strconv.Atoi(argAt(args, 3, "1"))
 		w := bufio.NewWriterSize(os.Stdout, 64*1024)
-		for i := range count {
-			fmt.Fprintf(w, "line %d aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", i)
+		for round := range max(rounds, 1) {
+			for i := range count {
+				fmt.Fprintf(w, "line %d aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", round*count+i)
+			}
+			_ = w.Flush()
+			if gap > 0 {
+				time.Sleep(gap)
+			}
 		}
-		_ = w.Flush()
 
 	case "streams":
 		// streams <gapMs> <pairs> — interleaves stdout and stderr, leaving a gap
@@ -268,17 +314,27 @@ type testSupervisor struct {
 	dir string
 }
 
-func newTestSupervisor(t *testing.T, tweak ...func(*supervisorConfig)) *testSupervisor {
+// testSupervisorOptions is everything a test tunes.
+//
+// maxConcurrent is not a supervisorConfig field: the cap is agent-wide and
+// lives in the shared policy limiter, so it sits here and builds the limiter
+// the supervisor is handed, rather than being a second number the supervisor
+// could enforce on its own.
+type testSupervisorOptions struct {
+	supervisorConfig
+	maxConcurrent int
+}
+
+func newTestSupervisor(t *testing.T, tweak ...func(*testSupervisorOptions)) *testSupervisor {
 	t.Helper()
 	return newTestSupervisorIn(t, t.TempDir(), tweak...)
 }
 
-func newTestSupervisorIn(t *testing.T, dir string, tweak ...func(*supervisorConfig)) *testSupervisor {
+func newTestSupervisorIn(t *testing.T, dir string, tweak ...func(*testSupervisorOptions)) *testSupervisor {
 	t.Helper()
 
 	cfg := supervisorConfig{
 		stateDir:           dir,
-		maxConcurrent:      16,
 		maxLogBytes:        256 * 1024,
 		ringBufferLines:    200,
 		defaultGracePeriod: 300 * time.Millisecond,
@@ -302,11 +358,13 @@ func newTestSupervisorIn(t *testing.T, dir string, tweak ...func(*supervisorConf
 
 		defaultTailLines: 200,
 	}
+	opts := testSupervisorOptions{supervisorConfig: cfg, maxConcurrent: 16}
 	for _, fn := range tweak {
-		fn(&cfg)
+		fn(&opts)
 	}
 
-	sup, err := newSupervisor(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sup, err := newSupervisor(opts.supervisorConfig, testPolicy(t, opts.maxConcurrent),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 
 	ts := &testSupervisor{Supervisor: sup, t: t, dir: dir}
@@ -326,9 +384,18 @@ func newTestSupervisorIn(t *testing.T, dir string, tweak ...func(*supervisorConf
 		var killed []int
 		for _, r := range sup.snapshotRecords() {
 			if isLive(r.currentState()) {
-				_ = sup.stopRecord(r, 200*time.Millisecond, true)
+				_ = sup.stopRecord(r, 200*time.Millisecond)
 			}
-			if pid := int(r.status().GetPid()); pid > 0 && pidAlive(pid) {
+			// Never a pid whose process is known to have exited. The record
+			// keeps the pid of a finished run on purpose — it is what a caller
+			// diagnosing a crash reads — and a suite that starts hundreds of
+			// short-lived helpers is exactly where a pid gets recycled. Killing
+			// on "the pid answers" would then have the test kill a stranger,
+			// which is the mistake the whole package is written to avoid.
+			r.mu.Lock()
+			exited := !r.exitedAt.IsZero()
+			r.mu.Unlock()
+			if pid := int(r.status().GetPid()); pid > 0 && !exited && pidAlive(pid) {
 				killPID(t, pid)
 				killed = append(killed, pid)
 			}
@@ -551,8 +618,50 @@ func leakCheck(t *testing.T) {
 // stop on their own schedule rather than on the test's.
 const goroutineSlack = 4
 
+// testPolicy builds the shared agent-wide limiter a supervisor takes its
+// concurrency slots from.
+func testPolicy(t *testing.T, maxConcurrent int) *policy.Policy {
+	t.Helper()
+	p, err := policy.New(policy.Config{Caps: policy.Caps{MaxConcurrent: maxConcurrent}})
+	require.NoError(t, err)
+	return p
+}
+
 // pidAlive reports whether a pid still names a live process.
 func pidAlive(pid int) bool { return platform.ProcessExists(pid) }
+
+// pidRunning reports whether a pid names a process that is still running, as
+// opposed to one that merely still holds its pid.
+//
+// A killed process that nobody has collected is a zombie, and a zombie answers
+// every liveness question the portable API can ask — platform.ProcessExists
+// says yes, and it is right to, because a reused pid is exactly what it exists
+// to catch. "No survivors" means no running survivors, so the survivor checks
+// use this.
+func pidRunning(pid int) bool { return pidAlive(pid) && !pidIsZombie(pid) }
+
+// killAndReap stops a process the test started itself, and collects it.
+//
+// The Wait is the load-bearing half. Killing a child does not remove it from
+// the process table; it becomes a zombie until its parent collects the exit
+// status. platform.ProcessExists — which pidAlive is — deliberately reports a
+// zombie as existing, because for the pid-reuse guard it does still hold the
+// pid. So killPID's awaitGone cannot ever see a child of this test binary go
+// away, spins out its entire timeout, and for all of that time the process
+// table holds a zombie that TestNoZombiesAfterAHundredShortLivedStarts,
+// running in parallel, is right to fail on.
+//
+// Anything this suite spawns with exec.Command must go through here.
+// Supervised processes are different: the supervisor's own monitor is blocked
+// in cmd.Wait for each of them, so killPID is enough.
+func killAndReap(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
 
 // killPID stops a process the test started outside a supervisor's care, and
 // waits for it to be gone.
@@ -561,6 +670,10 @@ func pidAlive(pid int) bool { return platform.ProcessExists(pid) }
 // and the wait matters most there: TerminateProcess returns before the handles
 // are released, and the temp directory the process was writing into cannot be
 // removed until they are.
+//
+// Only for a process something else will reap — a supervised child, whose
+// monitor is sitting in cmd.Wait. For one this test started itself, use
+// killAndReap.
 func killPID(t *testing.T, pid int) {
 	t.Helper()
 	if pid <= 0 {
@@ -574,11 +687,18 @@ func killPID(t *testing.T, pid int) {
 	awaitGone(pid, 10*time.Second)
 }
 
-// awaitGone waits for a pid to leave the process table.
+// awaitGone waits for a pid to stop running.
+//
+// pidRunning rather than pidAlive, so a child whose collector has not run yet
+// does not hold this for the whole timeout. What the wait is for is the Windows
+// case — TerminateProcess returns before the handles are released, and the temp
+// directory the process was writing into cannot be removed until they are — and
+// Windows has no zombies, so nothing is lost there. On Unix a zombie has
+// already released everything it held.
 func awaitGone(pid int, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !pidAlive(pid) {
+		if !pidRunning(pid) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)

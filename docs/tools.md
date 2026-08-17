@@ -154,6 +154,10 @@ Returns the process status, and `ready_error` if the probe did not pass in time.
 A process that fails its probe is left running so its logs can be read; stopping
 it is the caller's decision.
 
+Refused with `PermissionDenied` on an agent configured with
+`exec.enabled: false`: starting a supervised process runs a command, and that
+is the one configuration where `allowed_roots` is a real boundary.
+
 **Use a ready probe.** Without one, "started" only means "spawned". A dev server
 that needs eight seconds to bind will refuse the connection the model makes one
 second later, and the model will conclude the server is broken.

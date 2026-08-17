@@ -105,16 +105,23 @@ func TestWholeTreeIsKilled(t *testing.T) {
 
 	// Both are running before the stop, so the assertion afterwards is about
 	// the stop and not about a grandchild that never started.
-	require.True(t, pidAlive(leader), "the leader should be running")
-	require.True(t, pidAlive(grandchild), "the grandchild should be running")
+	require.True(t, pidRunning(leader), "the leader should be running")
+	require.True(t, pidRunning(grandchild), "the grandchild should be running")
 	t.Cleanup(func() { killPID(t, grandchild) })
 
 	_, err = ts.gracefulStop(r, 300*time.Millisecond, true, true)
 	require.NoError(t, err)
 
-	waitFor(t, 10*time.Second, "the leader to be gone", func() bool { return !pidAlive(leader) })
+	// pidRunning, not pidAlive: a killed-but-uncollected process answers every
+	// portable liveness question forever, so "it stopped answering" is not the
+	// same claim as "it is no longer running" — and the second is the one #14
+	// asks for. The leader is this test binary's own child and is collected by
+	// the supervisor's monitor; the grandchild is reparented on the leader's
+	// death and collected by whatever init this host runs, which on a container
+	// with no reaper is nothing at all.
+	waitFor(t, 10*time.Second, "the leader to be gone", func() bool { return !pidRunning(leader) })
 	waitFor(t, 10*time.Second, "the grandchild to be gone — no survivors",
-		func() bool { return !pidAlive(grandchild) })
+		func() bool { return !pidRunning(grandchild) })
 }
 
 // TestSignalDoesNotTrustACachedPID is the pid-reuse guard on the signalling
@@ -275,9 +282,17 @@ func TestAlwaysRestartsACleanExitToo(t *testing.T) {
 // the timer.
 func TestBackoffGrowsBetweenRestarts(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) {
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) {
 		// High enough that the cap is not what the test ends up measuring.
 		c.maxRestartBackoff = 10 * time.Second
+		// And out of reach, so the counter reset is not either. A run that
+		// lasts longer than the stability window resets the budget, and on a
+		// loaded runner a race-instrumented helper takes long enough to start
+		// and exit to cross a window measured in hundreds of milliseconds —
+		// at which point the counter this test is waiting on goes back to zero
+		// and it waits out its deadline for a number it will never see. The
+		// reset has its own test; this one is about the backoff.
+		c.stabilityWindow = time.Hour
 	})
 
 	spec := ts.helperSpec("backing-off", "exit", "1")
@@ -386,7 +401,11 @@ func TestBackoffForDoublesAndCaps(t *testing.T) {
 
 func TestMaxRestartsIsHonouredThenTheSupervisorGivesUp(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t)
+	// The stability window out of reach: a run that outlasts it resets the
+	// budget, and on a loaded runner these runs do. That is the reset working,
+	// not the budget failing — it has its own test — but it makes this one
+	// watch the supervisor restart a process it had just given up on.
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.stabilityWindow = time.Hour })
 
 	spec := ts.helperSpec("doomed", "exit", "1")
 	spec.restartPolicy = sandboxdv1.RestartPolicy_RESTART_POLICY_ALWAYS
@@ -413,7 +432,7 @@ func TestMaxRestartsIsHonouredThenTheSupervisorGivesUp(t *testing.T) {
 // means it eventually stays down for no reason anyone can see.
 func TestRestartCounterResetsAfterSustainedUptime(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.stabilityWindow = 150 * time.Millisecond })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.stabilityWindow = 150 * time.Millisecond })
 
 	// Each run lasts longer than the stability window, so every exit resets the
 	// counter and the budget of two is never exhausted.
@@ -548,7 +567,7 @@ func logTexts(r *record) []string {
 // about to start.
 func TestRestartStandsDownAPendingPolicyRestart(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) {
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) {
 		// Long enough that the explicit restart lands squarely inside the
 		// backoff rather than after it.
 		c.maxRestartBackoff = 3 * time.Second
