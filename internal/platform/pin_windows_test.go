@@ -29,7 +29,7 @@ func TestPinLeader_RefusesAPidThatNoLongerNamesTheSameProcess(t *testing.T) {
 
 	// A live process standing in for whoever received a recycled pid. Nothing
 	// in this test adopted it, and it must be running when the test ends.
-	cmd := exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+	cmd := exec.Command("ping.exe", "-n", "60", "127.0.0.1")
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
@@ -54,7 +54,7 @@ func TestPinLeader_RefusesAPidThatNoLongerNamesTheSameProcess(t *testing.T) {
 func TestPinLeader_AcceptsTheProcessItStatted(t *testing.T) {
 	t.Parallel()
 
-	cmd := exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+	cmd := exec.Command("ping.exe", "-n", "60", "127.0.0.1")
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()

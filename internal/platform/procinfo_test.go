@@ -29,12 +29,17 @@ func sleeper(t *testing.T) int {
 // the last handle closes — os/exec holds one until Wait returns. Either way a
 // killed process keeps answering "I exist", and a test that skips the wait is
 // asserting against a pid that cannot yet have been released.
+//
+// The Windows side runs ping.exe directly rather than through `cmd /c`, which
+// would be two processes and would leave the ping running after the cleanup
+// killed the pid this returns. os/exec points a nil Stdout at NUL, so nothing
+// is lost with the redirection.
 func sleeperWithExit(t *testing.T) (pid int, exited <-chan struct{}) {
 	t.Helper()
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+		cmd = exec.Command("ping.exe", "-n", "60", "127.0.0.1")
 	} else {
 		cmd = exec.Command("/bin/sh", "-c", "sleep 60")
 	}

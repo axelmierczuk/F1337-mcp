@@ -67,7 +67,7 @@ func TestTerminate_UnpinnedLeaderIsNeverResolvedByPid(t *testing.T) {
 
 	// A live process this group never adopted, standing in for whoever holds a
 	// recycled pid.
-	cmd := exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+	cmd := exec.Command("ping.exe", "-n", "60", "127.0.0.1")
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()

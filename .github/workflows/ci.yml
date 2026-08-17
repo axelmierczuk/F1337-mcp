@@ -55,6 +55,12 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # TEMPORARY — remove before merging. Three back-to-back runs of the
+      # package whose Windows suite was flaking, so a single green ./... pass
+      # is not the whole evidence for the fixture change in this PR.
+      - name: Stress internal/platform (temporary)
+        if: matrix.os == 'windows-latest'
+        run: go test -race -count=3 ./internal/platform/
 
   lint:
     name: Lint
