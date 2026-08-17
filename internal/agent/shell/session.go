@@ -338,31 +338,48 @@ func (s *Service) await(ctx context.Context, sess *session, waited <-chan error)
 // reap ends a session that is still running, and reports whether the command
 // was waited for.
 //
-// Hang up first, then kill. The hangup is what an interactive shell understands
-// — on Unix, closing the terminal sends SIGHUP to its foreground process group,
-// and a shell that receives one passes it on to its own jobs, which are in
-// process groups this agent cannot name. The kill is what makes the guarantee
-// unconditional for everything still in the session's own group. Neither alone
-// is enough: the hangup can be ignored, and the group signal cannot reach a job
-// the shell put in a group of its own.
+// Hang up, then kill the tree — both, always, and in that order.
+//
+// The hangup is what an interactive shell understands. On Unix, closing the
+// terminal sends SIGHUP to its foreground process group, and a shell that
+// receives one passes it on to its own jobs, which sit in process groups this
+// agent cannot name. It is the only step that reaches them.
+//
+// The kill is unconditional even when the hangup already ended the session's
+// own leader, and that is the correction to an earlier version of this
+// function. Stopping there is defensible on Unix, where the deferred sweep
+// signals the group anyway; on Windows it left the guarantee unmet. Closing a
+// pseudo-console ends the processes attached to it, and a grandchild that never
+// attached to one — anything the session started that is not a console
+// application — has nothing to end it. The job object is what does, and
+// skipping TerminateJobObject because the leader happened to exit first is
+// exactly how "closing the stream kills the whole tree" becomes a claim rather
+// than a fact.
 //
 // A job the operator deliberately detached — `nohup`, `disown`, `setsid` —
-// survives both, exactly as it does over ssh. That is a property of what they
-// asked for rather than a gap in this teardown.
+// survives, exactly as it does over ssh. That is a property of what they asked
+// for rather than a gap in this teardown.
 func (s *Service) reap(sess *session, group *platform.ProcessGroup, waited <-chan error) bool {
 	if err := sess.closeTTY(); err != nil {
 		s.log.Debug("closing the session terminal reported an error; the session is being killed anyway", "error", err)
 	}
 
+	reaped := false
 	select {
 	case <-waited:
-		return true
+		reaped = true
 	case <-time.After(hangupGrace):
 	}
 
+	// ErrProcessNotFound is the ordinary answer for a group the hangup already
+	// emptied, and is not a failure.
 	if err := group.Kill(); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
 		s.log.Warn("could not kill the session's process group", "error", err)
 	}
+	if reaped {
+		return true
+	}
+
 	select {
 	case <-waited:
 		return true

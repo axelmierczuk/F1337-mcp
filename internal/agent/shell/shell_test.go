@@ -344,7 +344,7 @@ func TestSession_ClosingTheStreamKillsTheWholeTree(t *testing.T) {
 
 	for _, pid := range pids {
 		waitFor(t, "pid "+strconv.Itoa(pid)+" to be gone", func() (bool, string) {
-			if !platform.ProcessExists(pid) {
+			if !processRunning(pid) {
 				return true, ""
 			}
 			return false, "pid " + strconv.Itoa(pid) + " outlived the session that started it"
@@ -382,7 +382,7 @@ func TestSession_AProgramThatIgnoresTheHangupIsStillKilled(t *testing.T) {
 	assert.True(t, exit.GetIdleTimeout())
 
 	waitFor(t, "the process that ignored its hangup to be killed", func() (bool, string) {
-		if !platform.ProcessExists(pid) {
+		if !processRunning(pid) {
 			return true, ""
 		}
 		return false, "pid " + strconv.Itoa(pid) + " ignored the hangup and survived the kill that should have followed"
