@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package sandboxd.v1;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
+
+// ShellService carries one interactive terminal session on the sandbox.
+//
+// It is distinct from ExecService, and the difference is the terminal.
+// ExecService runs a command to completion with no tty: stdout and stderr stay
+// separable, output is captured rather than rendered, and nothing on the far
+// end can prompt. That is right for automation and wrong for `top`, `vi`, a
+// REPL, or anything that reads a password — all of which check isatty and
+// behave differently, or refuse, without one.
+//
+// This service grants no new reach. Anyone who can call ExecService can already
+// run whatever they like on the host; a shell is the most convenient spelling
+// of a capability they had. It is the most convenient one, though, which is
+// why every session is recorded — see docs/security.md.
+service ShellService {
+  // Shell allocates a pseudo-terminal, starts a command attached to it, and
+  // carries the session until the command exits or the stream ends.
+  //
+  // Closing the stream kills the session's whole process tree. A shell is a
+  // process spawner by definition, so anything less would leave the operator's
+  // background jobs running on a host with nobody attached to them.
+  rpc Shell(stream ShellRequest) returns (stream ShellResponse);
+}
+
+message ShellRequest {
+  oneof event {
+    // Must be the first message on the stream, and may not be sent again.
+    ShellOpen open = 1;
+
+    // Bytes from the operator's keyboard, forwarded to the terminal verbatim.
+    //
+    // Control characters included: in raw mode Ctrl-C is byte 0x03 on this
+    // stream rather than a signal on the client, and the terminal's line
+    // discipline on this host is what turns it into a SIGINT for the remote
+    // foreground process group. That is the only arrangement in which
+    // interrupting `sleep 100` inside the remote shell interrupts the sleep
+    // and not the shell — and in which the client survives it.
+    bytes data = 2;
+
+    // A new window size, applied to the pseudo-terminal.
+    ShellSize resize = 3;
+  }
+}
+
+message ShellOpen {
+  // Command to run, argv[0] first. Empty means this host's login shell, which
+  // is the ordinary case: an operator asking for a shell has not chosen one.
+  repeated string argv = 1;
+
+  // Working directory. Empty means the agent's default, which is the home
+  // directory of the account the daemon runs as. As with ExecService there is
+  // no path confinement here: a session that can run commands reaches whatever
+  // the account reaches.
+  string working_dir = 2;
+
+  // Environment variables to set, as KEY=VALUE, applied on top of the agent's
+  // documented base environment. The daemon's own environment is never
+  // inherited wholesale.
+  //
+  // TERM belongs here, and matters more than it looks: a full-screen program
+  // decides which escape sequences to emit from it, so a session that does not
+  // carry the client's terminal type renders as well as `TERM=dumb` allows.
+  repeated string env = 3;
+
+  // The client's window size at the moment it connected, applied before the
+  // command starts so the shell's first prompt is drawn at the right width.
+  ShellSize size = 4;
+}
+
+// ShellSize is a terminal window in character cells.
+//
+// It is its own message rather than two fields on a resize event because it is
+// the same value at open time and at every resize afterwards, and because a
+// resize is applied with one ioctl that takes both dimensions: a protocol that
+// let them arrive separately would have a state in which the terminal is one
+// message wide and another message tall.
+message ShellSize {
+  uint32 columns = 1;
+  uint32 rows = 2;
+}
+
+message ShellResponse {
+  oneof event {
+    // Sent once, before any output, when the session is running.
+    ShellOpened opened = 1;
+
+    // Terminal output, forwarded verbatim.
+    //
+    // One stream, not two. A pseudo-terminal merges stdout and stderr by
+    // definition — they are the same file description on the far side — so
+    // unlike ExecService there is nothing here to label, and pretending
+    // otherwise would mean inventing a distinction the kernel has already
+    // thrown away.
+    bytes data = 2;
+
+    // Terminal event; always the last message on the stream.
+    ShellExit exit = 3;
+  }
+}
+
+message ShellOpened {
+  // Name of the allocated terminal — the slave device on Unix, a fixed string
+  // on Windows, where a ConPTY has no name.
+  string terminal = 1;
+  // Process id of the session leader on the sandbox, for an operator matching
+  // a session against what the host reports about itself.
+  int32 pid = 2;
+  // The command actually started, after the login shell default was applied.
+  repeated string argv = 3;
+}
+
+message ShellExit {
+  // Exit code of the session's command. Meaningful only when signaled is
+  // false.
+  int32 exit_code = 1;
+  // True when the command was terminated by a signal rather than exiting.
+  bool signaled = 2;
+  // Signal name that terminated it, for example "SIGHUP".
+  string signal = 3;
+  // True when the agent ended the session because it had been idle for longer
+  // than the configured limit. The session's tree is killed either way; this
+  // is what tells the operator the end was the agent's decision.
+  bool idle_timeout = 4;
+  // How long the session ran.
+  google.protobuf.Duration duration = 5;
+}
