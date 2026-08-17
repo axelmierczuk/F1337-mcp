@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // Deps is everything the daemon hands a service implementation. It is passed
@@ -47,6 +48,32 @@ type Deps struct {
 	// Config.AllowedRoots as an answer about what is enforced — ask
 	// Jail.Confined() and Jail.Roots(). That is also what GetHostInfo reports.
 	Jail *jail.Jail
+
+	// Policy is the command policy and the resource caps, built once per
+	// daemon from the exec.* and process.* configuration.
+	//
+	// It is shared rather than per-service because a cap that each service
+	// enforced from its own copy would not be a cap on the agent: two services
+	// each holding "at most 32 concurrent processes" is a host running 64.
+	// Take a concurrency slot with Policy.Acquire and release it when the
+	// process is gone.
+	//
+	// The command lists are guardrails, not a boundary — see
+	// internal/security/policy. Never describe them to a caller as
+	// confinement.
+	Policy *policy.Policy
+
+	// Audit is the append-only record every service that runs a command,
+	// writes a file, or signals a process appends to. Never nil; a daemon with
+	// audit disabled hands out one that drops writes, so a call site needs no
+	// conditional.
+	//
+	// One per daemon, deliberately: rotation renames the file, so a second
+	// instance would keep appending to a segment the first has already rotated
+	// away. Failure to write is the caller's decision to act on — see
+	// Audit.Required — and the record must never carry environment values,
+	// file contents, or command output.
+	Audit *policy.Audit
 
 	// Log is the daemon logger. Services should scope it, conventionally with
 	// Log.With("service", "<name>").

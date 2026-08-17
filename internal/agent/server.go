@@ -18,6 +18,7 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // DefaultDrainTimeout bounds how long shutdown waits for in-flight RPCs.
@@ -93,6 +94,14 @@ func New(opts Options) (*Server, error) {
 		return nil, errors.New("agent: Options.Log is required")
 	}
 
+	// Load applies the documented defaults, but a Config built in memory has
+	// never been through it — and the caps are the part that matters: a zero
+	// max_output_bytes is not "no output" but "no cap", and a zero
+	// default_timeout is a command with no wall-clock limit at all. Applying
+	// them here means every daemon enforces the same limits however its config
+	// was assembled. It only ever fills in a field the config left unset.
+	opts.Config.applyDefaults()
+
 	tlsConf, err := ServerTLSConfig(opts.Config)
 	if err != nil {
 		return nil, err
@@ -110,9 +119,17 @@ func New(opts Options) (*Server, error) {
 		drain = DefaultDrainTimeout
 	}
 
+	commandPolicy, err := policyFor(opts.Config)
+	if err != nil {
+		return nil, err
+	}
+	auditLog := auditFor(opts.Config, opts.Log)
+
 	deps := Deps{
 		Config:    opts.Config,
 		Jail:      jailed,
+		Policy:    commandPolicy,
+		Audit:     auditLog,
 		Log:       opts.Log,
 		Status:    NewStatus(),
 		Version:   opts.Version,
@@ -169,6 +186,68 @@ func New(opts Options) (*Server, error) {
 		services: services,
 		drain:    drain,
 	}, nil
+}
+
+// policyFor builds the one command policy every service shares.
+//
+// A malformed rule aborts startup rather than being dropped. An operator who
+// wrote `deny_commands: ["rm[")` believes rm is denied, and a daemon that came
+// up healthy having silently discarded the entry would be running exactly the
+// commands they thought they had refused.
+func policyFor(cfg *Config) (*policy.Policy, error) {
+	p, err := policy.New(policy.Config{
+		Allow: cfg.Exec.AllowCommands,
+		Deny:  cfg.Exec.DenyCommands,
+		Caps: policy.Caps{
+			DefaultTimeout: cfg.Exec.DefaultTimeout.Duration(),
+			MaxTimeout:     cfg.Exec.MaxTimeout.Duration(),
+			MaxOutputBytes: cfg.Exec.MaxOutputBytes,
+			// The supervisor's cap, applied to every process this agent
+			// starts. Exec is the only service spawning one today; #11 must
+			// take its slots from this same policy rather than counting its
+			// own, or the host runs two limits' worth of processes.
+			MaxConcurrent: cfg.Process.MaxConcurrent,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agent: %w", err)
+	}
+	return p, nil
+}
+
+// auditFor builds the daemon's single audit log and opens it once, so a path
+// that cannot be written is a startup log line rather than a surprise at the
+// first RPC.
+//
+// A failure here does not stop the daemon. The record is forensic: it prevents
+// nothing, and an agent that refused to serve because a log directory was
+// missing would have traded a gap in the record for an outage. When the
+// operator has set audit.required, every affected RPC fails on its own — that
+// is the same refusal, delivered where the caller can see it.
+func auditFor(cfg *Config, log *slog.Logger) *policy.Audit {
+	auditLog := policy.NewAudit(policy.AuditConfig{
+		Path:           cfg.Audit.Path,
+		Enabled:        cfg.Audit.Enabled,
+		Required:       cfg.Audit.Required,
+		MaxBytes:       cfg.Audit.MaxBytes,
+		RetainSegments: cfg.Audit.RetainSegments,
+	})
+
+	if !auditLog.Enabled() {
+		log.Warn("AUDIT LOG IS OFF",
+			"reason", "audit.enabled is false",
+			"consequence", "this agent records nothing about the commands it runs or the files it writes")
+		return auditLog
+	}
+	if err := auditLog.Preflight(); err != nil {
+		level := "commands will run unrecorded"
+		if auditLog.Required() {
+			level = "audit.required is set, so every affected RPC will fail until this is fixed"
+		}
+		log.Error("AUDIT LOG IS NOT WRITABLE",
+			"path", auditLog.Path(), "error", err, "consequence", level)
+	}
+	return auditLog
 }
 
 // jailFor builds the jail the daemon hands its services, and announces which
@@ -370,6 +449,15 @@ func (s *Server) shutdown() {
 		if err := participant.Shutdown(shutdownCtx); err != nil {
 			s.log.Error("service shutdown failed", "service", svc.name, "error", err)
 		}
+	}
+
+	// Last, after every participant has had its chance to write a final
+	// record. Each write is already durable at the file layer — the log is
+	// opened with O_APPEND and written whole — so this releases the handle
+	// rather than flushing a buffer, and a write arriving afterwards simply
+	// reopens it.
+	if err := s.deps.Audit.Close(); err != nil {
+		s.log.Error("closing the audit log failed", "error", err)
 	}
 	s.log.Info("stopped")
 }
