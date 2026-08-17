@@ -80,6 +80,26 @@ process:
   # Hard ceiling on sandbox_process_logs follow, so a tool call cannot hang.
   max_follow_duration: "60s"
 
+forward:
+  # Port forwarding: the `ssh -L` equivalent. On means a caller can reach a
+  # port on THIS MACHINE'S loopback. Off means it can reach nothing.
+  enabled: true
+  # Non-loopback hosts a forward may target, and the reason this list is empty
+  # by default.
+  #
+  # A forward to loopback reaches only what this machine is serving. A forward
+  # to an arbitrary host reaches anything this machine's network reaches — so
+  # an agent with no restriction is a general-purpose pivot into whatever
+  # network it sits in, available to anyone who can call it. Listing a host
+  # here is how you decide that is what you want, per host:
+  #
+  #   allowed_hosts: ["db.internal", "10.0.4.7"]
+  allowed_hosts: []
+  # Concurrent forwarded connections this agent will carry.
+  max_connections: 64
+  # How long to wait for the sandbox-side port to accept.
+  dial_timeout: "10s"
+
 audit:
   # Append-only JSONL record of every exec and every write: timestamp,
   # authenticated principal, RPC, argv and resolved path, working directory,

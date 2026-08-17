@@ -201,6 +201,33 @@ cannot talk its way past.
   - **An allowed interpreter allows everything it can run.** `python3`, `perl`,
     `node` and `make` on an allow list are each a shell by another name.
 
+## Port forwarding
+
+`sandbox_forward` is `ssh -L`: a local listener on the workstation, a socket on
+the sandbox, and bytes in between. Both ends are confined to loopback by
+default, and the two confinements answer different questions.
+
+- **The local listener binds `127.0.0.1` only.** Binding every interface would
+  publish a tunnel into the sandbox to everyone on the workstation's network,
+  with no authentication in front of it — including on a network the user did
+  not choose.
+- **`remote_host` defaults to the sandbox's own loopback**, and a non-loopback
+  target is refused unless the operator listed it in `forward.allowed_hosts`.
+  This is the setting that decides whether the agent is a way to reach a dev
+  server or a general-purpose pivot into whatever network the host sits in.
+  Forwarding a dev server works identically without the capability, so an agent
+  that never needs it never notices it is missing — which is exactly why the
+  permissive version would go unnoticed too.
+
+  The check resolves the requested host and requires **every** address it
+  resolves to to be loopback, then dials the address that passed. Judging the
+  string would be defeated by a name that resolves outward; judging one address
+  would be defeated by a name that resolves to several; re-resolving at dial
+  time would leave a window between the check and the connection.
+
+An operator who lists a host has accepted that the agent will connect to it on
+any caller's request, and the agent says so in its log at every start.
+
 ## Audit
 
 Every exec — and, as they land, every write, edit, process start and signal —
