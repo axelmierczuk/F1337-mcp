@@ -46,6 +46,7 @@ Everything except one scenario.
 | `TestDevServerReadinessForwardAndFetch` | The whole remote dev loop: readiness probe, port forward, HTTP GET over `localhost`. |
 | `TestForwardRefusesAPortNothingIsServing` | A forward to a dead port is refused by the sandbox rather than opening a local listener that resets every connection. |
 | `TestProcessRestartKeepsItsIdentityAndComesBackReady` | A restart keeps the process id, passes its log-pattern probe again, serves again, keeps both runs' logs, and leaves the restart policy's budget alone. |
+| `TestALogPatternProbeMatchesThePreviousRunsOutput` | Records a defect, not a requirement. See the comment on the test. |
 | `TestProcessLogsFollowReturnsAtItsDeadline` | A following read of a process's logs is bounded. |
 | `TestSupervisedProcessSurvivesAndIsReadoptedAfterAnAgentCrash` | A supervised process outlives a SIGKILLed agent, the next agent re-adopts it, its logs survive, capture resumes, and a stop still reaches it. |
 | `TestStaleRecordIsOrphanedRatherThanSignalled` | A record whose pid exists but whose start identity does not match is orphaned, never signalled. |

@@ -51,15 +51,31 @@ func fail(msg string) {
 // The announcement order matters: a readiness probe that watched for a log line
 // printed before the bind would pass while the port was still closed, which is
 // exactly the failure a probe exists to prevent.
+//
+// With a third argument, the announcement is made once per file rather than
+// once per run: the first run creates the file and announces itself, and every
+// later run serves silently. A supervised process keeps its argv across a
+// restart, so this is the only way to give the second run of the *same* process
+// different output — which is what it takes to ask whether a log-pattern
+// readiness probe is watching this run's output or the last one's.
 func serve(args []string) {
 	if len(args) < 2 {
-		fail("usage: helpers serve <port> <body>")
+		fail("usage: helpers serve <port> <body> [announce-once-file]")
 	}
 	port, err := strconv.Atoi(args[0])
 	if err != nil {
 		fail("port: " + err.Error())
 	}
 	body := args[1]
+
+	announce := true
+	if len(args) > 2 {
+		if _, err := os.Stat(args[2]); err == nil {
+			announce = false
+		} else if err := os.WriteFile(args[2], []byte("announced\n"), 0o600); err != nil {
+			fail("mark: " + err.Error())
+		}
+	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -69,6 +85,14 @@ func serve(args []string) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, body)
 	})
+	if !announce {
+		fmt.Printf("serving %d without announcing it\n", port)
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		if err := srv.Serve(lis); err != nil {
+			fail("serve: " + err.Error())
+		}
+		return
+	}
 	fmt.Printf("listening on %d\n", port)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	if err := srv.Serve(lis); err != nil {

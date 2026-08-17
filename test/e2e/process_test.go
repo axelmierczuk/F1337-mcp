@@ -125,10 +125,81 @@ func TestProcessRestartKeepsItsIdentityAndComesBackReady(t *testing.T) {
 
 	// And the log history of both runs is there: a restart that reset the
 	// buffer would lose the output that explains why it was restarted.
-	logs := readLogs(t, s, started.Process.ProcessID)
-	if strings.Count(logs.Logs, "listening on "+strconv.Itoa(port)) < 2 {
-		t.Fatalf("the logs do not carry both runs:\n%s", logs.Logs)
+	//
+	// Waited for rather than read once, because the second run's line reaches
+	// the log after the restart call returns — see
+	// TestALogPatternProbeMatchesThePreviousRunsOutput, which is why.
+	marker := "listening on " + strconv.Itoa(port)
+	waitFor(t, 30*time.Second, "both runs' output to be in the log", func() (bool, string) {
+		logs := readLogs(t, s, started.Process.ProcessID)
+		if strings.Count(logs.Logs, marker) >= 2 {
+			return true, ""
+		}
+		return false, "log so far:\n" + logs.Logs
+	})
+}
+
+// TestALogPatternProbeMatchesThePreviousRunsOutput records a defect, as the
+// product currently behaves.
+//
+// A log_pattern readiness probe scans the lines already in the process's log
+// buffer before it starts following new ones. That pre-scan is there for a good
+// reason — a process that prints "listening on :3000" before the probe is set
+// up would otherwise never be seen — but the buffer is not emptied or
+// watermarked when a run starts, so after a restart the pre-scan matches the
+// *previous* run's output and the new run is declared ready before it has
+// printed anything at all.
+//
+// The scenario makes that decidable without timing anything. The helper
+// announces itself only on its first run, so a probe watching this run's output
+// must time out and report ready_error; a probe watching the buffer's history
+// passes instantly on a line the last run wrote. The assertion below is on the
+// second, because that is what happens.
+//
+// If this test starts failing because the restart reports ready_error, that is
+// the fix landing: delete it, and drop the waitFor in the scenario above.
+//
+// Reported in the PR body for #28.
+func TestALogPatternProbeMatchesThePreviousRunsOutput(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+	s := f.connect(t)
+	s.ok("fleet_select", map[string]any{"name": a.name})
+
+	port := freePort(t)
+	once := filepath.Join(a.home, "announced-once")
+	started := startProcess(t, s, map[string]any{
+		"name": "quiet-on-restart",
+		"argv": []string{bins.helpers, "serve", strconv.Itoa(port), "body", once},
+		"ready_probe": map[string]any{
+			"log_pattern":     "listening on",
+			"timeout_seconds": 30,
+		},
+	})
+	defer stopProcess(t, s, started)
+
+	restarted := structured[processStartResult](t, s.okAs("fleet_process_restart", map[string]any{
+		"process_id":            started.Process.ProcessID,
+		"ready_timeout_seconds": 5,
+	}, callOptions{timeout: 120 * time.Second}))
+
+	if restarted.Ready == nil || !*restarted.Ready {
+		t.Fatalf("the probe no longer matches the previous run's output — the defect this test records is fixed, so delete it: %+v", restarted)
 	}
+
+	// The new run had not printed the pattern when it was called ready, and
+	// this is the fact that says so: it never prints it, and the log ends up
+	// carrying the announcement once and the silent line once.
+	waitFor(t, 30*time.Second, "the second run to say it is serving silently", func() (bool, string) {
+		logs := readLogs(t, s, started.Process.ProcessID)
+		if !contains(logs.Logs, "serving "+strconv.Itoa(port)+" without announcing it") {
+			return false, "log so far:\n" + logs.Logs
+		}
+		if n := strings.Count(logs.Logs, "listening on"); n != 1 {
+			t.Fatalf("the announcement appears %d times; the helper announces once per file", n)
+		}
+		return true, ""
+	})
 }
 
 // TestSupervisedProcessSurvivesAndIsReadoptedAfterAnAgentCrash runs the
