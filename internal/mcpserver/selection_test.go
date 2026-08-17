@@ -199,6 +199,16 @@ var echoFixtures = map[string]struct {
 	"sandbox_transfer": {args: map[string]any{
 		"sandbox": "build-box", "direction": "push", "source": "server.go", "destination": "/srv/app/server.go",
 	}, echoes: "build-box", targeted: true},
+
+	"sandbox_process_start": {
+		args:     map[string]any{"sandbox": "build-box", "argv": []any{"npm", "run", "dev"}, "name": "web-dev"},
+		echoes:   "build-box",
+		targeted: true,
+	},
+	"sandbox_process_list":    {args: map[string]any{"sandbox": "build-box"}, echoes: "build-box", targeted: true},
+	"sandbox_process_logs":    {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
+	"sandbox_process_signal":  {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1", "graceful_stop": true}, echoes: "build-box", targeted: true},
+	"sandbox_process_restart": {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
 }
 
 // TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox is the walk the
