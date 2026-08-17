@@ -1,6 +1,9 @@
 package agent_test
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +11,27 @@ import (
 
 	"github.com/axelmierczuk/fleet-mcp/internal/agent"
 )
+
+// legacySystemDirs are the pre-rebrand machine-wide directories for this
+// platform — the ones internal/legacypath falls back to when they hold
+// something and the new ones do not.
+func legacySystemDirs() []string {
+	switch runtime.GOOS {
+	case "windows":
+		dir := os.Getenv("ProgramData")
+		if dir == "" {
+			dir = `C:\ProgramData`
+		}
+		return []string{filepath.Join(dir, "sandboxd")}
+	case "darwin":
+		return []string{
+			"/Library/Application Support/sandboxd",
+			"/Library/Logs/sandboxd",
+		}
+	default:
+		return []string{"/etc/sandboxd", "/var/lib/sandboxd", "/var/log/sandboxd"}
+	}
+}
 
 // TestDefaultConfigPath_LegacyEnv covers the upgrade path the fleet rebrand
 // created: a service unit written by a pre-rebrand agent passes the config
@@ -45,9 +69,19 @@ func TestDefaultConfigPath_LegacyEnv(t *testing.T) {
 // on a machine with neither they must name the new one. A regression here
 // would have every fresh install writing to /etc/sandboxd again.
 func TestSystemPathsAreOnTheNewName(t *testing.T) {
-	// No pre-rebrand directory exists on a CI runner, so these take the
-	// new-name branch. Asserting on the substring rather than the whole path
-	// keeps this true across the three platforms' different roots.
+	// This asserts the fresh-install branch, so it only means anything on a
+	// machine that has nothing to fall back to. A developer box actually
+	// running a pre-rebrand agent would legitimately resolve to the old paths,
+	// and failing there would be the test reporting the compatibility path
+	// working as designed.
+	for _, legacy := range legacySystemDirs() {
+		if entries, err := os.ReadDir(legacy); err == nil && len(entries) > 0 {
+			t.Skipf("this machine has a pre-rebrand install at %s, so these resolve to it by design", legacy)
+		}
+	}
+
+	// Asserting on the substring rather than the whole path keeps this true
+	// across the three platforms' different roots.
 	assert.Contains(t, agent.SystemConfigDir(), "fleet")
 	assert.NotContains(t, agent.SystemConfigDir(), "sandboxd")
 	assert.Contains(t, agent.DefaultStateDir(), "fleet")

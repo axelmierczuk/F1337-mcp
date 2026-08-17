@@ -102,7 +102,12 @@ func hasContents(dir string) bool {
 	if dir == "" {
 		return false
 	}
-	f, err := os.Open(dir)
+	// The candidates are composed by the callers from os.UserHomeDir, the XDG
+	// and APPDATA variables, and compiled-in system paths — the same inputs
+	// that decided where to read the config from in the first place. Nothing is
+	// read out of the directory but the name of one entry, and that name is
+	// discarded: this asks "is there anything in here", never "what".
+	f, err := os.Open(dir) //nolint:gosec // directory probe on a path the caller already resolved; no file content is read
 	if err != nil {
 		return false
 	}
