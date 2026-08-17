@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -102,6 +104,16 @@ func newService(t *testing.T, opts options) *Service {
 		Version: "test",
 	})
 	require.NoError(t, err)
+
+	// The daemon's own log, printed when a test fails. A session that produced
+	// nothing is the one failure this suite cannot diagnose from the terminal
+	// alone — the terminal is empty, and everything that could explain it is
+	// here.
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("the agent logged:\n%s", logs.String())
+		}
+	})
 
 	svc, ok := built.(*Service)
 	require.True(t, ok)
@@ -216,6 +228,19 @@ func (s *clientSession) resize(columns, rows uint32) error {
 	})
 }
 
+// state describes the stream, for a failure that has to say whether the session
+// was still running when it gave up.
+func (s *clientSession) state() string {
+	select {
+	case <-s.done:
+	default:
+		return "the session is still open"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fmt.Sprintf("the session ended: exit=%v streamErr=%v", s.exit, s.streamErr)
+}
+
 // printed is everything the session has produced so far.
 func (s *clientSession) printed() string { return s.output.String() }
 
@@ -226,7 +251,7 @@ func (s *clientSession) awaitOutput(want string) {
 		if strings.Contains(s.printed(), want) {
 			return true, ""
 		}
-		return false, "so far it printed: " + s.printed()
+		return false, "so far it printed: " + strconv.Quote(s.printed()) + "; " + s.state()
 	})
 }
 
