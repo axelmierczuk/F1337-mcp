@@ -409,7 +409,10 @@ func TestExec_CancellingTheCallKillsTheCommand(t *testing.T) {
 // for a command that really ran, and the RPC ends only when the daemon drains.
 //
 // The command itself is killed on schedule either way, which is what makes this
-// invisible from the outside: there is no runaway process to notice.
+// invisible from the outside: there is no runaway process to notice — so the
+// command's own tree is what this asserts on, not just the handler returning.
+// A handler that gives up while leaving the processes it started behind has
+// traded one invisible failure for another.
 func TestExec_StalledOutputStreamDoesNotWedgeTheHandler(t *testing.T) {
 	h := newHarness(t)
 
@@ -421,7 +424,11 @@ func TestExec_StalledOutputStreamDoesNotWedgeTheHandler(t *testing.T) {
 	stream := newFakeStream(context.Background())
 	stream.blockSend = block
 
-	req := helperReq("spew", "1048576")
+	// The spawn helper rather than a bare producer of output: it writes its
+	// pids to a file before its first write to stdout, so the pids survive a
+	// stream that never accepts anything.
+	pidFile := filepath.Join(t.TempDir(), "stalled.pid")
+	req := helperReq("spawn", pidFile)
 	req.Timeout = durationpb.New(500 * time.Millisecond)
 
 	returned := make(chan error, 1)
@@ -442,11 +449,118 @@ func TestExec_StalledOutputStreamDoesNotWedgeTheHandler(t *testing.T) {
 	// never end.
 	require.Equal(t, 0, h.svc.policy.InUse())
 
+	// And the command is gone, tree and all. Giving up on delivering a result
+	// is not giving up on the process that produced it.
+	leader, child := readPIDs(t, pidFile)
+	requireProcessGone(t, leader)
+	requireProcessGone(t, child)
+
 	records := h.records(t)
 	require.Len(t, records, 1, "a command that ran is recorded even when its result could not be delivered")
 	require.Equal(t, policy.OutcomeTimedOut, records[0].Outcome)
 	require.True(t, records[0].TimedOut)
 	require.NotEmpty(t, records[0].Error)
+}
+
+// A descendant that outlived its parent does not outlive the RPC.
+//
+// This is the one the kill path never sees: the command succeeded, so nothing
+// timed out and nobody hung up, and by the time Wait returns the process that
+// would have carried its children down with it is already gone. Only the sweep
+// at the end of the call reaches what it left — `sh -c 'daemon &'` is the shape
+// — and exec is one-shot by contract, so docs/tools.md points anything
+// longer-lived at sandbox_process_start.
+//
+// Round 1 raised the log level on a failing sweep. It did not check that the
+// sweep works, and nothing else did either: every other kill test runs a
+// command that is still alive when the agent decides to kill it.
+func TestExec_ADescendantThatOutlivesItsParentDoesNotOutliveTheCall(t *testing.T) {
+	h := newHarness(t)
+
+	pidFile := filepath.Join(t.TempDir(), "detached.pid")
+	stream, err := h.run(t, helperReq("spawn-exit", pidFile))
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.Equal(t, int32(0), res.GetExitCode(), "the command succeeded; nothing killed it")
+	require.False(t, res.GetTimedOut())
+
+	// The command's own pid is gone because it exited. Its child was never
+	// signalled by anything on the timeout path, and is still sleeping out its
+	// ten minutes unless the sweep took it.
+	_, grandchild := readPIDs(t, pidFile)
+	requireProcessGone(t, grandchild)
+}
+
+// A tree that declines SIGTERM is still gone when the timeout expires.
+//
+// The escalation has two halves and only the second one is a guarantee. With
+// every process in the group ignoring SIGTERM, the polite half cannot be what
+// ends this — so a group kill that reached only the leader, or an escalation
+// that stopped at TERM, leaves a survivor the caller cannot reach.
+func TestExec_ATreeThatIgnoresSIGTERMIsStillKilledOnTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no SIGTERM to ignore: the job object is terminated, which a process cannot decline")
+	}
+	h := newHarness(t)
+
+	pidFile := filepath.Join(t.TempDir(), "stubborn.pid")
+	req := helperReq("ignore-term-spawn", pidFile)
+	req.Timeout = durationpb.New(500 * time.Millisecond)
+
+	stream, err := h.run(t, req)
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.True(t, res.GetTimedOut())
+	require.True(t, res.GetSignaled(), "a process that ignored SIGTERM can only have died of SIGKILL")
+	require.Equal(t, "SIGKILL", res.GetSignal())
+
+	leader, child := readPIDs(t, pidFile)
+	requireProcessGone(t, leader)
+	requireProcessGone(t, child)
+}
+
+// The same tree, killed because its caller went away rather than because it
+// ran too long.
+//
+// Cancellation and expiry take the same path out of the watcher, and that is
+// exactly why it is worth asserting separately: the two differ only in which
+// select case fired, so a change that gets one right and the other wrong is a
+// one-line change.
+func TestExec_ATreeThatIgnoresSIGTERMIsStillKilledWhenTheCallerGoesAway(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no SIGTERM to ignore: the job object is terminated, which a process cannot decline")
+	}
+	h := newHarness(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pidFile := filepath.Join(t.TempDir(), "stubborn.pid")
+	stream := newFakeStream(ctx)
+	// The helper prints its child's pid once the tree is up, so cancelling on
+	// the first send is cancelling a call whose whole tree exists.
+	stream.onSend = func(*sandboxdv1.ExecResponse) { cancel() }
+
+	done := make(chan error, 1)
+	go func() { done <- h.svc.Exec(helperReq("ignore-term-spawn", pidFile), stream) }()
+
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("Exec did not return after its caller cancelled")
+	}
+
+	leader, child := readPIDs(t, pidFile)
+	requireProcessGone(t, leader)
+	requireProcessGone(t, child)
+
+	records := h.records(t)
+	require.Len(t, records, 1)
+	require.Equal(t, policy.OutcomeCancelled, records[0].Outcome)
 }
 
 func TestExec_IgnoringSIGTERMEscalatesToKill(t *testing.T) {
@@ -880,6 +994,115 @@ func TestExec_AuditNeverRecordsEnvironmentValuesOnTheFailurePaths(t *testing.T) 
 			require.Len(t, records, 1, "the refusal is still recorded, just without the value")
 			require.Equal(t, policy.OutcomeError, records[0].Outcome)
 			require.NotEmpty(t, records[0].Error, "and it still says why")
+		})
+	}
+}
+
+// Nothing a caller sends that has no field of its own reaches the record, by
+// any route out of the handler.
+//
+// The test above is the enumerated version of this: it names the two paths a
+// previous round found, and it would keep passing if a third were added
+// tomorrow. That is how the first one was missed — the invariant was read off
+// the field list, the field list was right, and an error string is a field
+// too.
+//
+// So this one enumerates requests rather than paths. Every shape below leaves
+// the handler somewhere different — before validation, at the lookup, at the
+// policy, at the spawn, on the kill path, on the way out — and every one is
+// run with the secret in each of the places a caller can put one that the
+// record has nowhere to hold: an environment value, an environment name, and
+// stdin. The property is asserted over the whole file rather than over a
+// field, so a new path that writes caller data into any field of any record
+// fails it without anyone having thought of that path first.
+//
+// Argv and working_dir are deliberately not poisoned. Both have fields, both
+// are recorded on purpose, and docs/security.md says so.
+func TestExec_NothingWithoutAFieldReachesTheRecord(t *testing.T) {
+	const secret = "s3cr3t-token-do-not-log-4a9f"
+
+	// Every way a caller can carry the secret into the request without putting
+	// it somewhere the record is documented to keep.
+	poisons := map[string][]string{
+		"in the PATH that is searched":   {"PATH=/tmp/" + secret},
+		"in PATHEXT":                     {"PATHEXT=." + secret},
+		"in TMPDIR":                      {"TMPDIR=/tmp/" + secret, "TEMP=/tmp/" + secret, "TMP=/tmp/" + secret},
+		"in HOME":                        {homeVar + "=/home/" + secret},
+		"in COMSPEC":                     {"COMSPEC=/bin/" + secret},
+		"in an ordinary value":           {"ORDINARY=" + secret},
+		"in a variable name":             {secret + "=ordinary"},
+		"in an entry with no separator":  {secret},
+		"in an entry with an empty name": {"=" + secret},
+		"in a name beside a NUL byte":    {secret + "=has-a\x00-nul"},
+		"in a value beside a NUL byte":   {"ORDINARY=" + secret + "\x00"},
+	}
+
+	// Every shape leaves Exec by a different route.
+	missingDir := filepath.Join(t.TempDir(), "no-such-directory")
+	aDirectory := t.TempDir()
+	shapes := func() map[string]*sandboxdv1.ExecRequest {
+		overLimit := helperReq("echo", "hi")
+		overLimit.Timeout = durationpb.New(time.Hour)
+
+		badDir := helperReq("echo", "hi")
+		badDir.WorkingDir = missingDir
+
+		killed := helperReq("sleep", "30")
+		killed.Timeout = durationpb.New(200 * time.Millisecond)
+
+		capped := helperReq("spew", "65536")
+		capped.MaxOutputBytes = 1024
+
+		return map[string]*sandboxdv1.ExecRequest{
+			"a command that runs":            helperReq("echo", "hi"),
+			"a command that exits non-zero":  helperReq("exit", "3"),
+			"a command that is killed":       killed,
+			"a command over the output cap":  capped,
+			"an empty argv":                  {},
+			"no such executable":             {Argv: []string{"definitely-not-a-real-command"}},
+			"an argv[0] that is a directory": {Argv: []string{aDirectory}},
+			"a relative argv[0]":             {Argv: []string{"." + string(filepath.Separator) + "not-here"}},
+			"a working_dir that is not one":  badDir,
+			"a timeout over the maximum":     overLimit,
+			"a command the policy refuses":   {Argv: []string{"denied-by-the-test"}},
+			"shell mode":                     {Argv: []string{"echo", "hi"}, Shell: true},
+		}
+	}
+
+	for poison, env := range poisons {
+		t.Run(poison, func(t *testing.T) {
+			// One deny rule, matching nothing any other shape names, so the
+			// refusal path is reachable from the same harness as the rest.
+			h := newHarness(t, withDeny("denied-by-the-test*"))
+
+			requests := shapes()
+			for _, req := range requests {
+				req.Env = append(req.Env, env...)
+				// Stdin has no field either, and a caller can put a file's
+				// contents in it.
+				req.Stdin = []byte(secret)
+				// Errors are the point of most of these shapes; what matters
+				// is what was written down, which is checked below.
+				_, _ = h.run(t, req)
+			}
+
+			require.NoError(t, h.audit.Close())
+			raw, err := os.ReadFile(h.auditPath)
+			require.NoError(t, err)
+			require.NotContainsf(t, string(raw), secret,
+				"a caller put %s and it reached the audit log; the record has no field for it, "+
+					"and an error message is a field", poison)
+			require.NotContainsf(t, h.logs.String(), secret,
+				"a caller put %s and it reached the daemon's own log", poison)
+
+			// The redaction has to leave a record behind, or "nothing leaked"
+			// is satisfied by recording nothing.
+			records := parseRecords(t, h.auditPath)
+			require.Len(t, records, len(requests), "one record per call, whatever the call did")
+			for _, rec := range records {
+				require.NotEmpty(t, rec.Outcome, "every record says how the call ended")
+				require.Equal(t, execMethod, rec.RPC)
+			}
 		})
 	}
 }

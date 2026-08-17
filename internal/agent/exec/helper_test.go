@@ -84,7 +84,22 @@ func helperMain(mode string, args []string) int {
 		// something so the caller knows the child exists, and wait. The child
 		// gets no inherited pipes, so a test can find it without the agent's
 		// output drain depending on when it exits.
-		return spawnHelper(arg(args, ""))
+		return spawnHelper(arg(args, ""), "sleep", true)
+
+	case "spawn-exit":
+		// spawn-exit <pidfile>: the same, except this process exits as soon as
+		// the child is running. What is left behind is a descendant that
+		// outlived its parent — `sh -c 'daemon &'` — which nothing on the kill
+		// path has reached, because the command was never killed. Only the
+		// post-exec sweep gets it.
+		return spawnHelper(arg(args, ""), "sleep", false)
+
+	case "ignore-term-spawn":
+		// ignore-term-spawn <pidfile>: a tree in which every process declines
+		// SIGTERM, so the polite half of the escalation cannot be what ends
+		// it. Both have to die of the group SIGKILL or not at all.
+		ignoreTerm()
+		return spawnHelper(arg(args, ""), "ignore-term", true)
 
 	case "env":
 		// env <NAME>: print one variable's value, or nothing when unset. Used
@@ -115,7 +130,14 @@ func helperMain(mode string, args []string) int {
 		return 0
 
 	case "ignore-term":
-		return ignoreTermHelper()
+		ignoreTerm()
+		// Announce readiness, so a test kills a process that is already
+		// ignoring the signal rather than racing the handler's installation.
+		if _, err := os.Stdout.WriteString("ready\n"); err != nil {
+			return 1
+		}
+		time.Sleep(600 * time.Second)
+		return 0
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown helper mode %q\n", mode)
@@ -132,7 +154,8 @@ func arg(args []string, fallback string) string {
 	return fallback
 }
 
-// spawnHelper starts a grandchild and records both pids, then sleeps.
+// spawnHelper starts a grandchild in childMode and records both pids, then
+// either waits or returns.
 //
 // The grandchild is started without inheriting this process's stdout, so it
 // cannot hold the agent's output pipe open. What it does hold is membership of
@@ -141,14 +164,20 @@ func arg(args []string, fallback string) string {
 //
 // Both pids go in the file — this process's and its child's — so a test can
 // check that the command itself is gone as well as its descendant. One line
-// each, written in a single call so a reader either sees both or neither.
-func spawnHelper(pidFile string) int {
+// each, written in a single call so a reader either sees both or neither, and
+// written before this process can exit, so a test that reads the file after
+// the RPC returned still finds it.
+//
+// wait false leaves the grandchild running and returns. That is the case the
+// post-exec sweep exists for: the command succeeded, so nothing killed it, and
+// its descendant is still there when Wait comes back.
+func spawnHelper(pidFile, childMode string, wait bool) int {
 	self, err := os.Executable()
 	if err != nil {
 		return 1
 	}
 	child := osexec.Command(self, "600") //nolint:gosec // the test binary re-executing itself
-	child.Env = append(os.Environ(), helperEnvFor("sleep"))
+	child.Env = append(os.Environ(), helperEnvFor(childMode))
 	child.Stdout = nil
 	child.Stderr = nil
 	if err := child.Start(); err != nil {
@@ -161,6 +190,9 @@ func spawnHelper(pidFile string) int {
 		}
 	}
 	fmt.Println(child.Process.Pid)
+	if !wait {
+		return 0
+	}
 	time.Sleep(600 * time.Second)
 	return 0
 }
