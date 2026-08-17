@@ -48,6 +48,22 @@ const (
 	// carrying a newline splits a row in two, and the whole claim of this
 	// listing is one line per process.
 	maxProcessName = 64
+	// maxAdoptionNote bounds the supervisor's explanation of what it concluded
+	// about a process that may have survived an agent restart.
+	//
+	// It is not maxLastLogLine, which it used to be, and the difference is not
+	// cosmetic. The notes are whole sentences the supervisor writes for a
+	// reader, and the longest of them is the one that matters most: "pid N was
+	// reused by another process (start identity …, expected …), so this record
+	// was not re-adopted and the pid will not be signalled" runs past 120
+	// characters, so the clause naming the consequence was the half that got
+	// cut. A caller reading a process marked ORPHANED was left with the
+	// accusation and not the reassurance.
+	//
+	// The table still clips its cell to the column width; see
+	// renderProcessTable. This bounds the structured field, which is a
+	// paragraph, not a cell.
+	maxAdoptionNote = 400
 	// maxRenderedLogBytes bounds a rendered log block. Beyond it the oldest
 	// lines are dropped and the omission is reported in `truncation`.
 	maxRenderedLogBytes = 96 * 1024
@@ -177,7 +193,11 @@ type ProcessLine struct {
 	ExitCode *int32 `json:"exit_code,omitempty"`
 	// Signal names the signal that killed the process, when one did.
 	Signal string `json:"signal,omitempty"`
-	// RestartCount is how many times the supervisor has restarted it.
+	// RestartCount is how many times the *restart policy* has restarted it,
+	// which is the count max_restarts bounds. A fleet_process_restart the
+	// caller asked for does not move it: an explicit restart that spent the
+	// policy's budget would let a developer restarting a dev server by hand
+	// exhaust the automatic recovery it needs when it crashes on its own.
 	RestartCount uint32 `json:"restart_count,omitempty"`
 	// LastLogLine is the most recent output line, bounded.
 	LastLogLine string `json:"last_log_line,omitempty"`
@@ -280,7 +300,7 @@ func processLine(st *sandboxdv1.ProcessStatus, now time.Time) ProcessLine {
 		RestartCount:   st.GetRestartCount(),
 		LastLogLine:    clipCell(st.GetLastLogLine(), maxLastLogLine),
 		ListeningPorts: sortedPorts(st.GetListeningPorts()),
-		AdoptionNote:   clipCell(st.GetAdoptionNote(), maxLastLogLine),
+		AdoptionNote:   clipCell(st.GetAdoptionNote(), maxAdoptionNote),
 		Signal:         st.GetSignal(),
 	}
 	if started := st.GetStartedAt(); started != nil {
@@ -803,7 +823,11 @@ func renderProcessTable(rows []ProcessLine) string {
 		}
 		last := row.LastLogLine
 		if last == "" && row.AdoptionNote != "" {
-			last = "(" + row.AdoptionNote + ")"
+			// Clipped here rather than at the field, because this is the cell
+			// and the field is the explanation. A process with no output yet
+			// borrows this column to say why it is orphaned; a reader who wants
+			// the whole sentence reads adoption_note in `processes`.
+			last = "(" + clip(row.AdoptionNote, maxLastLogLine) + ")"
 		}
 		cells = append(cells, []string{
 			state, row.Name, pid, uptime,

@@ -31,6 +31,26 @@ AGENT_PLATFORMS := \
 # single-platform pass over this tree checks roughly two thirds of it.
 CHECK_GOOSES := linux darwin windows
 
+# Build tags that `vet` and `lint` must include on top of the default set.
+#
+# The end-to-end suite is behind `integration` so that `go test ./...` stays
+# fast, and a tag that hides a package from the test runner hides it from the
+# checkers too: without this, test/e2e is neither vetted nor linted, and the
+# first anyone hears of a call that does not compile under GOOS=windows is a red
+# CI run. Same reasoning as the per-GOOS loops below, one level up.
+CHECK_TAGS := integration
+
+# Packages no `...` pattern can reach.
+#
+# test/e2e/testdata/helpers is a real Go main package, but the go tool skips
+# every directory under testdata, so `./...` has never loaded it — under any
+# GOOS, with or without the tag above. The one file in it that exists purely for
+# Windows, pgid_other.go, was therefore compiled by nothing: the integration job
+# runs on Linux and macOS only, and that job is the only thing that builds these
+# helpers. Naming the package explicitly is what makes the per-GOOS loop below
+# mean what it says.
+CHECK_EXTRA_PKGS := ./test/e2e/testdata/helpers
+
 .DEFAULT_GOAL := help
 
 ## help: list available targets
@@ -105,6 +125,36 @@ build-agent-all:
 test:
 	go test -race -count=1 ./...
 
+## test-integration: run the end-to-end suite against the real binaries
+#
+# Not part of `check`, and not part of `test`: it builds three binaries, starts
+# a control plane and two agent daemons per scenario, and moves 24 MiB over a
+# real mTLS gRPC stream. Twenty seconds is cheap for what it covers and far too
+# expensive to pay on every `go test ./...`.
+#
+# No Docker, no root, no network beyond loopback. The one scenario that wants a
+# container is opt-in; see test-integration-docker and test/e2e/README.md.
+#
+# Race-enabled like `test`, and for the same reason. The product runs in its own
+# processes here so the detector cannot see inside it, but the harness is
+# concurrent code too — one scenario keeps two dozen calls in flight against a
+# single session — and a suite written to catch races the unit tests cannot
+# should not be the one package in this repository that races unwatched. It
+# costs about three seconds.
+.PHONY: test-integration
+test-integration:
+	go test -tags integration -race -count=1 -timeout 20m ./test/...
+
+## test-integration-docker: also run the containerised tree-kill scenario
+#
+# Separate because it pulls a Go image and builds the product inside it, which
+# is minutes rather than seconds. What it buys is a PID namespace small enough
+# to enumerate exhaustively, so "the timeout left no survivors" can be asserted
+# against every process in it rather than against one process group.
+.PHONY: test-integration-docker
+test-integration-docker:
+	FLEET_E2E_DOCKER=1 go test -tags integration -count=1 -timeout 30m -run InContainer ./test/...
+
 ## lint: run golangci-lint for every GOOS the agent ships for
 #
 # Once per GOOS, not once. A host-only run structurally cannot see a file
@@ -138,7 +188,7 @@ fmt:
 vet:
 	@for os in $(CHECK_GOOSES); do \
 		echo "  go vet GOOS=$$os"; \
-		GOOS=$$os CGO_ENABLED=0 go vet ./... || exit 1; \
+		GOOS=$$os CGO_ENABLED=0 go vet -tags '$(CHECK_TAGS)' ./... $(CHECK_EXTRA_PKGS) || exit 1; \
 	done
 
 ## check: the local gate — what CI runs, across every GOOS

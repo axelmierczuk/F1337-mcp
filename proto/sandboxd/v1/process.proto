@@ -141,7 +141,11 @@ message ProcessStatus {
   google.protobuf.Timestamp exited_at = 8;
   int32 exit_code = 9;
   string signal = 10;
-  // Number of times the supervisor has restarted this process.
+  // Number of times the restart *policy* has restarted this process, which is
+  // the count max_restarts bounds. A RestartProcess the caller asked for does
+  // not move it: charging an explicit restart against the policy's budget would
+  // let a developer restarting a dev server by hand exhaust the automatic
+  // recovery it needs when it crashes on its own.
   uint32 restart_count = 11;
   RestartPolicy restart_policy = 12;
   // Most recent output line, so fleet_process_list is useful on its own
