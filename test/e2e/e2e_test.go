@@ -100,7 +100,14 @@ func runMain(m *testing.M) (int, error) {
 func buildBinaries(dir string) (binaries, error) {
 	targets := []string{"./cmd/...", "./test/e2e/testdata/helpers"}
 	for _, target := range targets {
-		cmd := exec.Command("go", "build", "-o", dir+string(os.PathSeparator), target)
+		// -buildvcs=false because the build has to work where git will not
+		// answer. The container scenario mounts this repository into an image
+		// running as root, git refuses a working tree owned by another uid, and
+		// `go build` turns that refusal into "error obtaining VCS status" — a
+		// build failure caused entirely by stamping a commit hash into a binary
+		// that is deleted at the end of the run. Nothing here asserts on a
+		// version string.
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", dir+string(os.PathSeparator), target)
 		cmd.Dir = repoRoot
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return binaries{}, fmt.Errorf("build %s: %w\n%s", target, err, out)
