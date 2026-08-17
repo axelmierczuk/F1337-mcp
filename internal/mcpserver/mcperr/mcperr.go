@@ -135,6 +135,24 @@ func (c Call) limitSuffix() string {
 	}
 }
 
+// Message returns just the readable half of an error, with no sentence built
+// around it and no "rpc error: code = … desc =" envelope left in it.
+//
+// [Call.Map] is for a failure the model has to act on, and phrases a whole
+// sentence naming the host and what to check. A sandbox_list detail column is
+// the other case: the row it sits in already carries the name, the address and
+// the health, so repeating them there costs tokens on every fleet check and
+// tells the reader nothing new. Both go through this package so neither path
+// can leak a gRPC or Go internal into the model's context.
+//
+// It returns the empty string for a nil error.
+func Message(err error) string {
+	if err == nil {
+		return ""
+	}
+	return message(err)
+}
+
 // message extracts the human-readable half of an error.
 //
 // For a gRPC error that is the status message, which deliberately excludes

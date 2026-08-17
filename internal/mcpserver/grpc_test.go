@@ -186,6 +186,45 @@ func TestLazyPool_NoticesCredentialsAppearingMidSession(t *testing.T) {
 		"expected a connection failure once credentials existed, got: %s", text)
 }
 
+// TestLazyPool_DoesNotRebuildAfterClose. A handler can still be running when
+// the session ends and Server.Close runs — the SDK cancels its context, it
+// does not wait for it. A lazy pool that builds on demand would then build a
+// *fresh* one on the way out: new channels, new background health goroutines,
+// and nothing left to close them, because Server.Close has already dropped its
+// closers. On a stdio server the process is exiting anyway; on the Connect
+// path, which exists for embedding, it is a leak with no owner.
+func TestLazyPool_DoesNotRebuildAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
+	require.NoError(t, err)
+
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
+
+	server, err := mcpserver.New(mcpserver.Options{
+		ConfigDir:   dir,
+		LogWriter:   &testWriter{t: t},
+		CallTimeout: 2 * time.Second,
+	})
+	require.NoError(t, err)
+
+	session := connect(t, server)
+	callTool(t, session, "sandbox_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
+
+	// Shut the server down without ever having built the pool, so a rebuild
+	// would be unmistakable.
+	require.NoError(t, server.Close())
+
+	text := resultText(callTool(t, session, "sandbox_info", map[string]any{"sandbox": "closed"}, true))
+	assert.Contains(t, text, "shutting down",
+		"a call arriving after Close must be refused, not answered with a pool nothing will close")
+	assert.Contains(t, text, "closed", "and the refusal still names the sandbox it was aimed at")
+
+	// Registry-only tools keep working: they never needed a client.
+	callTool(t, session, "sandbox_list", map[string]any{}, false)
+}
+
 // ---------------------------------------------------------------- helpers
 
 func connect(t *testing.T, server *mcpserver.Server) *mcp.ClientSession {

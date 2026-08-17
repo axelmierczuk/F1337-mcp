@@ -5,9 +5,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
@@ -105,11 +108,26 @@ func TestCheckSandboxName(t *testing.T) {
 }
 
 // TestShortDetail keeps one unreachable sandbox from turning a twenty-machine
-// listing into a wall of text.
+// listing into a wall of text, and keeps gRPC's envelope out of what the model
+// reads.
 func TestShortDetail(t *testing.T) {
+	assert.Empty(t, shortDetail(nil))
 	assert.Equal(t, "connection refused", shortDetail(errors.New("connection refused")))
 
 	long := shortDetail(errors.New(strings.Repeat("x", 400)))
 	assert.LessOrEqual(t, len(long), 164)
 	assert.Contains(t, long, "…")
+
+	// A gRPC status renders as its message, not as the wire envelope. This is
+	// the whole reason it goes through mcperr rather than calling Error().
+	detail := shortDetail(status.Error(codes.Unavailable, "connection refused"))
+	assert.Equal(t, "connection refused", detail)
+	assert.NotContains(t, detail, "rpc error: code =")
+
+	// Truncation cuts on a rune boundary. An agent's message is not
+	// guaranteed to be ASCII, and half a rune is invalid UTF-8 in a JSON
+	// result.
+	multibyte := shortDetail(errors.New(strings.Repeat("é", 200)))
+	assert.True(t, utf8.ValidString(multibyte), "truncation produced invalid UTF-8: %q", multibyte)
+	assert.Contains(t, multibyte, "…")
 }

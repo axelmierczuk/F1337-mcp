@@ -240,6 +240,85 @@ func TestSelection_IsPerIdentityAndPersisted(t *testing.T) {
 	assert.Equal(t, "gpu-01", target.Name(), "clearing one identity must not touch another")
 }
 
+// TestSelection_UnderTheProcessFallbackDoesNotOutliveTheProcess.
+//
+// The fallback identity is "process:<pid>", and pids are reused. Persisting a
+// selection under one means an unrelated later process handed the same pid
+// silently inherits a target chosen by a session that ended long ago — the
+// wrong host, picked implicitly, which is the failure the whole resolution
+// order exists to prevent. So it is held in memory and written nowhere.
+func TestSelection_UnderTheProcessFallbackDoesNotOutliveTheProcess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.yaml")
+	fleet, err := registry.Open(path)
+	require.NoError(t, err)
+	require.NoError(t, fleet.Add(registry.Sandbox{Name: "build-box", Address: "build-box.internal:8722"}))
+	require.NoError(t, fleet.Add(registry.Sandbox{Name: "gpu-01", Address: "gpu-01.internal:8722"}))
+
+	opts := &selection.Options{FallbackIdentity: "process:4242"}
+	first := selection.NewResolver(fleet, opts)
+	fallback := first.IdentityFor(nil)
+	require.Equal(t, selection.Identity("process:4242"), fallback)
+
+	_, err = first.Select(fallback, "gpu-01")
+	require.NoError(t, err)
+
+	// It works for the process that made it.
+	target, err := first.ResolveFor(fallback, "")
+	require.NoError(t, err)
+	assert.Equal(t, "gpu-01", target.Name())
+
+	// It is not in the file...
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "process:4242",
+		"a selection with nothing stable to key it to must not be persisted")
+
+	// ...and a later process handed the same pid inherits nothing.
+	reopened, err := registry.Open(path)
+	require.NoError(t, err)
+	second := selection.NewResolver(reopened, opts)
+	_, err = second.ResolveFor(second.IdentityFor(nil), "")
+	var noTarget *selection.NoTargetError
+	require.ErrorAs(t, err, &noTarget,
+		"a new process must start with no selection, whatever pid it was handed")
+
+	// An identified client is unaffected: that selection does persist.
+	_, err = first.Select("meta:alice", "build-box")
+	require.NoError(t, err)
+	target, err = second.ResolveFor("meta:alice", "")
+	require.NoError(t, err)
+	assert.Equal(t, "build-box", target.Name())
+}
+
+// TestClearSelectionsFor_ReachesTheInMemoryOne. sandbox_remove has to clear
+// every selection pointing at the sandbox, and the unidentified client's is
+// the one the registry file cannot see.
+func TestClearSelectionsFor_ReachesTheInMemoryOne(t *testing.T) {
+	fleet := newFleet(t, "build-box", "gpu-01")
+	resolver := selection.NewResolver(fleet, &selection.Options{FallbackIdentity: "process:test"})
+	const fallback = selection.Identity("process:test")
+
+	_, err := resolver.Select(fallback, "gpu-01")
+	require.NoError(t, err)
+	_, err = resolver.Select("meta:alice", "gpu-01")
+	require.NoError(t, err)
+	_, err = resolver.Select("meta:bob", "build-box")
+	require.NoError(t, err)
+
+	cleared, err := resolver.ClearSelectionsFor("gpu-01")
+	require.NoError(t, err)
+	assert.Equal(t, 2, cleared, "both the persisted and the in-memory selection must be counted")
+
+	_, ok, err := resolver.Selected(fallback)
+	require.NoError(t, err)
+	assert.False(t, ok, "the in-memory selection must be cleared, not left dangling")
+
+	name, ok, err := resolver.Selected("meta:bob")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "build-box", name, "a selection pointing elsewhere must be left alone")
+}
+
 // TestSelect_UnknownNameDoesNotRecordASelection: a failed select that still
 // moved the default would be worse than one that did nothing.
 func TestSelect_UnknownNameDoesNotRecordASelection(t *testing.T) {

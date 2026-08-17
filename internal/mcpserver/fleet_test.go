@@ -128,6 +128,50 @@ func TestList_RefreshProbesAndCacheDoesNot(t *testing.T) {
 	}
 }
 
+// TestList_UnreachableDetailNeverLeaksTheGRPCEnvelope covers both halves of
+// the listing's health, because they used to disagree: the live probe ran its
+// failure through the central mapping and the cached one did not, so a
+// powered-off box read as "connection refused" after a refresh and as
+// "rpc error: code = Unavailable desc = connection refused" from cache — the
+// exact envelope issue #19 says must never reach a model's context.
+func TestList_UnreachableDetailNeverLeaksTheGRPCEnvelope(t *testing.T) {
+	f := newFixture(t, fixtureOptions{probeTimeout: 200 * time.Millisecond})
+	f.add("cached", "cached.internal:8722", nil)
+	f.add("probed", "probed.internal:8722", nil)
+
+	// A cached failed probe, as the pool's background health loop records it:
+	// the raw gRPC error, exactly as it came off the wire.
+	f.clients.setCached("cached", client.HealthStatus{
+		Reachable: false,
+		CheckedAt: time.Now(),
+		Err:       status.Error(codes.Unavailable, "connection refused"),
+	})
+	f.clients.host("probed").setErr(status.Error(codes.Unavailable, "connection refused"))
+
+	for _, refresh := range []bool{false, true} {
+		out := structured[listResult](t, f.ok("sandbox_list", map[string]any{"refresh": refresh}, ""))
+		require.Len(t, out.Sandboxes, 2)
+
+		name := "cached"
+		if refresh {
+			name = "probed"
+		}
+		var line string
+		for _, sb := range out.Sandboxes {
+			if sb.Name == name {
+				require.Equal(t, "unreachable", sb.Health)
+				line = sb.Detail
+			}
+		}
+		require.NotEmptyf(t, line, "%s should say why it is unreachable (refresh=%v)", name, refresh)
+		assert.NotContainsf(t, line, "rpc error: code =",
+			"refresh=%v leaked the gRPC envelope into the model's context: %q", refresh, line)
+		assert.NotContainsf(t, line, "desc =", "refresh=%v leaked the gRPC envelope: %q", refresh, line)
+		assert.Containsf(t, line, "connection refused",
+			"refresh=%v dropped the reason along with the envelope: %q", refresh, line)
+	}
+}
+
 // TestList_UnreachableSandboxDoesNotHangTheCall covers the powered-off box.
 // One of them must not hold up the listing, and a per-sandbox deadline is
 // what makes that true regardless of how many are off.

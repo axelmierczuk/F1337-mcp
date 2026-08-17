@@ -71,6 +71,14 @@ on the name rather than name-and-version means upgrading a client does not
 silently drop its selection. A client that runs several concurrent sessions and
 wants each to hold its own target sets `io.sandboxd/clientId`.
 
+A selection made under the per-process fallback is held in memory and never
+written to the registry. The fallback is `process:<pid>`, and a pid is reused:
+persisting under one would let an unrelated later process inherit a target
+chosen by a session that ended weeks ago. That is implicit targeting reached by
+a different route, and it is the failure this whole ordering exists to prevent.
+An identity that cannot be keyed to anything stable gets a selection that lasts
+as long as the process and no longer.
+
 **Handles** are derived from the sandbox name — `sbx_` plus a truncated
 SHA-256 — rather than minted and stored. That makes them stable across a
 restart of both the server and the registry with nothing extra to persist, and

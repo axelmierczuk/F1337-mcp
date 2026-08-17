@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -172,13 +173,29 @@ type Options struct {
 
 // Resolver applies the resolution order against a registry.
 //
-// It holds no in-memory selection state: every sticky default lives in the
-// registry file, which is what lets it survive a restart and what keeps two
-// MCP servers sharing a config directory from disagreeing about who selected
-// what.
+// A sticky default for an identified client lives in the registry file, which
+// is what lets it survive a restart and what keeps two MCP servers sharing a
+// config directory from disagreeing about who selected what.
+//
+// The per-process fallback identity is the exception: its selection is held in
+// memory and never written. See [Resolver.ephemeral].
 type Resolver struct {
 	fleet    *registry.Registry
 	fallback Identity
+
+	// mu guards ephemeral.
+	mu sync.RWMutex
+	// ephemeral is the sticky default for the fallback identity, held here
+	// rather than in the registry file.
+	//
+	// The fallback is "process:<pid>", and a pid is reused. Persisting a
+	// selection under it would mean an unrelated later process that happens
+	// to be handed the same pid silently inherits a target chosen by a
+	// session that ended weeks ago — which is exactly the implicit targeting
+	// the resolution order exists to prevent, arrived at by a different
+	// route. There is nothing stable to key this selection to, so it lasts as
+	// long as the process and no longer.
+	ephemeral string
 }
 
 // NewResolver returns a Resolver backed by fleet. opts may be nil.
@@ -206,8 +223,9 @@ func NewResolver(fleet *registry.Registry, opts *Options) *Resolver {
 //     the name alone rather than name+version so that upgrading the client
 //     does not silently drop its selection.
 //  3. A per-process fallback, for a request that carries no client identity
-//     at all. A selection made under it does not survive a restart, which is
-//     the honest outcome: there is nothing stable to key it to.
+//     at all. A selection made under it is held in memory and does not survive
+//     a restart, which is the honest outcome: there is nothing stable to key
+//     it to, and a pid is reused.
 func (r *Resolver) IdentityFor(req *mcp.CallToolRequest) Identity {
 	var meta map[string]any
 	if req != nil && req.Params != nil {
@@ -267,7 +285,7 @@ func (r *Resolver) ResolveFor(id Identity, explicit string) (*Target, error) {
 		return targetFor(sb, SourceArgument), nil
 	}
 
-	name, ok, err := r.fleet.GetSelection(string(id))
+	name, ok, err := r.getSelection(id)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +344,7 @@ func (r *Resolver) Select(id Identity, name string) (*Target, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := r.fleet.SetSelection(string(id), sb.Name); err != nil {
+	if err := r.setSelection(id, sb.Name); err != nil {
 		return nil, err
 	}
 	return targetFor(sb, SourceArgument), nil
@@ -334,12 +352,61 @@ func (r *Resolver) Select(id Identity, name string) (*Target, error) {
 
 // Selected returns the sandbox name id currently has selected, if any.
 func (r *Resolver) Selected(id Identity) (string, bool, error) {
-	return r.fleet.GetSelection(string(id))
+	return r.getSelection(id)
 }
 
 // Clear removes id's sticky default.
 func (r *Resolver) Clear(id Identity) error {
+	if id == r.fallback {
+		r.mu.Lock()
+		r.ephemeral = ""
+		r.mu.Unlock()
+		return nil
+	}
 	return r.fleet.ClearSelection(string(id))
+}
+
+// ClearSelectionsFor drops every sticky default pointing at sandboxName —
+// persisted and in-memory alike — and reports how many were cleared.
+//
+// sandbox_remove goes through here rather than straight to the registry so the
+// unidentified client's selection is cleared too. Missing it would leave the
+// one selection removal cannot see still aimed at a sandbox that is gone.
+func (r *Resolver) ClearSelectionsFor(sandboxName string) (int, error) {
+	cleared := 0
+	r.mu.Lock()
+	if r.ephemeral != "" && r.ephemeral == sandboxName {
+		r.ephemeral = ""
+		cleared++
+	}
+	r.mu.Unlock()
+
+	persisted, err := r.fleet.ClearSelectionsFor(sandboxName)
+	if err != nil {
+		return 0, err
+	}
+	return cleared + persisted, nil
+}
+
+// getSelection reads id's sticky default from wherever it lives.
+func (r *Resolver) getSelection(id Identity) (string, bool, error) {
+	if id == r.fallback {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		return r.ephemeral, r.ephemeral != "", nil
+	}
+	return r.fleet.GetSelection(string(id))
+}
+
+// setSelection records id's sticky default in whichever store it belongs in.
+func (r *Resolver) setSelection(id Identity, name string) error {
+	if id == r.fallback {
+		r.mu.Lock()
+		r.ephemeral = name
+		r.mu.Unlock()
+		return nil
+	}
+	return r.fleet.SetSelection(string(id), name)
 }
 
 // Names returns every registered sandbox name, in registration order.

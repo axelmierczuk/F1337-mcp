@@ -35,8 +35,9 @@ type lazyPool struct {
 	paths  credentialPaths
 	logger *slog.Logger
 
-	mu   sync.Mutex
-	pool *client.Pool
+	mu     sync.Mutex
+	pool   *client.Pool
+	closed bool
 }
 
 var _ tools.Clients = (*lazyPool)(nil)
@@ -51,6 +52,13 @@ func (l *lazyPool) get() (*client.Pool, error) {
 	defer l.mu.Unlock()
 	if l.pool != nil {
 		return l.pool, nil
+	}
+	// A handler can still be running when the session ends and Close runs.
+	// Without this it would build a *fresh* pool on the way out — new
+	// channels, new background health goroutines, and nothing left to close
+	// them, since Server.Close has already dropped its closers.
+	if l.closed {
+		return nil, fmt.Errorf("the MCP server is shutting down")
 	}
 
 	caCert, err := readCredential(l.paths.caCert, "fleet CA certificate", "sandboxctl ca init")
@@ -151,11 +159,13 @@ func (l *lazyPool) Remove(name string) {
 	}
 }
 
-// Close tears the pool down if it was ever built.
+// Close tears the pool down if it was ever built, and stops a later call from
+// building another one.
 func (l *lazyPool) Close() error {
 	l.mu.Lock()
 	pool := l.pool
 	l.pool = nil
+	l.closed = true
 	l.mu.Unlock()
 	if pool == nil {
 		return nil

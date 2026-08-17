@@ -70,8 +70,20 @@ func TestStdio_InitializeThenListTools(t *testing.T) {
 		schema, ok := tool["inputSchema"].(map[string]any)
 		require.Truef(t, ok, "tool %s has no input schema", name)
 		assert.Equalf(t, "object", schema["type"], "tool %s input schema must be an object", name)
-		_, hasProperties := schema["properties"]
-		assert.Truef(t, hasProperties, "tool %s input schema declares no properties", name)
+		properties, ok := schema["properties"].(map[string]any)
+		require.Truef(t, ok, "tool %s input schema declares no properties", name)
+
+		// "Complete" means every argument is described, not just present. An
+		// undescribed argument is one the model has to guess at, and the
+		// guess is made against a remote machine.
+		for arg, raw := range properties {
+			property, ok := raw.(map[string]any)
+			require.Truef(t, ok, "tool %s argument %s is not an object", name, arg)
+			assert.NotEmptyf(t, property["type"], "tool %s argument %s declares no type", name, arg)
+			description, _ := property["description"].(string)
+			assert.NotEmptyf(t, description,
+				"tool %s argument %s has no description; add a jsonschema tag", name, arg)
+		}
 
 		output, ok := tool["outputSchema"].(map[string]any)
 		require.Truef(t, ok, "tool %s has no output schema", name)
@@ -141,8 +153,15 @@ func assertEchoInSchema(t *testing.T, tool string, schema map[string]any) {
 // and the symptom the user sees is a client that disconnects for no stated
 // reason. The run logs at debug level so that every log line the server emits
 // is in play.
+//
+// It deliberately does not hand the server a log writer. Injecting one is what
+// a test naturally reaches for, and it is exactly what makes this test stop
+// working: with the destination overridden, a server whose *default* logger
+// wrote to stdout would still pass. So the server takes its default, and the
+// run asserts on both halves — the debug lines have to arrive on stderr, and
+// nothing but JSON-RPC may arrive on stdout.
 func TestStdio_StdoutCarriesOnlyJSONRPC(t *testing.T) {
-	lines := runOverStdioRaw(t, slog.LevelDebug, []string{
+	stdout, stderr := runOverStdioRaw(t, slog.LevelDebug, []string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"fixture-client","version":"1.0.0"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
@@ -150,14 +169,24 @@ func TestStdio_StdoutCarriesOnlyJSONRPC(t *testing.T) {
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"sandbox_info","arguments":{}}}`,
 	}, 4)
 
-	require.NotEmpty(t, lines, "the server wrote nothing to stdout at all")
-	for i, line := range lines {
+	require.NotEmpty(t, stdout, "the server wrote nothing to stdout at all")
+	for i, line := range stdout {
 		var msg map[string]any
 		require.NoErrorf(t, json.Unmarshal([]byte(line), &msg),
 			"stdout line %d is not JSON — something printed to stdout: %q", i, line)
 		assert.Equalf(t, "2.0", msg["jsonrpc"],
 			"stdout line %d is JSON but not JSON-RPC: %q", i, line)
 	}
+
+	// The other half: the logging this run provoked has to have gone
+	// somewhere, and that somewhere is stderr. Without this the test passes
+	// just as well against a server that logs nothing at all — including one
+	// whose logger was pointed at a discarded writer to make it pass.
+	joined := strings.Join(stderr, "\n")
+	assert.Contains(t, joined, "serving MCP over stdio",
+		"the server's own log lines must arrive on stderr")
+	assert.Contains(t, joined, "level=DEBUG",
+		"the run must actually log at debug level, or it proves nothing about debug output")
 }
 
 // TestStdio_ExitsWhenStdinCloses covers the client going away. An MCP server
@@ -169,7 +198,7 @@ func TestStdio_ExitsWhenStdinCloses(t *testing.T) {
 	stdoutR, stdoutW, err := os.Pipe()
 	require.NoError(t, err)
 
-	restore := swapStdio(t, stdinR, stdoutW)
+	restore := swapStdio(t, stdinR, stdoutW, os.Stderr)
 	defer restore()
 
 	// Drain stdout so the server never blocks on a full pipe.
@@ -271,8 +300,9 @@ func TestServer_StartsWithoutCredentials(t *testing.T) {
 func runOverStdio(t *testing.T, level slog.Level, requests []string) map[int]map[string]any {
 	t.Helper()
 
+	stdout, _ := runOverStdioRaw(t, level, requests, countResponses(requests))
 	byID := map[int]map[string]any{}
-	for _, line := range runOverStdioRaw(t, level, requests, countResponses(requests)) {
+	for _, line := range stdout {
 		var msg struct {
 			ID     int             `json:"id"`
 			Result json.RawMessage `json:"result"`
@@ -306,46 +336,42 @@ func countResponses(requests []string) int {
 }
 
 // runOverStdioRaw feeds requests to a server connected to the process's real
-// stdin and stdout — temporarily replaced with pipes — and returns every line
-// the server wrote to stdout.
+// stdin, stdout and stderr — temporarily replaced with pipes — and returns
+// every line the server wrote to each of stdout and stderr.
 //
 // Replacing os.Stdout is what makes this a stdout test rather than a
 // transport test: anything anywhere in the server that prints, logs, or
-// panics to stdout lands in the captured lines.
+// panics to stdout lands in the captured lines. Replacing os.Stderr too is
+// what lets the server keep its default log destination, so the test covers
+// the wiring a real `sandboxd-mcp serve` uses rather than one the test chose.
 //
 // It waits for wantResponses lines before closing stdin. Closing it earlier
 // races the handlers: the transport tears the session down on EOF, and a
 // response still being written loses that race.
-func runOverStdioRaw(t *testing.T, level slog.Level, requests []string, wantResponses int) []string {
+func runOverStdioRaw(t *testing.T, level slog.Level, requests []string, wantResponses int) (stdout, stderr []string) {
 	t.Helper()
 
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
 	stdoutR, stdoutW, err := os.Pipe()
 	require.NoError(t, err)
+	stderrR, stderrW, err := os.Pipe()
+	require.NoError(t, err)
 
-	restore := swapStdio(t, stdinR, stdoutW)
+	restore := swapStdio(t, stdinR, stdoutW, stderrW)
 	defer restore()
 
+	// No LogWriter: the server must take its own default, or this test cannot
+	// tell a logger pointed at stderr from one pointed at stdout.
 	server, err := mcpserver.New(mcpserver.Options{
 		ConfigDir: t.TempDir(),
 		Clients:   newFakeClients(),
 		LogLevel:  level,
-		LogWriter: &testWriter{t: t},
 	})
 	require.NoError(t, err)
 
-	lines := make(chan string, 64)
-	go func() {
-		defer close(lines)
-		scanner := bufio.NewScanner(stdoutR)
-		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for scanner.Scan() {
-			if line := strings.TrimSpace(scanner.Text()); line != "" {
-				lines <- line
-			}
-		}
-	}()
+	outLines := scanLines(stdoutR)
+	errLines := scanLines(stderrR)
 
 	done := make(chan error, 1)
 	go func() { done <- server.Run(context.Background()) }()
@@ -355,44 +381,75 @@ func runOverStdioRaw(t *testing.T, level slog.Level, requests []string, wantResp
 		require.NoError(t, err)
 	}
 
-	var collected []string
 	deadline := time.After(20 * time.Second)
-	for len(collected) < wantResponses {
+	for len(stdout) < wantResponses {
 		select {
-		case line, ok := <-lines:
+		case line, ok := <-outLines:
 			if !ok {
-				t.Fatalf("stdout closed after %d of %d responses", len(collected), wantResponses)
+				t.Fatalf("stdout closed after %d of %d responses", len(stdout), wantResponses)
 			}
-			collected = append(collected, line)
+			stdout = append(stdout, line)
+		case line := <-errLines:
+			stderr = append(stderr, line)
 		case <-deadline:
-			t.Fatalf("timed out after %d of %d responses", len(collected), wantResponses)
+			t.Fatalf("timed out after %d of %d responses", len(stdout), wantResponses)
 		}
 	}
 
 	// Closing stdin is how a client disconnects, and how this run ends.
 	require.NoError(t, stdinW.Close())
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-deadline:
-		t.Fatal("server did not shut down after stdin closed")
+	for draining := true; draining; {
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+			draining = false
+		case line := <-errLines:
+			stderr = append(stderr, line)
+		case <-deadline:
+			t.Fatal("server did not shut down after stdin closed")
+		}
 	}
 
 	require.NoError(t, stdoutW.Close())
-	for line := range lines {
-		collected = append(collected, line)
+	for line := range outLines {
+		stdout = append(stdout, line)
+	}
+	require.NoError(t, stderrW.Close())
+	for line := range errLines {
+		stderr = append(stderr, line)
 	}
 	require.NoError(t, stdoutR.Close())
+	require.NoError(t, stderrR.Close())
 	_ = stdinR.Close()
-	return collected
+
+	for _, line := range stderr {
+		t.Logf("server stderr: %s", line)
+	}
+	return stdout, stderr
 }
 
-// swapStdio points the process's stdin and stdout at pipes for the duration
-// of one test. Tests that call it must not run in parallel: os.Stdin and
-// os.Stdout are process-wide.
-func swapStdio(t *testing.T, stdin, stdout *os.File) func() {
+// scanLines drains r into a channel, so a writer never blocks on a full pipe.
+func scanLines(r *os.File) <-chan string {
+	lines := make(chan string, 256)
+	go func() {
+		defer close(lines)
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			if line := strings.TrimSpace(scanner.Text()); line != "" {
+				lines <- line
+			}
+		}
+	}()
+	return lines
+}
+
+// swapStdio points the process's standard streams at pipes for the duration
+// of one test. Tests that call it must not run in parallel: os.Stdin,
+// os.Stdout and os.Stderr are process-wide.
+func swapStdio(t *testing.T, stdin, stdout, stderr *os.File) func() {
 	t.Helper()
-	origIn, origOut := os.Stdin, os.Stdout
-	os.Stdin, os.Stdout = stdin, stdout
-	return func() { os.Stdin, os.Stdout = origIn, origOut }
+	origIn, origOut, origErr := os.Stdin, os.Stdout, os.Stderr
+	os.Stdin, os.Stdout, os.Stderr = stdin, stdout, stderr
+	return func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr }
 }

@@ -39,7 +39,10 @@
 //	    }, func(ctx context.Context, req *mcp.CallToolRequest, t *selection.Target, in editArgs) (editResult, error) {
 //	        files, err := r.Deps().Clients.Files(t.Name(), t.Address())
 //	        if err != nil {
-//	            return editResult{}, err
+//	            // Mapped too: a pool that could not be built fails here, and
+//	            // "no control certificate at …" still has to name the sandbox
+//	            // the model was targeting.
+//	            return editResult{}, t.Call().Map(err)
 //	        }
 //	        resp, err := files.EditFile(ctx, &sandboxdv1.EditFileRequest{
 //	            Path: in.Path, OldString: in.OldString, NewString: in.NewString,

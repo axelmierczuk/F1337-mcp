@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -103,7 +104,13 @@ type Server struct {
 	fleet     *registry.Registry
 	clients   tools.Clients
 	logger    *slog.Logger
-	closers   []func() error
+
+	// closeMu guards closers. Run closes the server from a defer, and a
+	// caller that drives Run in a goroutine will reasonably also write
+	// `defer server.Close()` — so two closes can genuinely overlap, and
+	// read-modify-writing the slice without a lock is a data race.
+	closeMu sync.Mutex
+	closers []func() error
 }
 
 // New builds a server: opens the registry, prepares the client pool, and
@@ -226,15 +233,20 @@ func (s *Server) Connect(ctx context.Context, t mcp.Transport) (*mcp.ServerSessi
 // Registrations returns every tool registered, for tests that walk them.
 func (s *Server) Registrations() []tools.Registration { return s.registrar.Registrations() }
 
-// Close releases the client pool.
+// Close releases the client pool. It is safe to call more than once and from
+// more than one goroutine; every call after the first is a no-op.
 func (s *Server) Close() error {
+	s.closeMu.Lock()
+	closers := s.closers
+	s.closers = nil
+	s.closeMu.Unlock()
+
 	var firstErr error
-	for _, closeFn := range s.closers {
+	for _, closeFn := range closers {
 		if err := closeFn(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	s.closers = nil
 	return firstErr
 }
 

@@ -9,10 +9,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
 )
@@ -388,8 +390,8 @@ func checkAddress(address string) error {
 
 // RemoveArgs are the arguments to sandbox_remove.
 type RemoveArgs struct {
-	// Name is the sandbox to deregister.
-	Name string `json:"name" jsonschema:"name of the sandbox to deregister"`
+	// Name is the sandbox to deregister, by name or handle.
+	Name string `json:"name" jsonschema:"name or handle of the sandbox to deregister"`
 }
 
 // RemoveResult is the sandbox_remove result.
@@ -419,8 +421,10 @@ func (r *Registrar) sandboxRemove(_ context.Context, _ *mcp.CallToolRequest, in 
 	// reverse order would leave one, and a dangling selection is worse than
 	// none. This reaches every client identity, not just the caller: the
 	// client that ran sandbox_remove is rarely the only one that had it
-	// selected.
-	cleared, err := d.Fleet.ClearSelectionsFor(sb.Name)
+	// selected. It goes through the resolver rather than straight to the
+	// registry so it also reaches the unidentified client, whose selection is
+	// held in memory rather than in the registry file.
+	cleared, err := d.Resolver.ClearSelectionsFor(sb.Name)
 	if err != nil {
 		return RemoveResult{}, "", err
 	}
@@ -563,9 +567,17 @@ func (r *Registrar) sandboxInfo(ctx context.Context, _ *mcp.CallToolRequest, tar
 	// The health probe is the cheap call and this one is the expensive one,
 	// so take the running-process count from whatever the cache already has
 	// rather than paying for a second round trip.
+	//
+	// The cached status is the agent's own opinion of itself — serving,
+	// degraded, draining — and is worth more than "the call went through", so
+	// it wins. A cache with no opinion does not: GetHostInfo just answered,
+	// and downgrading that to "unknown" would report a call that worked as
+	// one that told us nothing.
 	if h, ok := r.deps.Clients.Health(target.Name()); ok && h.Reachable {
 		out.RunningProcesses = h.RunningProcesses
-		out.Health = healthString(h.Status)
+		if cached := healthString(h.Status); cached != healthUnknown {
+			out.Health = cached
+		}
 	}
 
 	return out, nil
@@ -648,7 +660,7 @@ func (r *Registrar) healthFor(ctx context.Context, sandboxes []registry.Sandbox,
 			case !ok:
 				out[sb.Name] = healthView{status: healthUnknown}
 			case !h.Reachable:
-				out[sb.Name] = healthView{status: healthUnreachable, detail: cacheDetail(h.Err)}
+				out[sb.Name] = healthView{status: healthUnreachable, detail: shortDetail(h.Err)}
 			default:
 				out[sb.Name] = healthView{
 					status:       healthString(h.Status),
@@ -704,10 +716,7 @@ func (r *Registrar) probe(ctx context.Context, sb registry.Sandbox, timeout time
 
 	resp, err := host.Health(probeCtx, &sandboxdv1.HealthRequest{})
 	if err != nil {
-		return healthView{
-			status: healthUnreachable,
-			detail: shortDetail(mcperrMap(sb, err)),
-		}
+		return healthView{status: healthUnreachable, detail: shortDetail(err)}
 	}
 	return healthView{
 		status:       healthString(resp.GetStatus()),
@@ -717,31 +726,33 @@ func (r *Registrar) probe(ctx context.Context, sb registry.Sandbox, timeout time
 	}
 }
 
-// mcperrMap runs a probe failure through the central mapping so an
-// unreachable sandbox reads the same in a listing as it does in a tool error.
-func mcperrMap(sb registry.Sandbox, err error) error {
-	t := &selection.Target{Sandbox: sb}
-	return t.Call().Map(err)
-}
-
-// cacheDetail renders the error a cached failed probe recorded.
-func cacheDetail(err error) string {
-	if err == nil {
-		return ""
-	}
-	return shortDetail(err)
-}
-
-// shortDetail keeps a per-sandbox detail line from turning a listing into a
-// wall of text. The full message is always available from a direct call
-// against that sandbox.
+// shortDetail renders why a sandbox is not serving, for the detail column of
+// a listing.
+//
+// It goes through mcperr.Message rather than err.Error() for two reasons.
+// First, a raw gRPC error stringifies as "rpc error: code = Unavailable desc =
+// connection refused", and that envelope must not reach the model's context —
+// which is exactly what the cached-health path used to do, because only the
+// live-probe path was mapped. Second, the row this sits in already names the
+// sandbox, its address and its health, so the sentence Call.Map builds would
+// repeat all three on every line of every fleet check.
+//
+// The length cap keeps one unreachable sandbox from turning a twenty-machine
+// listing into a wall of text; the full mapped error is always available from
+// a direct call against that sandbox.
 func shortDetail(err error) string {
 	const maxDetail = 160
-	msg := strings.TrimSpace(err.Error())
+	msg := strings.TrimSpace(mcperr.Message(err))
 	if len(msg) <= maxDetail {
 		return msg
 	}
-	return msg[:maxDetail] + "…"
+	// Cut on a rune boundary: msg carries an agent-supplied message, and
+	// slicing mid-rune would put invalid UTF-8 into the result.
+	cut := maxDetail
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "…"
 }
 
 // protoPlatformString renders a proto Platform as "os/arch".
