@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -20,11 +21,13 @@ import (
 	"os/exec"
 	"strconv"
 	"time"
+
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: helpers <serve|spew|tree|sleep> ...")
+		fail("usage: helpers <serve|spew|tree|sleep|winsize> ...")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -35,6 +38,8 @@ func main() {
 		tree(os.Args[2:])
 	case "sleep":
 		sleepForever()
+	case "winsize":
+		winsize()
 	default:
 		fail("unknown command " + os.Args[1])
 	}
@@ -167,6 +172,33 @@ func tree(args []string) {
 		}
 	}
 	time.Sleep(treeLifetime)
+}
+
+// winsizeLifetime bounds a session that nothing ever ends. See treeLifetime:
+// no scenario asserts that this process is still running, so a stop three
+// orders of magnitude beyond any deadline cannot make an assertion pass for the
+// wrong reason — it only keeps a failed run from stranding a process.
+const winsizeLifetime = 5 * time.Minute
+
+// winsize reports the terminal it was given, and again whenever it changes.
+//
+// This is what makes a resize assertable end to end. The size is read inside
+// the session, on the sandbox, through the same platform call `fleetctl shell`
+// reads the local terminal with — so a scenario that resizes its own terminal
+// and sees the new size printed here has followed a SIGWINCH from the
+// operator's window, through the client, over the stream, and into a
+// TIOCSWINSZ on the far end.
+//
+// A program that renders to the wrong width is the whole failure this covers,
+// and it is invisible to every other kind of assertion: `top` on an 80-column
+// terminal that is really 200 wide produces output, just useless output.
+func winsize() {
+	ctx, cancel := context.WithTimeout(context.Background(), winsizeLifetime)
+	defer cancel()
+
+	platform.WatchWindowSize(ctx, os.Stdin.Fd(), func(columns, rows int) {
+		fmt.Printf("size %dx%d\n", columns, rows)
+	})
 }
 
 // sleepForever blocks until something kills the process.

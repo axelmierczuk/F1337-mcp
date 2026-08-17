@@ -36,7 +36,13 @@ A Go toolchain and a loopback interface. No Docker, no root, no network, no
 the scenarios run on a sandbox are built from `testdata/helpers` at startup
 rather than borrowed from whatever `python3` happens to be present.
 
-It takes about twenty seconds.
+The shell scenarios additionally need a pseudo-terminal, because they drive
+`fleetctl shell` the way an operator does — the test allocates a terminal,
+starts the command attached to it, and types into it. Every developer machine
+and CI runner has one; a container built without `/dev/pts` does not, and those
+scenarios skip there rather than failing.
+
+It takes about twenty-five seconds.
 
 ## What runs without a container
 
@@ -68,6 +74,12 @@ Everything except one scenario.
 | `TestListReportsAnUnreachableSandboxWithoutWaitingForIt` | A dead sandbox is reported dead in the same listing that still reports its neighbour live. |
 | `TestFileSearchToolsWalkTheSandbox` | `fleet_ls`, `fleet_glob` and `fleet_grep` — the last of which is a server stream — over a real tree. |
 | `TestExecIsAudited` | The exec reaches the audit log, attributed to the authenticated principal, with no output in it. |
+| `TestShellRunsOnTheSelectedSandboxAndReturnsItsExitCode` | `fleetctl select`, then `fleetctl shell` on a real pseudo-terminal: the session runs on the selected host, and the remote shell's exit code becomes the CLI's own. |
+| `TestShellSessionIsAuditedWithoutItsContents` | The session reaches the audit log with its principal, sandbox, start, duration and exit status — and neither what was typed nor what was printed appears there or in the agent's own log. |
+| `TestShellCtrlCInterruptsTheRemoteProgramRatherThanTheClient` | Ctrl-C reaches the remote foreground process; the client survives it and the session keeps answering. |
+| `TestShellResizeReflowsTheRemoteProgram` | Resizing the local terminal changes the size a program *inside* the session reads. |
+| `TestShellClosingTheClientKillsTheRemoteTree` | Killing the client leaves no member of the session's process group alive, and does not touch a bystander. |
+| `TestShellRefusesWhenStdinIsNotATerminal` | An interactive command run from a script is refused, with the tool that does the job named. |
 | `TestLargeFileTransferRoundTrips` | 24 MiB pushed and pulled back with matching digests, and a repeat push that moves nothing. |
 | `TestTransferTreeRoundTrips` | A directory transfer with the default exclusions applied. |
 
@@ -104,8 +116,9 @@ body runs the pattern has already decided which bodies there are.
 
 - **Windows sandboxes.** Every scenario skips on Windows: the workloads are
   POSIX (`sh -c`, `cat`, a process tree killed by group). The Windows-specific
-  behaviour — job objects, `TerminateJobObject`, path handling — has unit tests
-  and runs on the CI matrix, but no scenario here drives a Windows agent. A run
+  behaviour — job objects, `TerminateJobObject`, ConPTY sessions, path handling
+  — has unit tests and runs on the CI matrix, but no scenario here drives a
+  Windows agent. A run
   on Windows says so on stderr before it starts, because `go test` reports a
   package whose every test skipped as `ok` and an `ok` that ran nothing is worth
   more noise than that.
