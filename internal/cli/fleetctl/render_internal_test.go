@@ -25,9 +25,12 @@ func TestSafeText_StripsWhatAnAgentCouldUseToRewriteTheDisplay(t *testing.T) {
 		"carriage return": {"degraded\rserving", "degraded serving"},
 		"newline":         {"line one\nline two", "line one line two"},
 		"tabs":            {"a\t\tb", "a b"},
-		"bidi override":   {"disk ‮full", "disk full"},
-		"leading space":   {"  padded  ", "padded"},
-		"plain":           {"disk 91% full", "disk 91% full"},
+		// Escaped rather than written literally: a bidi override in a source
+		// file does to the reviewer exactly what this test says it must not do
+		// to the operator.
+		"bidi override": {"disk \u202efull", "disk full"},
+		"leading space": {"  padded  ", "padded"},
+		"plain":         {"disk 91% full", "disk 91% full"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := safeText(tc.in)
