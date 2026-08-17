@@ -49,7 +49,6 @@ var bins binaries
 
 // binaries locates the built commands.
 type binaries struct {
-	dir      string
 	agent    string
 	mcp      string
 	fleetctl string
@@ -108,7 +107,6 @@ func buildBinaries(dir string) (binaries, error) {
 		}
 	}
 	b := binaries{
-		dir:      dir,
 		agent:    filepath.Join(dir, exeName("fleet-agent")),
 		mcp:      filepath.Join(dir, exeName("fleet-mcp")),
 		fleetctl: filepath.Join(dir, exeName("fleetctl")),

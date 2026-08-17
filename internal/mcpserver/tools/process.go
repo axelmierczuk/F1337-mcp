@@ -193,7 +193,11 @@ type ProcessLine struct {
 	ExitCode *int32 `json:"exit_code,omitempty"`
 	// Signal names the signal that killed the process, when one did.
 	Signal string `json:"signal,omitempty"`
-	// RestartCount is how many times the supervisor has restarted it.
+	// RestartCount is how many times the *restart policy* has restarted it,
+	// which is the count max_restarts bounds. A fleet_process_restart the
+	// caller asked for does not move it: an explicit restart that spent the
+	// policy's budget would let a developer restarting a dev server by hand
+	// exhaust the automatic recovery it needs when it crashes on its own.
 	RestartCount uint32 `json:"restart_count,omitempty"`
 	// LastLogLine is the most recent output line, bounded.
 	LastLogLine string `json:"last_log_line,omitempty"`

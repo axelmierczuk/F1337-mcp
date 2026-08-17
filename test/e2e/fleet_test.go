@@ -39,8 +39,6 @@ type fleet struct {
 	fingerprint string
 	enrollAddr  string
 	control     *proc
-
-	agents map[string]*agent
 }
 
 // agent is one enrolled fleet-agent: its enrollment directory, the daemon
@@ -82,7 +80,7 @@ func newFleet(t *testing.T) *fleet {
 		t.Fatalf("create control config directory: %v", err)
 	}
 
-	f := &fleet{t: t, root: root, ctlDir: ctlDir, agents: map[string]*agent{}}
+	f := &fleet{t: t, root: root, ctlDir: ctlDir}
 
 	out := runCLI(t, bins.fleetctl, []string{"ca", "init"}, f.ctlEnv())
 	f.fingerprint = valueAfter(t, out, "SHA256 Fingerprint=")
@@ -245,7 +243,6 @@ func (f *fleet) enroll(name string, opts enrollOptions) *agent {
 		env:  env,
 		args: []string{"serve", "--config", filepath.Join(dir, "agent.yaml"), "--log-level", "debug"},
 	}
-	f.agents[name] = a
 	f.startAgent(a)
 	return a
 }

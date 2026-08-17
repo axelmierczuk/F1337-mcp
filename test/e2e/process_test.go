@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,6 +47,87 @@ func TestProcessLogsFollowReturnsAtItsDeadline(t *testing.T) {
 	}
 	if !contains(logs.Logs, "tick ") {
 		t.Fatalf("the followed logs do not carry the process's output: %s", logs.Logs)
+	}
+}
+
+// TestProcessRestartKeepsItsIdentityAndComesBackReady restarts a dev server
+// through the tool a developer would use after changing a config file.
+//
+// A restart is a stop and a start with the same spec, and the contract is that
+// it is the *same* process afterwards: same id, same name, a restart count that
+// went up, and a readiness probe that passed again. Its probe here is a log
+// pattern rather than a port, which is the other probe kind and the one that
+// has to survive the log buffer being handed to a new run.
+func TestProcessRestartKeepsItsIdentityAndComesBackReady(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+	s := f.connect(t)
+	s.ok("fleet_select", map[string]any{"name": a.name})
+
+	port := freePort(t)
+	started := startProcess(t, s, map[string]any{
+		"name": "web-dev",
+		"argv": []string{bins.helpers, "serve", strconv.Itoa(port), "first"},
+		"ready_probe": map[string]any{
+			"log_pattern":     "listening on",
+			"timeout_seconds": 30,
+		},
+	})
+	defer stopProcess(t, s, started)
+
+	if started.Ready == nil || !*started.Ready {
+		t.Fatalf("a log_pattern probe did not report readiness: %+v", started)
+	}
+	firstPID := started.Process.PID
+
+	restarted := structured[processStartResult](t, s.okAs("fleet_process_restart", map[string]any{
+		"process_id":            started.Process.ProcessID,
+		"ready_timeout_seconds": 30,
+	}, callOptions{timeout: 120 * time.Second}))
+
+	if restarted.ReadyError != "" {
+		t.Fatalf("the restarted process did not become ready: %s\n%s", restarted.ReadyError, restarted.RecentLogs)
+	}
+	if restarted.Ready == nil || !*restarted.Ready {
+		t.Fatalf("a restart of a process with a probe must report readiness: %+v", restarted)
+	}
+	if restarted.Process.ProcessID != started.Process.ProcessID {
+		t.Fatalf("the restart minted a new process id %q, was %q", restarted.Process.ProcessID, started.Process.ProcessID)
+	}
+	// The counter deliberately does not move. It bounds the restarts the
+	// supervisor performs under the restart policy, and charging an explicit
+	// request against that budget would let a developer restarting their dev
+	// server by hand exhaust the automatic recovery they will need when it
+	// crashes at three in the morning.
+	if restarted.Process.RestartCount != started.Process.RestartCount {
+		t.Fatalf("an explicit restart charged the restart policy's budget: count went from %d to %d",
+			started.Process.RestartCount, restarted.Process.RestartCount)
+	}
+	if restarted.Process.PID == firstPID {
+		t.Fatalf("the restart reports the pid of the run it replaced (%d)", firstPID)
+	}
+	if firstPID > 0 {
+		waitFor(t, 30*time.Second, "the replaced run to be gone", func() (bool, string) {
+			if !processAlive(int(firstPID)) {
+				return true, ""
+			}
+			return false, fmt.Sprintf("pid %d is still alive after its process was restarted", firstPID)
+		})
+	}
+
+	// It is serving again, which is the claim readiness makes and the only one
+	// worth checking from outside the agent.
+	fwd := structured[forwardResult](t, s.ok("fleet_forward", map[string]any{"remote_port": port}))
+	if got := httpGet(t, "http://"+fwd.LocalAddress+"/"); got != "first" {
+		t.Fatalf("the restarted server answered %q", got)
+	}
+	s.ok("fleet_forward", map[string]any{"remote_port": port, "stop": true})
+
+	// And the log history of both runs is there: a restart that reset the
+	// buffer would lose the output that explains why it was restarted.
+	logs := readLogs(t, s, started.Process.ProcessID)
+	if strings.Count(logs.Logs, "listening on "+strconv.Itoa(port)) < 2 {
+		t.Fatalf("the logs do not carry both runs:\n%s", logs.Logs)
 	}
 }
 
