@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
@@ -185,46 +187,114 @@ func TestServer_FactoryErrorAbortsStartup(t *testing.T) {
 	assert.Contains(t, err.Error(), "no state directory")
 }
 
+// rpcResult is what an in-flight call came back with, recorded at the moment
+// it came back.
+//
+// The fields are exported for one reason, and it is not style. #59 reported
+// this test's failure as `{resp:<nil> err:0xc000010100}` and the investigation
+// stopped there for want of the error. That was fmt, not brevity: %+v walks a
+// struct with reflection, reflect refuses to hand out an interface for an
+// unexported field, and so fmt never gets to call Error() and prints the
+// pointer instead. A struct with unexported fields cannot report an error it
+// holds, however it is formatted.
+type rpcResult struct {
+	Resp *sandboxdv1.HealthResponse
+	Err  error
+	// CtxErr is the caller's own context at the moment the call returned. It
+	// is what separates "the server cut this RPC" from "the client gave up on
+	// it", which is the question #59 could not answer.
+	CtxErr error
+	// Elapsed is reported, never asserted on. A call cut at the shutdown
+	// signal and a call that ran out its own 20s deadline are different
+	// failures, and this is what tells them apart in the log.
+	Elapsed time.Duration
+}
+
+// String spells out the gRPC status, because the code is the fact that
+// separates the two hypotheses on #59: Unavailable or a transport close is the
+// daemon cutting the call, DeadlineExceeded or Canceled is the caller or the
+// test giving up on it.
+func (r rpcResult) String() string {
+	var what string
+	switch st, ok := status.FromError(r.Err); {
+	case r.Err == nil:
+		what = fmt.Sprintf("no error, status %v", r.Resp.GetStatus())
+	case ok:
+		what = fmt.Sprintf("gRPC %s: %q", st.Code(), st.Message())
+	default:
+		what = fmt.Sprintf("non-status error: %v", r.Err)
+	}
+	return fmt.Sprintf("%s; caller context: %v; %s after the call started",
+		what, r.CtxErr, r.Elapsed.Round(time.Millisecond))
+}
+
 // The shutdown contract: an RPC already running when the daemon is signalled
 // gets to finish, and its result reaches the caller.
+//
+// The ordering this needs used to be established with a fixed 100ms sleep and
+// then sampled once, which is the shape #59 suspects. Two things replace it.
+// The daemon's listener refusing a dial is a recorded fact that the drain has
+// started, so nothing has to be timed. And the handler records its own stream
+// context being cancelled, which is how gRPC cuts an in-flight RPC — a fact
+// written on the server at the moment it happens, covering the whole time the
+// handler is in the call rather than one sampled instant.
+//
+// The client-side sample is kept as well, because that is the assertion #59
+// tripped, and a run that trips it now says what the RPC actually came back
+// with and what the daemon was doing at the time.
 func TestServer_ShutdownDrainsInFlightRPCs(t *testing.T) {
 	fleet := newTestFleet(t)
 	svc := newCountingService()
 	svc.block = make(chan struct{})
 
-	h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)})
+	// The daemon's own log, kept so that a failure here can say what the
+	// shutdown path thought it was doing — whether it logged "drained" while
+	// a handler was still inside a call, or hit its drain deadline and
+	// cancelled. Neither is visible from the client side alone.
+	log, serverLog := capturedLogger()
+	h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)},
+		func(o *agent.Options) { o.Log = log })
 
 	certPEM, keyPEM := fleet.controlLeaf()
 	hostClient := h.hostClient(t, fleet.ca.CertPEM(), certPEM, keyPEM)
 
-	type result struct {
-		resp *sandboxdv1.HealthResponse
-		err  error
-	}
-	results := make(chan result, 1)
+	results := make(chan rpcResult, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		resp, err := hostClient.Health(ctx, &sandboxdv1.HealthRequest{})
-		results <- result{resp, err}
+		started := time.Now()
+		// Marked, so the handler holds this call and not the pool's background
+		// health probe; see holdHeader.
+		resp, err := hostClient.Health(hold(ctx), &sandboxdv1.HealthRequest{})
+		results <- rpcResult{Resp: resp, Err: err, CtxErr: ctx.Err(), Elapsed: time.Since(started)}
 	}()
 
-	// Wait until the handler is genuinely inside the call, so the shutdown
+	// Wait until the handler is genuinely inside *this* call, so the shutdown
 	// that follows is racing a real in-flight RPC rather than an idle server.
+	//
+	// "This call" is the part #59 turned on: only a marked call closes
+	// entered, and the marker is on the call above and nowhere else. A future
+	// edit that drops it does not quietly weaken this into "some call entered"
+	// — nothing closes entered at all and the wait below fails outright.
 	select {
 	case <-svc.entered:
 	case <-time.After(10 * time.Second):
-		t.Fatal("handler never entered")
+		t.Fatalf("handler never entered; daemon log:\n%s", serverLog)
 	}
 
-	// Signal shutdown while the call is still running.
+	// Signal shutdown while the call is still running, and wait for the
+	// daemon to prove it started: GracefulStop closes the listener before it
+	// waits on any handler. Only this test can release the handler, so a
+	// refused dial here means the drain is under way with an RPC still in it.
 	h.cancel()
-	time.Sleep(100 * time.Millisecond)
+	h.awaitNotAccepting(t, serverLog)
 
-	// Nothing has returned yet: the drain is waiting on the handler.
+	// Nothing has come back yet: the drain is waiting on the handler. This is
+	// the client's side of the contract, and the assertion #59 tripped.
 	select {
 	case r := <-results:
-		t.Fatalf("in-flight RPC returned before its handler finished: %+v", r)
+		t.Fatalf("an RPC already in flight came back while its handler was still running: %s\ndaemon log:\n%s",
+			r, serverLog)
 	default:
 	}
 
@@ -232,10 +302,19 @@ func TestServer_ShutdownDrainsInFlightRPCs(t *testing.T) {
 
 	select {
 	case r := <-results:
-		require.NoError(t, r.err, "an RPC already in flight must complete rather than being cut off")
-		assert.Equal(t, sandboxdv1.HealthResponse_STATUS_SERVING, r.resp.GetStatus())
+		// The server's side, and the one that cannot be raced: gRPC cancels a
+		// handler's context when it drops the stream, so an empty record here
+		// means nothing cut this RPC at any point between the shutdown signal
+		// and the handler being released.
+		require.Empty(t, svc.wasCut(),
+			"the shutdown cancelled an in-flight handler instead of waiting for it; the call saw %s\ndaemon log:\n%s",
+			r, serverLog)
+		require.NoError(t, r.Err,
+			"an RPC already in flight must complete rather than being cut off: %s\nhandlers entered: %d\ndaemon log:\n%s",
+			r, svc.servedCount(), serverLog)
+		assert.Equal(t, sandboxdv1.HealthResponse_STATUS_SERVING, r.Resp.GetStatus())
 	case <-time.After(10 * time.Second):
-		t.Fatal("in-flight RPC never returned")
+		t.Fatalf("in-flight RPC never returned; daemon log:\n%s", serverLog)
 	}
 
 	require.NoError(t, h.wait(t))
@@ -257,7 +336,7 @@ func TestServer_ShutdownCutsOffAtTheDrainDeadline(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		_, _ = hostClient.Health(ctx, &sandboxdv1.HealthRequest{})
+		_, _ = hostClient.Health(hold(ctx), &sandboxdv1.HealthRequest{})
 	}()
 
 	select {

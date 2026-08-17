@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
@@ -140,6 +142,20 @@ type countingService struct {
 	block   chan struct{}
 	entered chan struct{}
 	once    sync.Once
+
+	// cut records the stream context's error if it is cancelled while Health
+	// is blocked. gRPC cancels an in-flight handler's context when it drops
+	// the stream — Server.Stop does it explicitly, a transport that goes away
+	// does it implicitly — so this is the server's own record of an RPC being
+	// cut off, written at the moment it happens.
+	//
+	// The client cannot record the same thing reliably. Its call returns
+	// asynchronously, and by the time its goroutine runs again the test may
+	// already have released the handler, so anything it samples about the
+	// handler afterwards can be true for the wrong reason. This is the same
+	// fact observed where nothing can race it, and it holds for the whole time
+	// the handler is in the call rather than for one sampled instant. See #59.
+	cut atomic.Pointer[string]
 }
 
 func newCountingService() *countingService {
@@ -155,11 +171,54 @@ func (s *countingService) Health(ctx context.Context, _ *sandboxdv1.HealthReques
 	if name, ok := agent.PrincipalFromContext(ctx); ok {
 		s.principal.Store(&name)
 	}
-	if s.block != nil {
+	if s.block != nil && marked(ctx) {
 		s.once.Do(func() { close(s.entered) })
-		<-s.block
+		select {
+		case <-s.block:
+		case <-ctx.Done():
+			// Recorded, then the wait resumes. Returning here instead would
+			// change what the drain-deadline test covers: that one is about a
+			// handler which never returns at all, and a handler that unwinds
+			// on cancellation is not one.
+			reason := ctx.Err().Error()
+			s.cut.Store(&reason)
+			<-s.block
+		}
 	}
 	return &sandboxdv1.HealthResponse{Status: sandboxdv1.HealthResponse_STATUS_SERVING}, nil
+}
+
+// holdHeader marks a call as the one a blocking countingService should hold.
+//
+// The handler needs it because the test's own RPC is not the only caller that
+// reaches it. client.Pool starts a background health probe for every channel
+// it dials and fires the first one immediately, and that probe lands in this
+// same Health. Without a marker the handler cannot tell the two apart, so the
+// probe could be the call that closed entered and wedged itself on block —
+// leaving a test that believed its own RPC was in flight when it had not yet
+// reached the wire. Cancelling the server at that point failed the test's call
+// in a gRPC retry against a listener that had just closed, which is what #59
+// looked like from the outside.
+const holdHeader = "x-fleet-test-hold"
+
+// hold marks an outgoing call for the blocking handler. See holdHeader.
+func hold(ctx context.Context) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, holdHeader, "1")
+}
+
+// marked reports whether an incoming call carries the hold marker.
+func marked(ctx context.Context) bool {
+	md, ok := metadata.FromIncomingContext(ctx)
+	return ok && len(md.Get(holdHeader)) > 0
+}
+
+// wasCut reports the stream context's error if this handler's RPC was dropped
+// while it was still running, and the empty string if it was not.
+func (s *countingService) wasCut() string {
+	if reason := s.cut.Load(); reason != nil {
+		return *reason
+	}
+	return ""
 }
 
 func (s *countingService) servedCount() int64 { return s.served.Load() }
@@ -233,6 +292,12 @@ type harness struct {
 	done    chan error
 	status  *agent.Status
 
+	// lis is the server's own listener, so a test can observe that it has
+	// stopped accepting. GracefulStop closes it before it waits on any
+	// handler, which makes "a dial is refused" a recorded fact that the drain
+	// is under way — the thing a fixed sleep could only guess at.
+	lis *bufconn.Listener
+
 	// stopOnce makes waiting idempotent, so a test that collects Serve's
 	// result and the cleanup that collects it again do not both try to read
 	// the single value off done.
@@ -273,6 +338,7 @@ func start(t *testing.T, cfg *agent.Config, regs []agent.Registration, opts ...f
 		cancel: cancel,
 		done:   done,
 		status: srv.Deps().Status,
+		lis:    lis,
 	}
 	t.Cleanup(func() { h.stop(t) })
 	return h
@@ -298,6 +364,35 @@ func (h *harness) wait(t *testing.T) error {
 		}
 	})
 	return h.stopErr
+}
+
+// awaitNotAccepting blocks until the server's listener refuses a dial.
+//
+// It polls for a condition rather than sleeping a duration, which is the rule
+// this package already follows elsewhere: the assertion is on the observed
+// fact, and the deadline only bounds how long the test is willing to wait for
+// it. GracefulStop closes the listener as its first act and only then waits on
+// in-flight handlers, so a refused dial means shutdown has genuinely started
+// while whatever is in flight is still in flight.
+//
+// The dial is made directly against the bufconn rather than through the
+// pooled client, so it creates no gRPC stream and cannot reach a handler.
+func (h *harness) awaitNotAccepting(t *testing.T, serverLog fmt.Stringer) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		conn, err := h.lis.DialContext(ctx)
+		cancel()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener was still accepting 20s after shutdown was signalled; daemon log:\n%s", serverLog)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // hostClient dials the harness with the given client identity.
