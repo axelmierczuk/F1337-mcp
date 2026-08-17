@@ -178,8 +178,8 @@ func (s *TokenStore) Mint(opts MintOptions) (string, TokenRecord, error) {
 	sum := sha256.Sum256([]byte(token))
 	entry := &tokenEntry{Hash: hex.EncodeToString(sum[:]), Record: rec}
 
-	if err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, error) {
-		return append(entries, entry), nil
+	if err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
+		return append(entries, entry), true, nil
 	}); err != nil {
 		return "", TokenRecord{}, err
 	}
@@ -200,7 +200,7 @@ func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
 		out    TokenRecord
 		outErr = ErrTokenInvalid
 	)
-	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, error) {
+	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
 		for _, e := range entries {
 			if subtle.ConstantTimeCompare(want, []byte(e.Hash)) != 1 {
 				continue
@@ -217,7 +217,12 @@ func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
 			}
 			break
 		}
-		return entries, nil
+		// Only a redemption that actually spent a token changed anything. A
+		// token that matched nothing is the ordinary case for this endpoint —
+		// it is reachable without a credential — and rewriting the whole store
+		// for each such attempt makes an unauthenticated caller drive the
+		// control plane's disk and hold the lock that `enroll mint` needs.
+		return entries, outErr == nil, nil
 	})
 	if err != nil {
 		return TokenRecord{}, err
@@ -232,12 +237,12 @@ func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
 // list`. Records carry no token material, so this is safe to print.
 func (s *TokenStore) List() ([]TokenRecord, error) {
 	var out []TokenRecord
-	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, error) {
+	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
 		out = make([]TokenRecord, 0, len(entries))
 		for _, e := range entries {
 			out = append(out, e.Record)
 		}
-		return entries, nil
+		return entries, false, nil
 	})
 	if err != nil {
 		return nil, err
@@ -253,14 +258,20 @@ func (s *TokenStore) List() ([]TokenRecord, error) {
 // caller reading through it — sees the same set of tokens the store will
 // persist. Pruning afterwards would let a listing report tokens that the very
 // same call then deleted.
-func (s *TokenStore) update(fn func([]*tokenEntry) ([]*tokenEntry, error)) error {
+//
+// fn reports whether it changed anything. A file-backed store is rewritten only
+// when it did, or when pruning removed something: an operation that read the
+// store and changed nothing should not cost a write, because the operation that
+// most often changes nothing is a redemption of a token nobody minted, and
+// anyone on the network can ask for one of those.
+func (s *TokenStore) update(fn func([]*tokenEntry) ([]*tokenEntry, bool, error)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
 
 	if s.path == "" {
-		next, err := fn(prune(s.mem, now))
+		next, _, err := fn(prune(s.mem, now))
 		if err != nil {
 			return err
 		}
@@ -278,9 +289,14 @@ func (s *TokenStore) update(fn func([]*tokenEntry) ([]*tokenEntry, error)) error
 	if err != nil {
 		return err
 	}
-	next, err := fn(prune(st.Tokens, now))
+	kept := prune(st.Tokens, now)
+	pruned := len(kept) != len(st.Tokens)
+	next, changed, err := fn(kept)
 	if err != nil {
 		return err
+	}
+	if !changed && !pruned {
+		return nil
 	}
 	st.Tokens = next
 	return s.save(st)

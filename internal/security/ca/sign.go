@@ -96,7 +96,7 @@ func (c *CA) SignCSR(csrDER []byte, opts SignOptions) (*x509.Certificate, []byte
 	// assembled them. The caller is expected to have already decided *which*
 	// names are permissible for this subject; this is the check that they are
 	// well-formed names at all, and that none of them is a wildcard.
-	if err := checkSANs(opts.DNSNames, opts.IPAddresses); err != nil {
+	if err := CheckSANs(opts.DNSNames, opts.IPAddresses); err != nil {
 		return nil, nil, err
 	}
 
@@ -185,7 +185,7 @@ func DecodeCSR(data []byte) ([]byte, error) {
 	return data, nil
 }
 
-// checkSANs rejects subject alternative names that are malformed, wildcarded,
+// CheckSANs rejects subject alternative names that are malformed, wildcarded,
 // or too numerous.
 //
 // The wildcard rule is the important one: a leaf bearing "*.internal" answers
@@ -193,7 +193,14 @@ func DecodeCSR(data []byte) ([]byte, error) {
 // blanket authority over the fleet's namespace. Nothing in sandboxd needs a
 // wildcard — a sandbox is dialled by its own name and addresses — so refusing
 // to sign one costs nothing and removes the whole class.
-func checkSANs(dnsNames []string, ips []net.IP) error {
+//
+// SignCSR runs this itself. It is exported for the same reason CheckCSR is: a
+// caller that must take an irreversible step before signing — the enrollment
+// service reserves a fleet name — has to be able to reject a request *before*
+// that step rather than after it. Leaving this check reachable only through
+// SignCSR is what let a request that could not be signed still create a fleet
+// member, which is the defect this split exists to prevent.
+func CheckSANs(dnsNames []string, ips []net.IP) error {
 	if len(dnsNames)+len(ips) > MaxSANs {
 		return fmt.Errorf("ca: too many subject alternative names: %d, limit is %d", len(dnsNames)+len(ips), MaxSANs)
 	}

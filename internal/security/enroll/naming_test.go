@@ -115,8 +115,71 @@ func TestEnroll_HostChosenNameIsNotCertified(t *testing.T) {
 	leaf := leafOf(t, resp.GetCertificatePem())
 	assert.NotContains(t, leaf.DNSNames, "prod-db.internal",
 		"a name the control plane did not take from the token must not be certified")
+	assert.NotEqual(t, "prod-db.internal", leaf.Subject.CommonName,
+		"the subject is a certified field too, not a free-text label")
 	require.Len(t, leaf.IPAddresses, 1)
 	assert.Equal(t, "10.0.0.5", leaf.IPAddresses[0].String())
+}
+
+// The subject is where round 2's fix stopped short. It kept a host-chosen name
+// out of the SANs and then passed that same name to the CA as the leaf's
+// subject, so one valid token still yielded a CA-signed leaf whose common name
+// was whatever its holder typed — including the control plane's own name.
+//
+// Nothing in the fleet resolves an identity from a common name today, which is
+// the only reason this was latent rather than exploited: Go stopped honouring
+// the common name for hostname verification years ago. It is still a certified
+// field, it is still the field an operator reads off a certificate to decide
+// what that certificate is, and the milestone that adds an audited principal
+// will read it. A token authorizes an identity or it does not.
+func TestEnroll_HostChosenNameStaysOutOfTheSubject(t *testing.T) {
+	for _, claimed := range []string{controlPlaneHost, "prod-db.internal", "10.0.0.9"} {
+		t.Run(claimed, func(t *testing.T) {
+			caObj := newTestCA(t)
+			tokens := enroll.NewTokenStore()
+			svc := &enroll.Service{Tokens: tokens, CA: caObj}
+			lis := startControlPlane(t, svc, caObj)
+
+			// A token that reserves no name is the only way a host gets to
+			// choose one, and it is the path round 2 documented as safe.
+			token, _, err := tokens.Mint(enroll.MintOptions{Addresses: []string{"10.0.0.5:9443"}})
+			require.NoError(t, err)
+
+			resp, err := enrollOnce(t, lis, caObj, &sandboxdv1.EnrollRequest{
+				Token:         token,
+				RequestedName: claimed,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, claimed, resp.GetAssignedName(), "the registry label is still the host's to pick")
+
+			leaf := leafOf(t, resp.GetCertificatePem())
+			assert.NotEqual(t, claimed, leaf.Subject.CommonName,
+				"a name the control plane did not take from the token must not reach the certificate's subject")
+			assert.NotContains(t, leaf.DNSNames, claimed)
+			for _, ip := range leaf.IPAddresses {
+				assert.NotEqual(t, claimed, ip.String())
+			}
+		})
+	}
+}
+
+// A token that does reserve a name certifies that name, in the subject as well
+// as the SANs — the fix above must not have thrown the ordinary case away.
+func TestEnroll_ReservedNameIsCertifiedInTheSubject(t *testing.T) {
+	caObj := newTestCA(t)
+	tokens := enroll.NewTokenStore()
+	svc := &enroll.Service{Tokens: tokens, CA: caObj}
+	lis := startControlPlane(t, svc, caObj)
+
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box"})
+	require.NoError(t, err)
+
+	resp, err := enrollOnce(t, lis, caObj, &sandboxdv1.EnrollRequest{Token: token})
+	require.NoError(t, err)
+
+	leaf := leafOf(t, resp.GetCertificatePem())
+	assert.Equal(t, "build-box", leaf.Subject.CommonName)
+	assert.Equal(t, []string{"build-box"}, leaf.DNSNames)
 }
 
 // Collision resolution hands out a distinct name; the leaf must carry that

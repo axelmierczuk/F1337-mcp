@@ -3,6 +3,7 @@ package client
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -30,7 +31,20 @@ var (
 	// ErrMessageTooLarge means the call exceeded the configured max message
 	// size. See Config.MaxRecvMsgSize / MaxSendMsgSize.
 	ErrMessageTooLarge = errors.New("client: message exceeds configured size limit")
+	// ErrResourceExhausted means the agent ran out of some budget other than
+	// message size — the cap on concurrently supervised processes is the one
+	// M1 introduces. It is separate from ErrMessageTooLarge because the fix is
+	// different: wait or stop something, rather than read less at a time.
+	ErrResourceExhausted = errors.New("client: sandbox resource exhausted")
 )
+
+// sizeLimitMarker appears in every ResourceExhausted gRPC itself raises for a
+// message over the limit ("grpc: received message larger than max (…)"), and in
+// none an agent raises for a budget of its own. Matching on it is a heuristic,
+// so it is written to fail in the safe direction: an unrecognized
+// ResourceExhausted is reported as what it plainly is rather than as a size
+// problem the caller cannot fix by resizing anything.
+const sizeLimitMarker = "larger than max"
 
 // MapError translates a gRPC status error into a sandbox-level error,
 // wrapping the original status message for context and preserving err via
@@ -59,7 +73,10 @@ func MapError(err error) error {
 	case codes.PermissionDenied:
 		return fmt.Errorf("%w: %s: %w", ErrPermissionDenied, st.Message(), err)
 	case codes.ResourceExhausted:
-		return fmt.Errorf("%w: %s: %w", ErrMessageTooLarge, st.Message(), err)
+		if strings.Contains(st.Message(), sizeLimitMarker) {
+			return fmt.Errorf("%w: %s: %w", ErrMessageTooLarge, st.Message(), err)
+		}
+		return fmt.Errorf("%w: %s: %w", ErrResourceExhausted, st.Message(), err)
 	default:
 		return err
 	}

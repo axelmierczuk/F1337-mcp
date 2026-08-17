@@ -154,6 +154,19 @@ func Load(dir string) (*CA, error) {
 		return nil, fmt.Errorf("ca: parse %s: %w", filepath.Join(dir, keyFileName), err)
 	}
 
+	// A certificate beside a key that does not belong to it is a half-restored
+	// backup or a directory two CAs were written into. Nothing about that pair
+	// is usable: `ca fingerprint` would print — and the operator would then
+	// distribute — the fingerprint of a CA this process cannot sign for, and
+	// every enrollment would fail deep inside x509.CreateCertificate, after the
+	// token was spent. Refusing at load puts the failure where an operator can
+	// act on it.
+	certPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !key.PublicKey.Equal(certPub) {
+		return nil, fmt.Errorf("ca: %s does not match the key in %s; this CA directory holds a certificate and a key from different CAs",
+			filepath.Join(dir, certFileName), filepath.Join(dir, keyFileName))
+	}
+
 	return &CA{dir: dir, cert: cert, certPEM: certPEM, key: key}, nil
 }
 
