@@ -110,6 +110,47 @@ func TestEnroll_UncertifiableCollisionNameRecordsNothing(t *testing.T) {
 		"the name collision resolution settled on is the one that has to be certifiable")
 }
 
+// The other end of the same question, which round 3 recorded as left open: the
+// "-N" a collision appends overshoots maxNameLength, so a caller-chosen name at
+// the 128-byte limit becomes a 130-byte one. That is only harmless for as long
+// as a caller-chosen name reaches nothing but the registry key — a registry key
+// is a YAML value with no length rule and no path component built from it.
+//
+// This asserts the premise rather than trusting it. The day a caller-chosen name
+// starts reaching the leaf again — which is the exact defect rounds 1, 2 and 3
+// each found once — the overshoot stops being harmless, and this fails.
+func TestEnroll_OvershotCollisionNameReachesNoCertificate(t *testing.T) {
+	caObj := newTestCA(t)
+	tokens := enroll.NewTokenStore()
+	fleet := &recordingFleet{}
+	base := strings.Repeat("a", 128) // exactly the bound checkRequestedName allows
+	svc := &enroll.Service{
+		Tokens: tokens,
+		CA:     caObj,
+		Names:  fakeNameChecker{existing: map[string]bool{base: true}},
+		Fleet:  fleet,
+	}
+	lis := startControlPlane(t, svc, caObj)
+
+	// A token reserving no name: the enrolling host picks its own label, which
+	// is the only way a caller-controlled string reaches collision resolution.
+	token, _, err := tokens.Mint(enroll.MintOptions{})
+	require.NoError(t, err)
+
+	resp, err := enrollOnce(t, lis, caObj, &sandboxdv1.EnrollRequest{Token: token, RequestedName: base})
+	require.NoError(t, err)
+
+	assert.Len(t, resp.GetAssignedName(), 130, "the collision suffix overshoots the 128-byte bound")
+	require.Len(t, fleet.recorded, 1)
+	assert.Equal(t, resp.GetAssignedName(), fleet.recorded[0].Name,
+		"the overshoot lands in the registry key, which has no length rule")
+
+	leaf := leafOf(t, resp.GetCertificatePem())
+	assert.Empty(t, leaf.Subject.CommonName, "a name this side did not choose is not a subject")
+	assert.Empty(t, leaf.DNSNames, "a name this side did not choose is not a SAN")
+	assert.Empty(t, leaf.IPAddresses)
+}
+
 // brokenSigner stands in for a control plane whose CA is unusable — a
 // certificate beside a key from a different CA is the way that happens in
 // practice. It still hands out a bundle, because the failure is in signing.
