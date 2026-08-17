@@ -2,6 +2,7 @@ package fleetctl
 
 import (
 	"bytes"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -110,6 +111,25 @@ func TestSocksBanner_AnnouncesAnUnrestrictedProxy(t *testing.T) {
 	})
 	assert.Contains(t, withAllow, "10.0.4.7:5432")
 	assert.Contains(t, withAllow, "the agent checks every connection anyway")
+}
+
+// --json must not silence the warning. The document says so in a field, which
+// is right for the script and invisible to the person watching the terminal.
+func TestSocksBanner_JSONStillWarnsOnStderr(t *testing.T) {
+	warn := func(asJSON bool, r socksResult) string {
+		var buf bytes.Buffer
+		warnUnrestricted(&buf, &output{w: io.Discard, asJSON: asJSON}, r)
+		return buf.String()
+	}
+
+	unrestricted := socksResult{Sandbox: "lab-box", Unrestricted: true}
+	assert.Contains(t, warn(true, unrestricted), "ANY host lab-box can")
+	assert.Contains(t, warn(true, unrestricted), "forward.allowed_hosts")
+
+	assert.Empty(t, warn(true, socksResult{Sandbox: "build-box", AllowedHosts: []string{"db.internal"}}),
+		"an operator who narrowed it has nothing to be warned about")
+	assert.Empty(t, warn(false, unrestricted),
+		"human output carries it in the banner; a second copy would be noise")
 }
 
 // The note is what a --json consumer reads instead of the banner, so it has to

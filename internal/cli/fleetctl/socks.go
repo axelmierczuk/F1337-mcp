@@ -146,6 +146,7 @@ func newSocksCommand(out io.Writer) *cobra.Command {
 			if err := o.Emit(result, func(p *cli.Printer) { printSocksBanner(p, result) }); err != nil {
 				return err
 			}
+			warnUnrestricted(cmd.ErrOrStderr(), o, result)
 
 			return serveSocks(cmd.Context(), server, o, result)
 		},
@@ -254,6 +255,30 @@ func socksNote(sandbox, address string, allowedHosts []string) string {
 		return fmt.Sprintf("Proxying through %s at %s. This agent's forward.allowed_hosts is empty, so the proxy reaches ANY host %s's network reaches.", sandbox, address, sandbox)
 	}
 	return fmt.Sprintf("Proxying through %s at %s. It reaches %s and nothing else.", sandbox, address, strings.Join(allowedHosts, ", "))
+}
+
+// warnUnrestricted repeats the one line that must not be silenced by a flag.
+//
+// --json exists so a script can read the address, and a script's operator is
+// still a person who needs to know that what just opened is bounded by nothing
+// but the sandbox's network. The document says so in a field, which is right
+// for the script and invisible to the person watching the terminal — so the
+// warning also goes to stderr, where it cannot land in the middle of the
+// document a consumer is parsing.
+//
+// Human output already carries it in the banner, so this is JSON-only rather
+// than a second copy of it.
+func warnUnrestricted(stderr io.Writer, o *output, r socksResult) {
+	if !o.JSON() || !r.Unrestricted {
+		return
+	}
+	p := cli.NewPrinter(stderr)
+	p.Printf("warning: this proxy reaches ANY host %s can. Its agent's forward.allowed_hosts is empty.\n", r.Sandbox)
+	p.Printf("warning: list the hosts, addresses or CIDR blocks it should reach in forward.allowed_hosts on that agent.\n")
+	// Deliberately unchecked: a stderr that cannot be written to must not stop
+	// a proxy the operator asked for, and the failure would be reported to the
+	// stream that just failed.
+	_ = p.Err()
 }
 
 func printSocksBanner(p *cli.Printer, r socksResult) {
