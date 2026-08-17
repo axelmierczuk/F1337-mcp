@@ -3,6 +3,7 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -25,11 +26,25 @@ func TestLoad_ShippedExample(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "0.0.0.0:8722", cfg.Listen)
-	assert.Equal(t, "/etc/sandboxd/agent.crt", cfg.TLS.Certificate)
-	assert.Equal(t, "/etc/sandboxd/agent.key", cfg.TLS.PrivateKey)
-	assert.Equal(t, "/etc/sandboxd/ca.crt", cfg.TLS.CABundle)
 	assert.Equal(t, "sandboxd-control", cfg.TLS.RequireClientOU)
-	assert.Equal(t, []string{"/home/build/workspace", "/tmp/sandboxd"}, cfg.AllowedRoots)
+
+	// The example is a Linux config, and Load resolves paths against the
+	// platform it is running on: "/etc/sandboxd/agent.crt" is an absolute path
+	// on Unix and a *relative* one on Windows, where absolute means a drive
+	// letter. Load rebasing it there is correct, so the exact strings are
+	// asserted only where they mean what the file meant. Everything else in
+	// this test — the schema, the defaults, the durations — is what stops the
+	// example drifting from the code, and that check runs everywhere.
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, "/etc/sandboxd/agent.crt", cfg.TLS.Certificate)
+		assert.Equal(t, "/etc/sandboxd/agent.key", cfg.TLS.PrivateKey)
+		assert.Equal(t, "/etc/sandboxd/ca.crt", cfg.TLS.CABundle)
+		assert.Equal(t, []string{"/home/build/workspace", "/tmp/sandboxd"}, cfg.AllowedRoots)
+	}
+	assert.NotEmpty(t, cfg.TLS.Certificate)
+	assert.NotEmpty(t, cfg.TLS.PrivateKey)
+	assert.NotEmpty(t, cfg.TLS.CABundle)
+	assert.Len(t, cfg.AllowedRoots, 2)
 
 	// The example ships exec on, which is what makes the roots above advisory
 	// rather than enforced — the file says so, and this asserts the file is
@@ -48,10 +63,14 @@ func TestLoad_ShippedExample(t *testing.T) {
 	assert.Equal(t, 10*time.Second, cfg.Process.DefaultGracePeriod.Duration())
 	assert.Equal(t, 60*time.Second, cfg.Process.MaxFollowDuration.Duration())
 
-	assert.Equal(t, "/var/log/sandboxd/audit.jsonl", cfg.Audit.Path)
 	assert.True(t, cfg.Audit.Enabled)
-
-	require.NoError(t, cfg.Validate(agent.ValidateOptions{}))
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, "/var/log/sandboxd/audit.jsonl", cfg.Audit.Path)
+		// Validate insists allowed_roots are absolute, which the example's are
+		// on the platform it was written for.
+		require.NoError(t, cfg.Validate(agent.ValidateOptions{}))
+	}
+	assert.NotEmpty(t, cfg.Audit.Path)
 }
 
 // An M0-era config used top-level cert_file / key_file / ca_file. A host
@@ -59,21 +78,31 @@ func TestLoad_ShippedExample(t *testing.T) {
 func TestLoad_AcceptsLegacyCertificatePaths(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent.yaml")
+
+	// Absolute on every platform, written with forward slashes so it is also
+	// valid unquoted YAML: filepath.IsAbs accepts "C:/x" on Windows. Hardcoding
+	// POSIX paths here would make the test assert Unix semantics rather than
+	// the legacy-alias folding it is actually about.
+	abs := func(name string) string { return filepath.ToSlash(filepath.Join(dir, name)) }
+	certPath, keyPath, caPath, root := abs("agent.crt"), abs("agent.key"), abs("ca.crt"), abs("workspace")
+
 	require.NoError(t, os.WriteFile(path, []byte(`
 name: build-box
 listen: "0.0.0.0:8722"
-cert_file: /etc/sandboxd/agent.crt
-key_file: /etc/sandboxd/agent.key
-ca_file: /etc/sandboxd/ca.crt
+cert_file: "`+certPath+`"
+key_file: "`+keyPath+`"
+ca_file: "`+caPath+`"
+exec:
+  enabled: false
 allowed_roots:
-  - /workspace
+  - "`+root+`"
 `), 0o600))
 
 	cfg, err := agent.Load(path)
 	require.NoError(t, err)
-	assert.Equal(t, "/etc/sandboxd/agent.crt", cfg.TLS.Certificate)
-	assert.Equal(t, "/etc/sandboxd/agent.key", cfg.TLS.PrivateKey)
-	assert.Equal(t, "/etc/sandboxd/ca.crt", cfg.TLS.CABundle)
+	assert.Equal(t, certPath, cfg.TLS.Certificate)
+	assert.Equal(t, keyPath, cfg.TLS.PrivateKey)
+	assert.Equal(t, caPath, cfg.TLS.CABundle)
 	assert.Equal(t, agent.DefaultClientOU, cfg.TLS.RequireClientOU,
 		"a config with no explicit OU must demand the control OU, never accept any")
 	require.NoError(t, cfg.Validate(agent.ValidateOptions{}))
@@ -112,7 +141,10 @@ func TestConfig_SaveRoundTrip(t *testing.T) {
 	assert.Equal(t, cfg.TLS, loaded.TLS)
 	assert.Equal(t, cfg.AllowedRoots, loaded.AllowedRoots)
 
-	if info, err := os.Stat(path); err == nil && os.Getenv("GOOS") != "windows" {
+	// Windows does not carry Unix permission bits, so there is nothing to
+	// assert there. (This read runtime.GOOS as an environment variable before,
+	// which is never set, so the assertion ran everywhere and happened to pass.)
+	if info, err := os.Stat(path); err == nil && runtime.GOOS != "windows" {
 		assert.NotZero(t, info.Mode().Perm()&0o600)
 	}
 }

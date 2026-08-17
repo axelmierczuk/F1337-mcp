@@ -2,7 +2,7 @@ package sandboxdagent
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -10,6 +10,15 @@ import (
 
 	"github.com/kardianos/service"
 )
+
+// The systemd and launchd renderers below use "path", not "path/filepath".
+//
+// A unit file and a plist are POSIX artifacts: every path inside one is
+// slash-separated whatever machine wrote it. Using filepath makes the rendered
+// output depend on the host's separator, which is wrong twice over — it would
+// emit `\var\log\...` into a plist if the renderer ever ran on Windows, and it
+// makes a pure function's result vary by GOOS, so the tests that assert what
+// gets installed only assert it on some runners.
 
 // ServiceName is the identifier the daemon is registered under with every
 // platform's service manager: the systemd unit, the launchd label, and the
@@ -208,7 +217,11 @@ func (p UnitParams) readWritePaths() []string {
 
 func (p UnitParams) rootsUnderTmp() bool {
 	for _, root := range p.AllowedRoots {
-		clean := filepath.Clean(root)
+		// path.Clean, not filepath.Clean: this asks a question about a Linux
+		// filesystem — is a root under /tmp — and the answer must not change
+		// because the string was cleaned on a host that separates with a
+		// backslash.
+		clean := path.Clean(root)
 		if clean == "/tmp" || clean == "/var/tmp" ||
 			strings.HasPrefix(clean, "/tmp/") || strings.HasPrefix(clean, "/var/tmp/") {
 			return true
@@ -256,8 +269,8 @@ func (p UnitParams) LaunchdPlist() string {
 	writeKey(&b, "ProcessType", plistString("Background"))
 	writeKey(&b, "ThrottleInterval", "<integer>"+seconds(p.RestartDelay)+"</integer>")
 	writeKey(&b, "ExitTimeOut", "<integer>"+seconds(p.StopTimeout)+"</integer>")
-	writeKey(&b, "StandardOutPath", plistString(filepath.Join(p.LogDir, ServiceName+".out.log")))
-	writeKey(&b, "StandardErrorPath", plistString(filepath.Join(p.LogDir, ServiceName+".err.log")))
+	writeKey(&b, "StandardOutPath", plistString(path.Join(p.LogDir, ServiceName+".out.log")))
+	writeKey(&b, "StandardErrorPath", plistString(path.Join(p.LogDir, ServiceName+".err.log")))
 
 	b.WriteString("</dict>\n</plist>\n")
 	return b.String()

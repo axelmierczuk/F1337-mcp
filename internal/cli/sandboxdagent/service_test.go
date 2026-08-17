@@ -2,7 +2,6 @@ package sandboxdagent_test
 
 import (
 	"bytes"
-	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -38,8 +37,8 @@ func TestServiceStatus_NotInstalled(t *testing.T) {
 // Running install without elevation gives an actionable message naming the
 // command to re-run, and fails before creating a user or a directory.
 func TestServiceInstall_UnprivilegedIsActionable(t *testing.T) {
-	if isRoot() {
-		t.Skip("this test asserts the unprivileged path; the suite is running as root")
+	if elevated() {
+		t.Skip("this test asserts the unprivileged path; the suite is running elevated")
 	}
 
 	out := &bytes.Buffer{}
@@ -68,8 +67,8 @@ func TestServiceInstall_UnprivilegedIsActionable(t *testing.T) {
 // Uninstall is elevation-gated on the same terms, and says so before touching
 // anything.
 func TestServiceUninstall_UnprivilegedIsActionable(t *testing.T) {
-	if isRoot() {
-		t.Skip("this test asserts the unprivileged path; the suite is running as root")
+	if elevated() {
+		t.Skip("this test asserts the unprivileged path; the suite is running elevated")
 	}
 
 	root := sandboxdagent.NewRootCommand(&bytes.Buffer{})
@@ -100,8 +99,13 @@ func TestServiceControl_NotInstalled(t *testing.T) {
 // command the agent runs inherits this identity, so the default matters more
 // than most defaults do.
 func TestDefaultServiceUserIsNotASuperuser(t *testing.T) {
-	if isRoot() {
-		t.Skip("the macOS default is the invoking user, which is root in this environment")
+	// Skipped only where the default *is* the invoking user: on macOS it is
+	// $SUDO_USER or the current account, so running the suite as root makes the
+	// answer root by construction rather than by defect. On Windows the default
+	// is a fixed built-in identity, so it is asserted there whether the runner
+	// is elevated or not — and GitHub's Windows runners are.
+	if runtime.GOOS != "windows" && elevated() {
+		t.Skip("the default here is the invoking user, which is root in this environment")
 	}
 
 	name, err := sandboxdagent.DefaultServiceUserForTest()
@@ -121,9 +125,10 @@ func TestVersionCommand(t *testing.T) {
 	assert.Contains(t, out.String(), "sandboxd-agent")
 }
 
-func isRoot() bool {
-	if runtime.GOOS == "windows" {
-		return false
-	}
-	return os.Geteuid() == 0
-}
+// elevated asks the same question `service install` asks before refusing.
+//
+// Answering it locally — "windows is never root" — was wrong on the one runner
+// where it mattered: GitHub's Windows images run as an administrator, so the
+// tests below skipped nothing and then failed against a message written for
+// someone who cannot install a service.
+func elevated() bool { return sandboxdagent.IsElevatedForTest() }
