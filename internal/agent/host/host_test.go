@@ -16,6 +16,7 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent/host"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
 )
 
@@ -77,6 +78,30 @@ func TestGetHostInfo_Resources(t *testing.T) {
 	assert.Positive(t, res.GetDiskTotalBytes())
 	assert.LessOrEqual(t, res.GetDiskAvailableBytes(), res.GetDiskTotalBytes())
 	assert.GreaterOrEqual(t, res.GetLoadAverage_1M(), 0.0)
+}
+
+// A capacity read that fails does not fail the call.
+//
+// Everything else in the response — the platform, the roots, the principal, the
+// version — is still true, and the figures that could not be read are zero,
+// which is what the proto documents them as. Failing the RPC instead would take
+// sandbox_info down over a dead mount.
+func TestGetHostInfo_CapacityFailureStillAnswers(t *testing.T) {
+	root := t.TempDir()
+	svc, deps := newService(t, root)
+
+	t.Cleanup(host.SetReadResourcesForTest(func(string) (platform.Resources, error) {
+		return platform.Resources{}, errors.New("statfs: host is down")
+	}))
+
+	resp, err := svc.GetHostInfo(context.Background(), &sandboxdv1.GetHostInfoRequest{})
+	require.NoError(t, err, "a host that cannot measure itself can still be described")
+
+	assert.Zero(t, resp.GetResources().GetDiskTotalBytes())
+	assert.Zero(t, resp.GetResources().GetMemoryTotalBytes())
+	assert.Equal(t, runtime.GOOS, resp.GetPlatform().GetOs())
+	assert.Equal(t, deps.Jail.Roots(), resp.GetAllowedRoots())
+	assert.Equal(t, "1.2.3-test", resp.GetAgentVersion())
 }
 
 // The allowed roots reported are the jail's resolved roots, so a caller

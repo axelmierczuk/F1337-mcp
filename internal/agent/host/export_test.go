@@ -1,6 +1,10 @@
 package host
 
-import "time"
+import (
+	"time"
+
+	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+)
 
 // SetProberForTest replaces the toolchain prober, so a test can assert that
 // Health never reaches it. Health's cheapness is a load-bearing property —
@@ -19,61 +23,39 @@ func BuildProbeEnvForTest(get func(string) string) []string { return buildProbeE
 // ProbePassthroughForTest is the platform's allowlist of inherited variables.
 func ProbePassthroughForTest() []string { return probePassthrough }
 
-// SetKernelPathsForTest redirects the cgroup and /proc readers at a fixture
-// tree and returns a function restoring them.
-//
-// The parsing they drive is what every container-confined agent's advertised
-// capacity comes from, and neither hierarchy can be made to report a limit from
-// inside a test on a real host — so a fixture is the only way to exercise it.
-func SetKernelPathsForTest(cgroup, selfCgroup, meminfo string) func() {
-	prev := [3]string{cgroupRoot, procSelfCgroup, procMeminfo}
-	cgroupRoot, procSelfCgroup, procMeminfo = cgroup, selfCgroup, meminfo
-	return func() { cgroupRoot, procSelfCgroup, procMeminfo = prev[0], prev[1], prev[2] }
-}
-
-// CGroupCPUQuotaForTest is the tightest CPU quota in force, in cores.
-func CGroupCPUQuotaForTest() (float64, bool) { return cgroupCPUQuota() }
-
-// CGroupMemoryLimitForTest is the tightest memory limit in force, and the usage
-// under it.
-func CGroupMemoryLimitForTest() (limit, usage uint64, ok bool) { return cgroupMemoryLimit() }
-
-// CGroupDirsForTest is every directory a limit for this process could be
-// written in.
-func CGroupDirsForTest() []string { return cgroupDirs() }
-
-// ReadMeminfoForTest is the machine's memory totals, as /proc/meminfo reports
-// them.
-func ReadMeminfoForTest() (total, available uint64) { return readMeminfo() }
-
-// SetDiskUsageForTest replaces the platform's filesystem measurement and
-// returns a function restoring it.
+// SetReadResourcesForTest replaces the delegated capacity read and returns a
+// function restoring it.
 //
 // The bound it exists to test is a bound on a call that blocks in the kernel
 // and cannot be cancelled, which is not something a real filesystem can be
 // asked to do on demand.
-func SetDiskUsageForTest(fn func(string) (uint64, uint64)) func() {
-	prev := diskUsage
-	diskUsage = fn
-	return func() { diskUsage = prev }
+func SetReadResourcesForTest(fn func(string) (platform.Resources, error)) func() {
+	prev := readResources
+	readResources = fn
+	return func() { readResources = prev }
 }
 
-// SetDiskProbeTimeoutForTest shortens the measurement bound and returns a
-// function restoring it, so a test asserts the mechanism in milliseconds rather
-// than paying the production wait.
-func SetDiskProbeTimeoutForTest(d time.Duration) func() {
-	prev := diskProbeTimeout
-	diskProbeTimeout = d
-	return func() { diskProbeTimeout = prev }
+// ProbeResourcesForTest is the bounded capacity read GetHostInfo makes.
+func ProbeResourcesForTest(diskPath string) (platform.Resources, error) {
+	return probeResources(diskPath)
 }
 
-// DiskProbeTimeoutForTest is how long a filesystem measurement is given.
-func DiskProbeTimeoutForTest() time.Duration { return diskProbeTimeout }
+// SetResourceProbeTimeoutForTest shortens the bound and returns a function
+// restoring it, so a test asserts the mechanism in milliseconds rather than
+// paying the production wait.
+func SetResourceProbeTimeoutForTest(d time.Duration) func() {
+	prev := resourceProbeTimeout
+	resourceProbeTimeout = d
+	return func() { resourceProbeTimeout = prev }
+}
 
-// WaitDiskProbeIdleForTest blocks until no measurement is outstanding, so a
-// test can restore what it replaced without racing the probe goroutine.
-func WaitDiskProbeIdleForTest() {
-	for diskProbeRunning.Load() {
+// ResourceProbeTimeoutForTest is how long a capacity read is given.
+func ResourceProbeTimeoutForTest() time.Duration { return resourceProbeTimeout }
+
+// WaitResourceProbeIdleForTest blocks until no read is outstanding, so a test
+// can restore what it replaced without racing the probe goroutine.
+func WaitResourceProbeIdleForTest() {
+	for resourceProbeRunning.Load() {
 		time.Sleep(time.Millisecond)
 	}
 }

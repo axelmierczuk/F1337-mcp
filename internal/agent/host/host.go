@@ -2,15 +2,13 @@ package host
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"runtime"
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
 )
 
 // init registers HostService with every sandboxd-agent daemon that links this
@@ -37,21 +35,22 @@ type Service struct {
 
 // New builds the host service. It satisfies agent.Factory.
 func New(deps agent.Deps) (agent.Service, error) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		// A host that cannot name itself is still a host that can run
-		// commands, so this is reported rather than fatal.
-		deps.Log.Warn("could not determine hostname", "error", err)
+	// platform.Describe never fails: a field it could not read comes back
+	// empty. A host that cannot name itself is still a host that can run
+	// commands, so that is reported rather than fatal.
+	info := platform.Describe()
+	if info.Hostname == "" {
+		deps.Log.Warn("could not determine hostname")
 	}
 	return &Service{
 		deps:   deps,
 		prober: NewProber(),
 		platform: &sandboxdv1.Platform{
-			Os:            runtime.GOOS,
-			Arch:          runtime.GOARCH,
-			KernelVersion: kernelVersion(),
-			Hostname:      hostname,
-			PathSeparator: string(filepath.Separator),
+			Os:            info.OS,
+			Arch:          info.Arch,
+			KernelVersion: info.KernelVersion,
+			Hostname:      info.Hostname,
+			PathSeparator: info.PathSeparator,
 		},
 		// The jail's roots, not the config's: on an exec-enabled agent the
 		// config names roots that are not in force, and the filesystem worth
@@ -71,7 +70,14 @@ func (s *Service) Register(r grpc.ServiceRegistrar) {
 // Toolchain probing is opt-in and bounded; everything else here is a handful
 // of syscalls.
 func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRequest) (*sandboxdv1.GetHostInfoResponse, error) {
-	res := ProbeResources(s.diskPath)
+	res, err := probeResources(s.diskPath)
+	if err != nil {
+		// Reported, not fatal: the figures that could be read are still worth
+		// having, and the ones that could not are zero on the wire, which is
+		// what the proto documents them as. Said out loud because "sandbox_info
+		// reports no free disk" is otherwise an unexplainable answer.
+		s.deps.Log.Warn("could not read host capacity", "disk_path", s.diskPath, "error", err)
+	}
 
 	// The principal comes from the verified client certificate, never from
 	// anything in the request. Echoing it back is how a caller confirms which
@@ -82,6 +88,11 @@ func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRe
 
 	resp := &sandboxdv1.GetHostInfoResponse{
 		Platform: s.platform,
+		// The effective figures, not the machine's: internal/platform narrows
+		// them to any cgroup limit in force, so a container-confined agent
+		// advertises what it can actually run rather than what the host has.
+		// Resources.CPUQuotaLimited and MemoryLimited record which of them came
+		// from a cgroup; the proto has no field for that yet.
 		Resources: &sandboxdv1.Resources{
 			CpuCores:             res.CPUCores,
 			MemoryTotalBytes:     res.MemoryTotalBytes,
