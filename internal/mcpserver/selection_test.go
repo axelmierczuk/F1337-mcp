@@ -193,6 +193,12 @@ var echoFixtures = map[string]struct {
 	"sandbox_ls":    {args: map[string]any{"sandbox": "build-box", "path": "/srv/app"}, echoes: "build-box", targeted: true},
 	"sandbox_glob":  {args: map[string]any{"sandbox": "build-box", "pattern": "**/*.go"}, echoes: "build-box", targeted: true},
 	"sandbox_grep":  {args: map[string]any{"sandbox": "build-box", "pattern": "func main"}, echoes: "build-box", targeted: true},
+	// A source that exists wherever the test binary runs: the package's own
+	// directory is the working directory of a `go test` process. Nothing is
+	// written on this side — the destination is on the (faked) sandbox.
+	"sandbox_transfer": {args: map[string]any{
+		"sandbox": "build-box", "direction": "push", "source": "server.go", "destination": "/srv/app/server.go",
+	}, echoes: "build-box", targeted: true},
 }
 
 // TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox is the walk the

@@ -250,13 +250,14 @@ func TestServer_RegistersTheFleetGroup(t *testing.T) {
 		"sandbox_remove": false,
 		"sandbox_info":   true,
 
-		"sandbox_exec":  true,
-		"sandbox_read":  true,
-		"sandbox_write": true,
-		"sandbox_edit":  true,
-		"sandbox_ls":    true,
-		"sandbox_glob":  true,
-		"sandbox_grep":  true,
+		"sandbox_exec":     true,
+		"sandbox_read":     true,
+		"sandbox_write":    true,
+		"sandbox_edit":     true,
+		"sandbox_ls":       true,
+		"sandbox_glob":     true,
+		"sandbox_grep":     true,
+		"sandbox_transfer": true,
 	}, targeted)
 }
 

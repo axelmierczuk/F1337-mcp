@@ -332,12 +332,43 @@ Move files and directories between the workstation and a sandbox.
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `direction` | enum | **Required.** `push` (local → sandbox) or `pull`. |
-| `source` | string | **Required.** |
-| `destination` | string | **Required.** |
-| `recursive` | bool | |
-| `exclude` | string[] | Glob patterns to skip. |
+| `source` | string | **Required.** Local for `push`, on the sandbox for `pull`. |
+| `destination` | string | **Required.** An existing directory receives the source under its own name, as `cp` does. |
+| `recursive` | bool | Required to transfer a directory rather than a single file. |
+| `exclude` | string[] | Extra glob patterns, added to the defaults. Matched against each path segment and against the path relative to `source`. A pattern that cannot be evaluated is refused rather than silently matching nothing. |
+| `force` | bool | Re-send files the unchanged check would skip. |
+| `allow_outside_working_dir` | bool | Permit a `pull` to write outside this workstation's working directory. |
 
 This is how a local repository gets onto a sandbox in the first place.
+
+**The local side has no jail.** The sandbox has an agent deciding what a caller
+may touch; this side has nothing but the user's own filesystem, so a `pull`
+writes only under the working directory of the process serving these tools
+unless `allow_outside_working_dir` says otherwise. Containment is decided on
+the resolved path, so a symlink inside the working directory pointing at `/` is
+not a way out of it. A `push` **source** is not confined: a caller that can
+reach this tool can already read any local file with its own built-in tools, so
+confining reads would add friction and no safety.
+
+**Symlinks are never followed out of the tree.** On a push, a link resolving
+inside `source` is followed — a repository full of them would otherwise
+transfer as a tree of holes — and one resolving outside is skipped and named in
+the result. On a pull every link is skipped and named, because `ReadFile`
+follows links agent-side and deciding whether the target is inside the tree
+would mean resolving a remote path from here.
+
+**Defaults, caps and repeats.** `.git`, `.hg`, `.svn`, `node_modules`,
+`vendor`, `target`, `dist`, `build`, virtualenv and cache directories are
+excluded by default, applied only *below* the source root so naming `.git` as
+the source still transfers it; the result reports how many entries were
+excluded, so it is never silent. One call moves at most 5000 files or 256 MiB,
+refused up front naming the limit rather than abandoned half way. A file whose
+size matches and whose destination is no older is skipped as unchanged — rsync's
+quick check, minus the modification time this protocol has no field to preserve
+— which makes push, edit, push again cost only what changed. `force` overrides
+it. Executable bits are preserved in both directions. A pull writes through a
+temporary file and renames, so an interrupted transfer leaves nothing at the
+destination rather than a partial file every later reader treats as whole.
 
 ### `sandbox_forward`
 Forward a sandbox port to the workstation.

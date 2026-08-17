@@ -319,5 +319,6 @@ func Register(server *mcp.Server, deps Deps) *Registrar {
 	registerFleet(r)
 	registerExec(r)
 	registerFiles(r)
+	registerTransfer(r)
 	return r
 }
