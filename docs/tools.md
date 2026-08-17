@@ -110,9 +110,18 @@ Returns `exit_code`, `stdout`, `stderr`, `duration_ms`, `timed_out`,
 `truncation`.
 
 **A command that fails is a successful call.** A non-zero exit is reported in
-`exit_code`; the tool errors only for a request the agent would not run at all —
-an `argv[0]` that names nothing executable, a working directory that is not one,
-a cap exceeded, or a command the agent's policy refuses.
+`exit_code`; the tool errors for a request the agent would not run at all — an
+`argv[0]` that names nothing executable, a working directory that is not one, a
+cap exceeded, or a command the agent's policy refuses.
+
+**An error does not always mean nothing ran.** Two of them arrive after the
+command has already done its work, and a caller that reads every error as "the
+request was rejected" will retry something that ran: the agent could not write
+the call's audit record while `audit.required` is set, so the result is
+withheld rather than reported unrecorded; and the caller stopped reading its
+own output stream, so the agent killed the command and ended the call rather
+than holding the RPC open. Both say which they are in the error message. Treat
+either as "this may well have run".
 
 **Output over the cap does not stop the command.** The agent keeps reading and
 discarding, so a command that produces a gigabyte finishes and reports what it
