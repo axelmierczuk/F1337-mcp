@@ -98,19 +98,29 @@ Run a command to completion.
 
 | Argument | Type | Notes |
 | --- | --- | --- |
-| `argv` | string[] | **Required.** Executable and arguments. Not shell-parsed. |
-| `working_dir` | string | Must resolve inside an allowed root. |
-| `env` | string[] | `KEY=VALUE`. Applied over a documented base environment, not over the daemon's own. |
-| `timeout_seconds` | int | SIGTERM on expiry, then SIGKILL after the grace period. |
-| `max_output_bytes` | int | Beyond this, output is truncated and marked. |
-| `shell` | bool | Run through the platform shell. Opt-in. |
+| `argv` | string[] | **Required.** Executable and arguments. Not shell-parsed. `argv[0]` is looked up in the effective `PATH` — the one the command will run with, not the daemon's — and never in the working directory. |
+| `working_dir` | string | An ordinary path: exec and the path jail are mutually exclusive, so there are no roots to resolve it against. Must exist and be a directory. Defaults to the agent account's home directory. |
+| `env` | string[] | `KEY=VALUE`. Applied over a documented base environment, not over the daemon's own. An entry replaces the base entry with the same name. |
+| `timeout_seconds` | int | SIGTERM to the process **group** on expiry, then SIGKILL after the grace period. Above the agent's `exec.max_timeout` the call is refused, naming the maximum, rather than quietly shortened. |
+| `max_output_bytes` | int | Beyond this, output is truncated and marked. Above the agent's `exec.max_output_bytes` it is clamped to it — the truncation in the result is what reports that. |
+| `shell` | bool | Run through the platform shell (`sh -c`, or `cmd /c` on Windows). Opt-in, because it reintroduces shell parsing of untrusted strings. The command policy then sees the shell, not the command inside it. |
 | `stdin` | string | Written to stdin, which is then closed. |
 
 Returns `exit_code`, `stdout`, `stderr`, `duration_ms`, `timed_out`,
 `truncation`.
 
+**A command that fails is a successful call.** A non-zero exit is reported in
+`exit_code`; the tool errors only for a request the agent would not run at all —
+an `argv[0]` that names nothing executable, a working directory that is not one,
+a cap exceeded, or a command the agent's policy refuses.
+
+**Output over the cap does not stop the command.** The agent keeps reading and
+discarding, so a command that produces a gigabyte finishes and reports what it
+exited with, rather than blocking on a full pipe until the timeout.
+
 For anything that should keep running after the call returns, use
-`sandbox_process_start`.
+`sandbox_process_start`. Exec takes its process tree with it: descendants still
+running when the command exits are killed with it.
 
 ---
 
