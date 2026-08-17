@@ -609,16 +609,15 @@ func (r *Registrar) carry(ctx context.Context, f *activeForward, client sandboxd
 		sendErr = localToStream(conn, stream)
 	}()
 
-	// Sandbox to local.
+	// Sandbox to local. It does not stop the other direction either: a server
+	// that closed its write half has not necessarily stopped reading, and a
+	// client still sending must still be delivered. Tearing the forward down
+	// cancels the context, which closes this socket underneath both pumps, so
+	// neither waits forever on a peer with nothing left to say.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		recvErr = streamToLocal(stream, conn)
-		// Nothing more will arrive. Unblock the other pump if the local client
-		// has gone quiet without closing.
-		if tcp, ok := conn.(*net.TCPConn); ok {
-			_ = tcp.CloseRead()
-		}
 	}()
 
 	wg.Wait()

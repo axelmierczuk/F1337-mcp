@@ -214,6 +214,59 @@ func TestForward_RemoteCloseGivesTheLocalClientACleanEOF(t *testing.T) {
 	assert.Equal(t, "goodbye", string(got))
 }
 
+// And the direction that is easy to get wrong: after the sandbox-side server
+// has closed its write half, the client may still be sending, and those bytes
+// must still arrive. Shutting the whole connection on a half-close is the bug
+// this catches, and it is invisible to every test above.
+func TestForward_ClientCanStillSendAfterTheRemoteHalfCloses(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{})
+
+	// Buffered, and read until the expected body turns up: the forward's
+	// preflight opens a connection of its own before the listener exists, and
+	// it contributes an empty body.
+	bodies := make(chan string, 8)
+	remote := startTCPServer(t, func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Write([]byte("greeting"))
+		// Half-close: finished writing, still reading.
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
+		body, _ := io.ReadAll(conn)
+		bodies <- string(body)
+	})
+
+	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+
+	conn, err := net.DialTimeout("tcp", out.LocalAddress, 5*time.Second)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(30*time.Second)))
+
+	greeting, err := io.ReadAll(conn)
+	require.NoError(t, err)
+	require.Equal(t, "greeting", string(greeting), "the remote's write half closed, so this reads to EOF")
+
+	// The read direction is finished; the write direction is not.
+	_, err = conn.Write([]byte("sent after the remote closed"))
+	require.NoError(t, err, "the local write side must survive the remote's half-close")
+	require.NoError(t, conn.(*net.TCPConn).CloseWrite())
+
+	deadline := time.After(20 * time.Second)
+	for {
+		select {
+		case body := <-bodies:
+			if body == "" {
+				continue // the preflight connection
+			}
+			assert.Equal(t, "sent after the remote closed", body)
+			return
+		case <-deadline:
+			t.Fatal("the sandbox-side server never saw the bytes sent after its own half-close")
+		}
+	}
+}
+
 // -------------------------------------------------------------- lifetime
 
 // A forward is owned by the MCP server process, not by the call that opened

@@ -193,14 +193,17 @@ func (s *Service) pump(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequest
 	// Socket to stream. Ends when the sandbox-side server closes, which is
 	// reported as a ForwardClose so the far end can shut down its own write
 	// half and no further.
+	//
+	// It deliberately does not stop the other direction. The sandbox-side
+	// server closing its write half does not mean it has stopped reading, and
+	// a caller that is still sending must still be delivered. This direction
+	// ending is not the end of the connection — the caller's own half-close
+	// is, and cancelling the RPC closes the socket underneath both pumps, so
+	// nothing here waits forever on a peer that has gone quiet.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		fromSandboxErr = socketToStream(stream, conn)
-		// The read direction finishing is the signal that the whole exchange
-		// is over: nothing more will come back, so unblock a stream-to-socket
-		// pump still waiting on a caller that has stopped sending.
-		_ = closeRead(conn)
 	}()
 
 	wg.Wait()
@@ -279,15 +282,6 @@ func closeWrite(conn net.Conn) error {
 	// closing it entirely is the closest available meaning.
 	_ = conn.Close()
 	return nil
-}
-
-// closeRead shuts down the read half, to unblock a pump waiting on a peer that
-// has stopped.
-func closeRead(conn net.Conn) error {
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		return tcp.CloseRead()
-	}
-	return conn.Close()
 }
 
 // isExpectedClose reports whether err is an ordinary end of a connection
