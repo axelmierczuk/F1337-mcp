@@ -25,6 +25,9 @@ should not be the one package here that races unwatched.
 The suite is behind `//go:build integration`, so `go test ./...` never picks it
 up. `make vet` and `make lint` do build it, under all three GOOSes — a tag that
 hides a package from the test runner should not hide it from the checkers.
+`make vet` names `testdata/helpers` explicitly for the same reason: the go tool
+skips every directory under `testdata`, so no `./...` pattern had ever compiled
+it, and the one file in it that exists purely for Windows was checked by nothing.
 
 ## What it needs
 

@@ -40,6 +40,17 @@ CHECK_GOOSES := linux darwin windows
 # CI run. Same reasoning as the per-GOOS loops below, one level up.
 CHECK_TAGS := integration
 
+# Packages no `...` pattern can reach.
+#
+# test/e2e/testdata/helpers is a real Go main package, but the go tool skips
+# every directory under testdata, so `./...` has never loaded it — under any
+# GOOS, with or without the tag above. The one file in it that exists purely for
+# Windows, pgid_other.go, was therefore compiled by nothing: the integration job
+# runs on Linux and macOS only, and that job is the only thing that builds these
+# helpers. Naming the package explicitly is what makes the per-GOOS loop below
+# mean what it says.
+CHECK_EXTRA_PKGS := ./test/e2e/testdata/helpers
+
 .DEFAULT_GOAL := help
 
 ## help: list available targets
@@ -177,7 +188,7 @@ fmt:
 vet:
 	@for os in $(CHECK_GOOSES); do \
 		echo "  go vet GOOS=$$os"; \
-		GOOS=$$os CGO_ENABLED=0 go vet -tags '$(CHECK_TAGS)' ./... || exit 1; \
+		GOOS=$$os CGO_ENABLED=0 go vet -tags '$(CHECK_TAGS)' ./... $(CHECK_EXTRA_PKGS) || exit 1; \
 	done
 
 ## check: the local gate — what CI runs, across every GOOS

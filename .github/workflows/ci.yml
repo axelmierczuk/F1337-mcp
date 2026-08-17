@@ -57,7 +57,12 @@ jobs:
       # every platform including the one it skips itself on. A test that does
       # not compile under GOOS=windows has reached this repository's CI once
       # already, and `go test ./...` below cannot see a tagged file.
-      - run: go vet -tags integration ./...
+      #
+      # The helpers package is named explicitly because `./...` skips anything
+      # under testdata: it is the only place this Windows runner ever compiles
+      # the sandbox workloads, since the integration job below is Linux and
+      # macOS only.
+      - run: go vet -tags integration ./... ./test/e2e/testdata/helpers
       - run: go test -race -count=1 ./...
 
   integration:
