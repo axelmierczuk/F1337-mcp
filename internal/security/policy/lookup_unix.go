@@ -8,6 +8,11 @@ import "os"
 // something to look up in PATH.
 const pathSeparators = "/"
 
+// patternEscapes reports whether a backslash escapes the next character in a
+// rule pattern. It mirrors filepath.Match, which honours the escape everywhere
+// except Windows.
+const patternEscapes = true
+
 // extensions is empty on Unix: an executable is one by its mode bits, not by
 // its name.
 func extensions(string) []string { return nil }

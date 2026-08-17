@@ -10,6 +10,12 @@ import (
 // something to look up in PATH. Windows accepts both.
 const pathSeparators = `/\`
 
+// patternEscapes reports whether a backslash escapes the next character in a
+// rule pattern. It does not here: filepath.Match disables escaping on Windows,
+// where a backslash is a path separator, so `C:\Windows\*` is a rule about a
+// directory rather than an escape sequence.
+const patternEscapes = false
+
 // defaultPathExt is what Windows uses when PATHEXT is unset. It matches the
 // system default rather than a subset: a host whose PATHEXT is missing from
 // the daemon's environment must still be able to run a .bat, or every command

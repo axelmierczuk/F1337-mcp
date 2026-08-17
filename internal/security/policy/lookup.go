@@ -38,9 +38,15 @@ type Command struct {
 // Found reports whether an executable was located.
 func (c Command) Found() bool { return c.Path != "" }
 
+// maxArgvPrefixes bounds how many leading runs of the argv are offered as
+// names. A rule naming a subcommand names it in the first few words; the cap
+// keeps a caller from making rule matching quadratic by sending a thousand
+// arguments.
+const maxArgvPrefixes = 16
+
 // names is every spelling of this command that a policy rule may match.
 func (c Command) names() []string {
-	names := make([]string, 0, 6)
+	names := make([]string, 0, 6+min(len(c.Argv), maxArgvPrefixes))
 	add := func(s string) {
 		if s != "" && !contains(names, s) {
 			names = append(names, s)
@@ -51,9 +57,25 @@ func (c Command) names() []string {
 	add(filepath.Base(c.Path))
 	add(c.Target)
 	add(filepath.Base(c.Target))
+
 	if len(c.Argv) > 1 {
-		// So a rule can name a subcommand — "go test", "git push" — rather
-		// than only the executable.
+		// Every leading run of the argv, so a rule can name a subcommand — "go
+		// test", "git push" — and still match a command that carries arguments
+		// after it.
+		//
+		// Prefixes rather than one joined line with a glob on the end, because
+		// filepath.Match's * does not cross a path separator: "go test*"
+		// matches "go test" and "go test -v", and not "go test ./...". A rule
+		// about a subcommand is at its most useful for exactly the commands
+		// whose arguments are paths, so a line-glob would work right up until
+		// it mattered.
+		line := c.Argv[0]
+		for _, arg := range c.Argv[1:min(len(c.Argv), maxArgvPrefixes)] {
+			line += " " + arg
+			add(line)
+		}
+		// And the whole command line, which the cap above may have stopped
+		// short of. add dedupes, so a short argv contributes it once.
 		add(strings.Join(c.Argv, " "))
 	}
 	return names

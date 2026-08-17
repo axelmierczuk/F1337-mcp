@@ -24,16 +24,38 @@ func TestNew_DefaultIsAllowAll(t *testing.T) {
 
 func TestNew_RefusesRulesItCouldNotEnforce(t *testing.T) {
 	for name, cfg := range map[string]policy.Config{
-		"empty deny entry":   {Deny: []string{"rm", ""}},
-		"blank deny entry":   {Deny: []string{"   "}},
-		"empty allow entry":  {Allow: []string{""}},
-		"malformed pattern":  {Deny: []string{"rm[a-"}},
-		"default over max":   {Caps: policy.Caps{DefaultTimeout: time.Hour, MaxTimeout: time.Minute}},
-		"malformed in allow": {Allow: []string{"[["}},
+		"empty deny entry":  {Deny: []string{"rm", ""}},
+		"blank deny entry":  {Deny: []string{"   "}},
+		"empty allow entry": {Allow: []string{""}},
+		"default over max":  {Caps: policy.Caps{DefaultTimeout: time.Hour, MaxTimeout: time.Minute}},
+		"negative cap":      {Caps: policy.Caps{MaxOutputBytes: -1}},
+
+		// Malformed patterns. The last three are the ones a probe-with-a-sample
+		// check misses: filepath.Match reports a bad pattern only when its scan
+		// reaches it, and a leading literal stops the scan against any sample.
+		"unterminated class":       {Deny: []string{"rm[a-"}},
+		"class at the start":       {Deny: []string{"[["}},
+		"class after a star":       {Deny: []string{"*["}},
+		"class after a literal":    {Deny: []string{"/usr/bin/*["}},
+		"class after a short name": {Deny: []string{"go*["}},
+		"empty class":              {Deny: []string{"rm[]"}},
+		"class in allow":           {Allow: []string{"/usr/local/bin/*["}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := policy.New(cfg)
 			require.Error(t, err, "a rule that can never match must not be accepted silently")
+		})
+	}
+}
+
+func TestNew_AcceptsValidPatterns(t *testing.T) {
+	for _, rule := range []string{
+		"rm", "/usr/bin/rm", "/usr/sbin/*", "python?", "[a-z]*", "rm[abc]", "go test",
+		"*", "/opt/*/bin/*", "[^a]bc", "a]b",
+	} {
+		t.Run(rule, func(t *testing.T) {
+			_, err := policy.New(policy.Config{Deny: []string{rule}})
+			require.NoErrorf(t, err, "%q is a pattern filepath.Match accepts", rule)
 		})
 	}
 }
@@ -101,6 +123,54 @@ func TestEvaluate_MatchesGlobsAndFullArgv(t *testing.T) {
 	pushed := p.Evaluate(policy.Command{Requested: "git", Path: "/usr/bin/git", Argv: []string{"git", "push"}})
 	require.False(t, pushed.Allowed, "a rule may name a subcommand as well as an executable")
 	require.Equal(t, "git push", pushed.Rule)
+}
+
+// A subcommand rule has to survive the command carrying arguments after it,
+// including path-shaped ones.
+//
+// This is where matching only the whole joined argv fell down: filepath.Match's
+// * does not cross a path separator, so "go test*" matches "go test -v" and not
+// "go test ./..." — and a rule about a subcommand is most useful for exactly
+// the commands whose arguments are paths.
+func TestEvaluate_SubcommandRuleMatchesTheCommandsArguments(t *testing.T) {
+	p, err := policy.New(policy.Config{Deny: []string{"go test", "git push"}})
+	require.NoError(t, err)
+
+	for _, argv := range [][]string{
+		{"go", "test"},
+		{"go", "test", "-v"},
+		{"go", "test", "./..."},
+		{"go", "test", "./...", "-run", "TestFoo"},
+	} {
+		decision := p.Evaluate(policy.Command{Requested: "go", Path: "/usr/local/go/bin/go", Argv: argv})
+		require.Falsef(t, decision.Allowed, "argv %v must match the rule \"go test\"", argv)
+		require.Equal(t, "go test", decision.Rule)
+	}
+
+	// A different subcommand of the same tool is untouched.
+	build := p.Evaluate(policy.Command{Requested: "go", Path: "/usr/local/go/bin/go", Argv: []string{"go", "build", "./..."}})
+	require.True(t, build.Allowed)
+
+	pushed := p.Evaluate(policy.Command{Requested: "git", Path: "/usr/bin/git", Argv: []string{"git", "push", "origin", "main"}})
+	require.False(t, pushed.Allowed)
+}
+
+// A rule that filepath.Match cannot evaluate refuses the command instead of
+// quietly matching nothing.
+//
+// New rejects these outright, so this is the backstop for anything its walk
+// misses. The failure it prevents is the worst kind for a deny list: an entry
+// the operator can read in their config that is not in force, with an audit
+// record that says the command ran normally.
+func TestEvaluate_UnevaluablePatternRefusesTheCommand(t *testing.T) {
+	p, err := policy.New(policy.Config{Deny: []string{"safe"}})
+	require.NoError(t, err)
+	policy.SetRulesForTest(p, nil, []string{"/usr/bin/*["})
+
+	decision := p.Evaluate(policy.Command{Requested: "rm", Path: "/usr/bin/rm"})
+	require.False(t, decision.Allowed, "a rule that cannot be applied must fail closed")
+	require.Contains(t, decision.Reason, "deny_commands")
+	require.ErrorIs(t, p.Check(policy.Command{Requested: "rm", Path: "/usr/bin/rm"}), policy.ErrDenied)
 }
 
 func TestTimeout_DefaultsAndCeiling(t *testing.T) {

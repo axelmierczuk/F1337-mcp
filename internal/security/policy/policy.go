@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
 )
@@ -115,15 +116,92 @@ func checkRules(field string, rules []string) ([]string, error) {
 		if trimmed == "" {
 			return nil, fmt.Errorf("policy: %s contains an empty entry", field)
 		}
-		// filepath.Match reports ErrBadPattern for an unterminated character
-		// class, and only when it actually reaches it — so probe with a string
-		// that cannot match anything else.
-		if _, err := filepath.Match(trimmed, "\x00"); err != nil {
+		if err := checkPattern(trimmed); err != nil {
 			return nil, fmt.Errorf("policy: %s entry %q is not a valid pattern: %w", field, rule, err)
 		}
 		out = append(out, trimmed)
 	}
 	return out, nil
+}
+
+// errBadClass is the one thing filepath.Match's syntax can get wrong.
+var errBadClass = errors.New("a [ ] character class is empty, unterminated, or has a stray - or ]")
+
+// checkPattern reports whether filepath.Match can evaluate a pattern to
+// completion.
+//
+// It walks the pattern rather than probing Match with a sample string, because
+// Match reports a malformed pattern only when its scan actually reaches the
+// malformed part and the scan stops at the first literal mismatch. Probing
+// "rm[" with anything finds the error; probing "/usr/bin/*[" finds nothing,
+// because the leading literal fails against every sample. That rule would then
+// have been accepted at startup and matched nothing at all — a deny list entry
+// an operator believes is in force and is not.
+//
+// The two rules mirrored here are Match's own: a backslash escapes the next
+// byte, except on Windows where it is a path separator, and a character class
+// must be closed, non-empty, and free of a leading or trailing range dash.
+func checkPattern(p string) error {
+	for i := 0; i < len(p); i++ {
+		switch p[i] {
+		case '\\':
+			if patternEscapes {
+				if i+1 >= len(p) {
+					return errors.New("a trailing backslash escapes nothing")
+				}
+				i++
+			}
+		case '[':
+			rest, err := checkClass(p[i+1:])
+			if err != nil {
+				return err
+			}
+			i = len(p) - len(rest) - 1
+		}
+	}
+	return nil
+}
+
+// checkClass consumes one [...] character class and returns what follows it.
+func checkClass(s string) (string, error) {
+	s = strings.TrimPrefix(s, "^")
+	items := 0
+	for {
+		// A ']' closes the class, but only once it has something in it: Match
+		// reads a leading ']' as a malformed range, not as a literal.
+		if len(s) > 0 && s[0] == ']' && items > 0 {
+			return s[1:], nil
+		}
+		var err error
+		if s, err = classItem(s); err != nil {
+			return "", err
+		}
+		if len(s) > 0 && s[0] == '-' {
+			if s, err = classItem(s[1:]); err != nil {
+				return "", err
+			}
+		}
+		items++
+	}
+}
+
+// classItem consumes one character of a class and returns what follows it. An
+// item that reaches the end of the pattern means the class was never closed.
+func classItem(s string) (string, error) {
+	if s == "" || s[0] == '-' || s[0] == ']' {
+		return "", errBadClass
+	}
+	if s[0] == '\\' && patternEscapes {
+		s = s[1:]
+		if s == "" {
+			return "", errBadClass
+		}
+	}
+	_, n := utf8.DecodeRuneInString(s)
+	if s[n:] == "" {
+		return "", errBadClass
+	}
+	return s[n:], nil
 }
 
 // Caps returns the limits this policy enforces.
@@ -175,20 +253,44 @@ type Decision struct {
 func (p *Policy) Evaluate(cmd Command) Decision {
 	names := cmd.names()
 
-	if rule, ok := matchAny(p.deny, names); ok {
+	rule, matched, err := matchAny(p.deny, names)
+	if err != nil {
+		return unevaluable("deny_commands", rule, err)
+	}
+	if matched {
 		return Decision{
 			Rule:   rule,
 			Reason: fmt.Sprintf("command %q matches the deny rule %q", cmd.describe(), rule),
 		}
 	}
+
 	if len(p.allow) == 0 {
 		return Decision{Allowed: true}
 	}
-	if rule, ok := matchAny(p.allow, names); ok {
+	rule, matched, err = matchAny(p.allow, names)
+	if err != nil {
+		return unevaluable("allow_commands", rule, err)
+	}
+	if matched {
 		return Decision{Allowed: true, Rule: rule}
 	}
 	return Decision{
 		Reason: fmt.Sprintf("command %q is not in this agent's allow list", cmd.describe()),
+	}
+}
+
+// unevaluable refuses a command because a rule could not be applied to it.
+//
+// Fail closed, loudly. New rejects a malformed pattern at construction, so
+// reaching this means one got past that check — and the alternative, treating
+// a rule that cannot be evaluated as one that did not match, silently turns a
+// deny list entry into nothing. That is the failure mode this package exists
+// to avoid: an operator reading their config sees a rule that is not in force.
+func unevaluable(field, rule string, err error) Decision {
+	return Decision{
+		Rule: rule,
+		Reason: fmt.Sprintf("this agent's %s cannot be applied to this command (%s), so it is refused; "+
+			"fix the rule and the agent will run commands again", field, err),
 	}
 }
 
@@ -200,7 +302,14 @@ func (p *Policy) Check(cmd Command) error {
 	return nil
 }
 
-func matchAny(rules []string, names []string) (string, bool) {
+// matchAny reports the first rule that matches any of the command's names.
+//
+// A pattern that cannot be evaluated is returned as an error rather than read
+// as a non-match. Match reports a malformed pattern only for the candidates its
+// scan reaches, so the same rule can error against one name and quietly match
+// nothing against another — which would make a broken deny list look like an
+// empty one for most commands and a working one for the occasional other.
+func matchAny(rules []string, names []string) (string, bool, error) {
 	for _, rule := range rules {
 		folded := fold(rule)
 		for _, name := range names {
@@ -209,17 +318,18 @@ func matchAny(rules []string, names []string) (string, bool) {
 			}
 			candidate := fold(name)
 			if folded == candidate {
-				return rule, true
+				return rule, true, nil
 			}
-			// An invalid pattern was refused at construction, so the error
-			// here can only be ErrBadPattern for a rule that never made it
-			// into the list.
-			if ok, err := filepath.Match(folded, candidate); err == nil && ok {
-				return rule, true
+			ok, err := filepath.Match(folded, candidate)
+			if err != nil {
+				return rule, false, fmt.Errorf("rule %q: %w", rule, err)
+			}
+			if ok {
+				return rule, true, nil
 			}
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // fold lowercases ASCII where the platform's paths are case-insensitive.
