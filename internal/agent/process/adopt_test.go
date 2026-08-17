@@ -582,14 +582,14 @@ func TestAdoptionRestoresTheSpawningAgentsJobName(t *testing.T) {
 	require.Equal(t, legacyJob, r.jobName,
 		"a re-adopted process keeps the job name the agent that spawned it used")
 
-	// And a process this agent starts is named with the current prefix, so the
+	// And a record this agent creates is named with the current prefix, so the
 	// compatibility path does not pin new processes to the old name.
-	fresh, err := sup.start(startSpec{
-		argv: helperArgv(t, "sleep"),
-		name: "fresh",
-		env:  helperEnviron(),
-	}, false)
-	require.NoError(t, err)
-	require.Equal(t, jobObjectName(fresh.id), fresh.jobName)
+	//
+	// newRecord rather than start: the name is assigned at construction, so
+	// spawning a process to read it back would add a live child to a supervisor
+	// that deliberately outlives its children — and on Windows the capture files
+	// it holds open then block the temp directory's cleanup.
+	fresh := newRecord(sup, "fresh-0001", dir)
+	require.Equal(t, jobObjectName("fresh-0001"), fresh.jobName)
 	require.Contains(t, fresh.jobName, "fleet-process-")
 }
