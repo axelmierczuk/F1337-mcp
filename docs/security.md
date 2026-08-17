@@ -331,6 +331,93 @@ cannot talk its way past.
   - **An allowed interpreter allows everything it can run.** `python3`, `perl`,
     `node` and `make` on an allow list are each a shell by another name.
 
+## The interactive shell
+
+`fleetctl shell` opens a real terminal session on an enrolled host: a
+pseudo-terminal on the sandbox, raw mode on the operator's own terminal, and
+bytes in between over the same mTLS stream as everything else. **It is the most
+direct remote-code-execution surface in the product**, and it belongs in this
+document under that heading rather than in a list of conveniences.
+
+It is not a new capability. Anyone who can call `fleet_exec` already runs
+arbitrary commands as the agent's account, and every argument in
+[Execution](#execution) applies here unchanged — there is no path jail, no
+meaningful command policy, and no isolation that the host does not itself
+provide. What it adds is convenience, and convenience is what decides how often
+a capability is used and by whom. So:
+
+- **`shell.enabled` turns it off on its own**, leaving exec on. That is a real
+  configuration: an agent that runs commands for a model and hands nobody an
+  interactive terminal.
+- **`exec.enabled: false` turns it off too.** A terminal is a way to run a
+  command, and it is the most direct one. An agent that honoured that setting for
+  `ExecService` and not here would report itself confined through `GetHostInfo`,
+  hand an operator a configured `allowed_roots` list, and then let them type
+  `cat /etc/shadow`. It refuses the call outright, naming the setting.
+- **Every session is recorded.** See below; this is the part that matters most.
+
+### What the session is, mechanically
+
+- **The session leads its own process group**, and on Windows its own job
+  object. Ending the session ends the tree: the terminal is hung up first —
+  which on Unix is a SIGHUP to its foreground process group, and is what makes
+  an interactive shell pass the hangup on to its own jobs — and then the group
+  is killed. A job the operator deliberately detached with `nohup`, `disown` or
+  `setsid` survives, exactly as it does over `ssh`; that is a property of what
+  they asked for rather than a gap.
+- **A dropped connection ends the session.** There is no reattach, and nothing
+  is left running on the host when the operator's terminal goes away.
+- **`shell.idle_timeout` bounds an abandoned session**, measured from the last
+  byte in either direction so that watching a long build does not count as
+  idleness. It cannot be disabled, only lengthened: a session holds a
+  pseudo-terminal, a process tree and one of the agent's concurrency slots.
+- **Ctrl-C is a byte, not a signal.** The operator's terminal is in raw mode, so
+  an interrupt never fires locally; it travels to the sandbox and its terminal
+  turns it into a SIGINT for whatever is in the foreground there. That is what
+  makes interrupting a remote command interrupt the command rather than the
+  client carrying it.
+
+### The record
+
+Every session appends one line to the [audit log](#audit): the time it started,
+the authenticated principal from the client certificate, the sandbox's own name,
+the RPC, the command the session ran, the working directory, how long it lasted,
+and how it ended — an exit status, a signal, or the idle timeout. The end of a
+session is its start plus its duration, which is also how a forwarded connection
+is recorded.
+
+**The contents are never recorded, and no field may be added that could carry
+them.** A session carries whatever the operator types and whatever the host
+prints back: a password at a `sudo` prompt, a token pasted into a `curl`
+command, a private key echoed by `cat`. An audit log holding that would be a
+credential store nobody meant to build, on the least protected host in the
+fleet, with weaker handling than whatever it copied the secrets out of — it gets
+shipped off-box, read by people debugging something unrelated, and kept long
+after the credential in it should have been rotated.
+
+That is enforced by the shape of the code rather than by everyone remembering
+it: the only value the audit path can see is a record type with no field capable
+of holding a byte of a session, and the two functions that touch session bytes
+are given neither it nor the log. `internal/agent/shell` says so in its package
+comment, and a test drives a session carrying two distinct secrets — one typed,
+one printed — and fails if either appears in the audit log or in the daemon's
+own log.
+
+The one thing that **is** recorded and could carry a secret is the command the
+session was opened with: `fleetctl shell -- mysql -pHUNTER2` writes that
+password into the file, for the same reason and with the same limitation as exec
+argv. Open a shell and type it instead; what happens inside a session is never
+written down.
+
+### There is no shell tool
+
+The MCP server deliberately exposes nothing that opens one, and should not grow
+it. A model does not need an interactive terminal — `fleet_exec` and
+`fleet_process_start` cover its use cases — and streaming raw terminal bytes
+into a context window is a bad trade in every direction: expensive, unreadable
+once escape sequences are in it, and impossible to bound. `fleetctl shell` is an
+operator command, run by a person who already holds a control certificate.
+
 ## The pivot surface
 
 Everything else in this document is about what a caller can do **to** the host
@@ -413,21 +500,22 @@ record what it did must not report success for an unrecorded pivot.
 
 ## Audit
 
-Every exec, every forwarded connection that leaves the machine — and, as they
-land, every write, edit, process start and signal — appends one JSONL record:
-timestamp, authenticated principal (the client certificate's common name), the
-sandbox's own name, RPC, outcome, duration, and then whatever the operation
-has: argv and the resolved executable and working directory for a command, the
-requested and dialed addresses and the byte counts for a connection.
-Append-only, rotated by size with a configurable number of retained segments.
+Every exec, every interactive shell session, every forwarded connection that
+leaves the machine — and, as they land, every write, edit, process start and
+signal — appends one JSONL record: timestamp, authenticated principal (the
+client certificate's common name), the sandbox's own name, RPC, outcome,
+duration, and then whatever the operation has: argv and the resolved executable
+and working directory for a command or a session, the requested and dialed
+addresses and the byte counts for a connection. Append-only, rotated by size
+with a configurable number of retained segments.
 
 Every record names the sandbox it came from. That is redundant on the host that
 wrote it and essential everywhere else: these files are shipped off-box and
 read together, and a line that does not name its machine cannot be acted on.
 
 **What it never contains.** There is no field for environment values, file
-contents, stdin, command output, forwarded payload bytes or the enrollment
-token, and none may be added.
+contents, stdin, command output, what a terminal session carried, forwarded
+payload bytes or the enrollment token, and none may be added.
 An audit log that captures secrets is a new place to steal them from, and one
 with weaker handling than whatever it copied them out of: it gets shipped
 off-box, read by people debugging something unrelated, and kept long after the
@@ -448,7 +536,9 @@ from a path, so this is a limitation to work with rather than a bug to fix: pass
 credentials in the environment, which is never recorded.
 
 See [the pivot surface](#the-pivot-surface) for which connections are recorded
-and why loopback ones are not.
+and why loopback ones are not, and [the interactive shell](#the-interactive-shell)
+for the record that matters most and the code shape that keeps a session's
+contents out of it.
 
 **`audit.required` is a real choice.** With it set, an RPC whose record could
 not be written fails — an agent that must not act unrecorded. Without it, the
