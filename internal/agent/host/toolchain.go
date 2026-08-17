@@ -137,15 +137,11 @@ func (p *Prober) Probe(ctx context.Context) []*sandboxdv1.Toolchain {
 	return found
 }
 
-// runVersion invokes a tool's version command with a clean environment.
-//
-// The daemon's own environment is not inherited: it may hold credentials from
-// whatever installed the service, and a version probe has no business seeing
-// them. PATH is passed through because some toolchains shell out to their own
-// helpers to answer.
+// runVersion invokes a tool's version command with a minimal environment; see
+// probeEnv for what is passed through and why.
 func runVersion(ctx context.Context, path string, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, path, args...) //nolint:gosec // path came from LookPath over the configured tool list
-	cmd.Env = []string{"PATH=" + envPath()}
+	cmd.Env = probeEnv()
 	// A tool that ignores SIGKILL on its context cancellation would otherwise
 	// keep Wait blocked past the deadline, which is the hang this bounds.
 	cmd.WaitDelay = time.Second

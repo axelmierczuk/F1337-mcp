@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -148,11 +149,28 @@ func TestJail_MultipleRoots(t *testing.T) {
 	assert.Len(t, j.Roots(), 2)
 }
 
-// No roots is an explicit, reportable "no jail" state — never an accidental
-// allow-all that reads as confinement.
-func TestJail_EmptyRootsIsExplicitlyDisabled(t *testing.T) {
-	j, err := agent.NewJail(nil)
-	require.NoError(t, err)
+// No jail is a state with its own constructor, never what an empty slice
+// decays into. "Confine to nothing" and "confine to everything" are one typo
+// apart and only one of them may be arrived at by accident.
+func TestJail_EmptyRootsIsRefused(t *testing.T) {
+	for name, roots := range map[string][]string{
+		"nil":            nil,
+		"empty slice":    {},
+		"empty strings":  {"", ""},
+		"blank strings":  {"   "},
+		"mixed emptines": {"", "  "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := agent.NewJail(roots)
+			require.ErrorIs(t, err, agent.ErrNoRoots,
+				"an empty root list must not silently produce a jail that permits everything")
+		})
+	}
+}
+
+// Unconfined is the explicit no-jail state: reportable, and still normalising.
+func TestJail_UnconfinedIsExplicit(t *testing.T) {
+	j := agent.Unconfined()
 	assert.False(t, j.Enabled())
 	assert.Empty(t, j.Roots())
 
@@ -173,11 +191,112 @@ func TestJail_RejectsEmptyPath(t *testing.T) {
 // A root that does not exist yet is kept, because an installer may name a
 // workspace the operator creates afterwards.
 func TestJail_NonExistentRootIsKept(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "not-yet")
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	root := filepath.Join(base, "not-yet")
+
 	j, err := agent.NewJail([]string{root})
 	require.NoError(t, err)
 	assert.True(t, j.Enabled())
 	assert.Equal(t, []string{filepath.Clean(root)}, j.Roots())
+}
+
+// A root that does not exist yet is still resolved as far as it does exist.
+//
+// Keeping it lexical is what breaks the shipped example config on macOS: /tmp
+// is a symlink to /private/tmp, so a configured root of /tmp/sandboxd stays
+// "/tmp/sandboxd" while every path under it resolves to "/private/tmp/..." —
+// and the jail then refuses every path under its own root. The symlinked
+// parent here stands in for /tmp.
+func TestJail_LateCreatedRootUnderSymlinkedParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation or developer mode on Windows")
+	}
+
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	target := filepath.Join(base, "target")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	link := filepath.Join(base, "link")
+	require.NoError(t, os.Symlink(target, link))
+
+	// Configured before the directory exists, exactly as an installer does.
+	root := filepath.Join(link, "workspace")
+	j, err := agent.NewJail([]string{root})
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join(target, "workspace")}, j.Roots(),
+		"a not-yet-existing root must be resolved through the symlinks above it")
+
+	// The operator creates it afterwards.
+	require.NoError(t, os.MkdirAll(filepath.Join(target, "workspace"), 0o755))
+
+	got, err := j.Resolve(filepath.Join(root, "file.txt"))
+	require.NoError(t, err, "the jail must not refuse a path under its own configured root")
+	assert.Equal(t, filepath.Join(target, "workspace", "file.txt"), got)
+
+	// And it still refuses everything outside.
+	_, err = j.Resolve(filepath.Join(target, "elsewhere"))
+	require.ErrorIs(t, err, agent.ErrOutsideJail)
+}
+
+// Windows case folding is ASCII-only, and this is asserted from any runner
+// because the failure it prevents cannot be reproduced on a case-sensitive
+// platform.
+//
+// Unicode simple folding — what strings.EqualFold and strings.ToLower do —
+// treats U+212A KELVIN SIGN as equal to "k". Under it a root of C:\workspace
+// contains C:\wor<U+212A>space, which Windows treats as an entirely different
+// directory: the containment check admits a path outside the jail.
+func TestJail_WindowsCaseFoldIsASCIIOnly(t *testing.T) {
+	const kelvin = "\u212A"
+
+	require.True(t, strings.EqualFold(`C:\WORKSPACE\`, `c:\wor`+kelvin+`space\`),
+		"guard: if Go's Unicode folding stops treating U+212A as K this test is testing nothing")
+
+	assert.True(t, agent.EqualPathFoldForTest(`C:\WORKSPACE\`, `c:\workspace\`, true),
+		"ASCII case must still fold, or no Windows path matches its own root")
+	assert.False(t, agent.EqualPathFoldForTest(`C:\workspace\`, `c:\wor`+kelvin+`space\`, true),
+		"a directory that merely Unicode-folds to the root's name is not inside the root")
+
+	// And with folding off, ASCII case is significant.
+	assert.False(t, agent.EqualPathFoldForTest("/Workspace", "/workspace", false))
+	assert.True(t, agent.EqualPathFoldForTest("/workspace", "/workspace", false))
+}
+
+// The Windows namespaces are refused deliberately rather than failing every
+// containment check for reasons nobody chose.
+func TestJail_WindowsPathClassification(t *testing.T) {
+	for path, want := range map[string]string{
+		`C:\root\sub`:      "local",
+		`c:/root/sub`:      "local",
+		`\\?\C:\root`:      "device",
+		`\\.\PhysicalDisk`: "device",
+		`\\server\share\x`: "UNC",
+		`C:work`:           "invalid",
+		`work\sub`:         "relative",
+		`\rooted`:          "relative",
+		``:                 "invalid",
+	} {
+		assert.Equal(t, want, agent.ClassifyWindowsPathForTest(path), path)
+	}
+}
+
+// On Windows those namespaces are refused by name, at construction and on
+// every resolve.
+func TestJail_RefusesWindowsNamespaces(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the namespaces only exist on Windows; the classifier is asserted on every platform above")
+	}
+
+	_, err := agent.NewJail([]string{`\\server\share\workspace`})
+	require.ErrorIs(t, err, agent.ErrPathNamespace)
+
+	j, err := agent.NewJail([]string{t.TempDir()})
+	require.NoError(t, err)
+	for _, path := range []string{`\\?\C:\Windows\System32`, `\\server\share\x`, `C:work`} {
+		_, err := j.Resolve(path)
+		require.ErrorIs(t, err, agent.ErrPathNamespace, path)
+	}
 }
 
 func absRoot() string {

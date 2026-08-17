@@ -35,7 +35,21 @@ type enrolledAgent struct {
 	address    string
 }
 
+// newEnrolledAgent writes an installation with exec left at its default, which
+// is on — and therefore with no path jail, whatever roots are passed.
 func newEnrolledAgent(t *testing.T, roots ...string) *enrolledAgent {
+	t.Helper()
+	return newAgentInstall(t, true, roots...)
+}
+
+// newJailedAgent writes one with exec disabled, which is the configuration
+// where allowed_roots is enforced.
+func newJailedAgent(t *testing.T, roots ...string) *enrolledAgent {
+	t.Helper()
+	return newAgentInstall(t, false, roots...)
+}
+
+func newAgentInstall(t *testing.T, execEnabled bool, roots ...string) *enrolledAgent {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -63,6 +77,7 @@ func newEnrolledAgent(t *testing.T, roots ...string) *enrolledAgent {
 		AllowedRoots: roots,
 		StateDir:     filepath.Join(dir, "state"),
 		Audit:        agent.AuditConfig{Path: filepath.Join(dir, "logs", "audit.jsonl")},
+		Exec:         agent.ExecConfig{Enabled: &execEnabled},
 	}
 	configPath := filepath.Join(dir, "agent.yaml")
 	require.NoError(t, cfg.Save(configPath))
@@ -163,7 +178,9 @@ func TestServe_StartsServesAndStopsCleanly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sandboxd-mcp", info.GetAuthenticatedPrincipal())
 	assert.Equal(t, runtime.GOOS, info.GetPlatform().GetOs())
-	assert.NotEmpty(t, info.GetAllowedRoots())
+	// Exec is on in this config, so there is no jail and the agent says so.
+	// TestServe_ExecDisabledEnforcesAllowedRoots covers the other side.
+	assert.Empty(t, info.GetAllowedRoots())
 
 	cancel()
 	select {
@@ -202,28 +219,28 @@ func TestServe_ShutsDownOnSIGTERM(t *testing.T) {
 	}
 }
 
-// An empty allowed_roots list is refused, and the refusal names the override
-// rather than leaving the operator to guess.
+// An exec-disabled agent with an empty allowed_roots is refused, and the
+// refusal names the override rather than leaving the operator to guess.
 func TestServe_RefusesEmptyAllowedRootsWithoutNoJail(t *testing.T) {
-	ea := newEnrolledAgent(t)
+	ja := newJailedAgent(t)
 
 	out := &bytes.Buffer{}
-	code := sandboxdagent.Main([]string{"serve", "--config", ea.configPath}, out)
+	code := sandboxdagent.Main([]string{"serve", "--config", ja.configPath}, out)
 	assert.Equal(t, 1, code)
 }
 
 // With --no-jail it starts, and says so loudly.
 func TestServe_NoJailStartsAndWarns(t *testing.T) {
-	ea := newEnrolledAgent(t)
+	ja := newJailedAgent(t)
 
 	// The warning goes to the daemon's logger on stderr, so capture that.
 	stderr := captureStderr(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	codes, out := runServe(ctx, t, "serve", "--config", ea.configPath, "--no-jail")
+	codes, out := runServe(ctx, t, "serve", "--config", ja.configPath, "--no-jail")
 	defer cancel()
 
-	hostClient := waitServing(t, ea)
+	hostClient := waitServing(t, ja)
 	info, err := hostClient.GetHostInfo(context.Background(), &sandboxdv1.GetHostInfoRequest{})
 	require.NoError(t, err)
 	assert.Empty(t, info.GetAllowedRoots(), "a jail-less agent reports no roots, which is how sandbox_info surfaces it")
@@ -239,6 +256,67 @@ func TestServe_NoJailStartsAndWarns(t *testing.T) {
 	logged := stderr()
 	assert.Contains(t, logged, "STARTING WITHOUT A PATH JAIL")
 	assert.Contains(t, logged, "level=WARN")
+}
+
+// End to end: exec on, roots configured. The daemon starts without demanding
+// --no-jail, ignores the roots, says so at WARN, and tells the caller it is
+// unconfined.
+//
+// The last part is the one that reaches the model: allowed_roots is what
+// sandbox_select returns to tell it where it may write.
+func TestServe_ExecEnabledIgnoresAllowedRoots(t *testing.T) {
+	ea := newEnrolledAgent(t, t.TempDir())
+
+	stderr := captureStderr(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	codes, out := runServe(ctx, t, "serve", "--config", ea.configPath)
+	defer cancel()
+
+	hostClient := waitServing(t, ea)
+	info, err := hostClient.GetHostInfo(context.Background(), &sandboxdv1.GetHostInfoRequest{})
+	require.NoError(t, err)
+	assert.Empty(t, info.GetAllowedRoots(),
+		"with exec enabled the roots confine nothing, and the wire must not claim otherwise")
+
+	cancel()
+	select {
+	case code := <-codes:
+		require.Equal(t, 0, code, out.String())
+	case <-time.After(20 * time.Second):
+		t.Fatal("serve did not exit")
+	}
+
+	logged := stderr()
+	assert.Contains(t, logged, "ALLOWED_ROOTS ARE IGNORED")
+	assert.Contains(t, logged, "level=WARN")
+	assert.Contains(t, logged, "exec.enabled: false", "the warning must name the remedy")
+}
+
+// The other side: exec off, roots configured, roots enforced and reported.
+func TestServe_ExecDisabledEnforcesAllowedRoots(t *testing.T) {
+	root := t.TempDir()
+	ja := newJailedAgent(t, root)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	codes, out := runServe(ctx, t, "serve", "--config", ja.configPath)
+	defer cancel()
+
+	hostClient := waitServing(t, ja)
+	info, err := hostClient.GetHostInfo(context.Background(), &sandboxdv1.GetHostInfoRequest{})
+	require.NoError(t, err)
+
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+	assert.Equal(t, []string{resolvedRoot}, info.GetAllowedRoots())
+
+	cancel()
+	select {
+	case code := <-codes:
+		require.Equal(t, 0, code, out.String())
+	case <-time.After(20 * time.Second):
+		t.Fatal("serve did not exit")
+	}
 }
 
 // A config that does not exist is a clear failure naming the file, not a

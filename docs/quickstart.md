@@ -130,7 +130,9 @@ The agent was enrolled against a different CA. Re-enroll with a fresh token.
 
 **`path escapes allowed roots`.**
 The path resolved — after following symlinks — to somewhere outside the roots
-given at install time. Check `sandbox_info` for the configured roots.
+given at install time. Check `sandbox_info` for the roots actually in force.
+Only an agent with `exec.enabled: false` produces this error at all; with exec
+on there is no jail to escape.
 
 **Enrollment fails with `token expired or already used`.**
 Tokens are single-use. Mint another.

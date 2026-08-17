@@ -31,6 +31,9 @@ func newServeCommand() *cobra.Command {
 			"registered service until it is signalled.\n\n" +
 			"mTLS is mandatory. Clients must present a certificate issued by the fleet CA\n" +
 			"carrying the configured organisational unit; there is no plaintext mode.\n\n" +
+			"allowed_roots is enforced only when exec.enabled is false. A caller that can\n" +
+			"run commands reaches any path without FileService, so on an exec-enabled\n" +
+			"agent the roots are ignored and the daemon says so at every start.\n\n" +
 			"On SIGTERM or SIGINT the listener stops accepting, in-flight RPCs are given\n" +
 			"the drain deadline to finish, and the daemon exits. Supervised background\n" +
 			"processes are not touched: they belong to the host, not to the daemon.",
@@ -48,7 +51,7 @@ func newServeCommand() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", "", "path to agent.yaml (default: $"+agent.EnvConfig+", the system config, or the enrollment directory)")
 	cmd.Flags().StringVar(&listen, "listen", "", "override the config's listen address")
 	cmd.Flags().StringVar(&logLevel, "log-level", "", "override the config's log level: debug, info, warn, error")
-	cmd.Flags().BoolVar(&noJail, "no-jail", false, "start with no filesystem confinement when allowed_roots is empty")
+	cmd.Flags().BoolVar(&noJail, "no-jail", false, "with exec.enabled false, start anyway when allowed_roots is empty (with exec enabled there is no jail to disable)")
 	cmd.Flags().DurationVar(&drain, "drain-timeout", 0, "how long to wait for in-flight RPCs on shutdown (default "+agent.DefaultDrainTimeout.String()+")")
 	return cmd
 }
@@ -93,16 +96,8 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		return err
 	}
 
-	if len(cfg.AllowedRoots) == 0 {
-		// Loud, every start, at WARN. A jail that was disabled for one
-		// afternoon of debugging and never re-enabled is exactly the failure
-		// this line exists to keep visible.
-		log.Warn("STARTING WITHOUT A PATH JAIL",
-			"reason", "allowed_roots is empty and --no-jail was passed",
-			"consequence", "every path on this host is reachable through FileService and ExecService",
-			"config", path)
-	}
-
+	// The jail state is announced by agent.New, which is the one place that
+	// decides it — see jailFor. Doing it here as well would let the two drift.
 	srv, err := agent.New(agent.Options{
 		Config:       cfg,
 		Log:          log,

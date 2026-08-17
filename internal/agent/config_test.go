@@ -31,6 +31,12 @@ func TestLoad_ShippedExample(t *testing.T) {
 	assert.Equal(t, "sandboxd-control", cfg.TLS.RequireClientOU)
 	assert.Equal(t, []string{"/home/build/workspace", "/tmp/sandboxd"}, cfg.AllowedRoots)
 
+	// The example ships exec on, which is what makes the roots above advisory
+	// rather than enforced — the file says so, and this asserts the file is
+	// describing the behaviour the code actually has.
+	assert.True(t, cfg.Exec.IsEnabled())
+	assert.False(t, cfg.JailEnforced())
+
 	// Durations come through as durations, not as nanoseconds.
 	assert.Equal(t, 120*time.Second, cfg.Exec.DefaultTimeout.Duration())
 	assert.Equal(t, 3600*time.Second, cfg.Exec.MaxTimeout.Duration())
@@ -95,6 +101,10 @@ func TestConfig_SaveRoundTrip(t *testing.T) {
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "cert_file")
+	// Written out explicitly, like every other default: an operator reading
+	// this file must be able to see whether the jail below it is enforced
+	// without knowing what the code defaults to.
+	assert.Contains(t, string(raw), "enabled: true")
 
 	loaded, err := agent.Load(path)
 	require.NoError(t, err)
@@ -132,9 +142,31 @@ state_dir: state
 	assert.Equal(t, filepath.Join(dir, "state"), cfg.StateDir)
 }
 
-// The daemon refuses to start with no jail unless the operator asked for it by
-// name, and the refusal is matchable so the CLI can explain the override.
+// An exec-disabled daemon refuses to start with no jail unless the operator
+// asked for it by name, and the refusal is matchable so the CLI can explain
+// the override.
 func TestValidate_EmptyAllowedRoots(t *testing.T) {
+	disabled := false
+	cfg := &agent.Config{
+		Listen: "0.0.0.0:8722",
+		TLS: agent.TLSConfig{
+			Certificate: "a.crt", PrivateKey: "a.key", CABundle: "ca.crt",
+			RequireClientOU: agent.DefaultClientOU,
+		},
+		Exec: agent.ExecConfig{Enabled: &disabled},
+	}
+
+	err := cfg.Validate(agent.ValidateOptions{})
+	require.ErrorIs(t, err, agent.ErrNoAllowedRoots)
+
+	require.NoError(t, cfg.Validate(agent.ValidateOptions{AllowNoJail: true}))
+}
+
+// With exec enabled the refusal must not fire. There is no jail for
+// allowed_roots to be missing from — a caller who can run commands reaches any
+// path without FileService — so demanding --no-jail would be demanding a flag
+// that changes nothing.
+func TestValidate_EmptyAllowedRootsIsFineWhenExecIsEnabled(t *testing.T) {
 	cfg := &agent.Config{
 		Listen: "0.0.0.0:8722",
 		TLS: agent.TLSConfig{
@@ -142,11 +174,34 @@ func TestValidate_EmptyAllowedRoots(t *testing.T) {
 			RequireClientOU: agent.DefaultClientOU,
 		},
 	}
+	require.True(t, cfg.Exec.IsEnabled(), "exec is on unless the config turns it off")
+	require.False(t, cfg.JailEnforced())
+	require.NoError(t, cfg.Validate(agent.ValidateOptions{}))
+}
 
-	err := cfg.Validate(agent.ValidateOptions{})
-	require.ErrorIs(t, err, agent.ErrNoAllowedRoots)
+// exec.enabled defaults to true, and "enabled: false" is distinguishable from
+// a key the operator never wrote.
+func TestLoad_ExecEnabledDefaultsToTrue(t *testing.T) {
+	write := func(body string) *agent.Config {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "agent.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(
+			"tls: {certificate: a.crt, private_key: a.key, ca_bundle: ca.crt}\n"+body), 0o600))
+		cfg, err := agent.Load(path)
+		require.NoError(t, err)
+		return cfg
+	}
 
-	require.NoError(t, cfg.Validate(agent.ValidateOptions{AllowNoJail: true}))
+	omitted := write("")
+	assert.True(t, omitted.Exec.IsEnabled())
+	assert.False(t, omitted.JailEnforced())
+
+	off := write("exec:\n  enabled: false\n")
+	assert.False(t, off.Exec.IsEnabled())
+	assert.True(t, off.JailEnforced(), "exec disabled is the one configuration where the jail is real")
+
+	on := write("exec:\n  enabled: true\n")
+	assert.True(t, on.Exec.IsEnabled())
 }
 
 func TestValidate_Problems(t *testing.T) {

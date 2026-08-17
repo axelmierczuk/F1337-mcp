@@ -24,7 +24,14 @@ type Deps struct {
 	Config *Config
 
 	// Jail confines filesystem access to the configured roots. Resolve every
-	// caller-supplied path through it before any syscall.
+	// caller-supplied path through it before any syscall, and use the path it
+	// returns.
+	//
+	// It is only ever confining on an agent with exec disabled: a caller who
+	// can run commands reaches any path without FileService, so the daemon
+	// hands out an unconfined jail whenever exec is on. Do not read
+	// Config.AllowedRoots as an answer about what is enforced — ask this. That
+	// is also what GetHostInfo reports.
 	Jail Jail
 
 	// Log is the daemon logger. Services should scope it, conventionally with

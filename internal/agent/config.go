@@ -24,13 +24,16 @@ const DefaultListen = "0.0.0.0:8722"
 // agent carries "sandboxd-agent" and is refused.
 const DefaultClientOU = "sandboxd-control"
 
-// ErrNoAllowedRoots is returned by Config.Validate when the config confines
-// the agent to nothing and the operator has not explicitly accepted that.
+// ErrNoAllowedRoots is returned by Config.Validate when the jail is enforced,
+// the config confines the agent to nothing, and the operator has not explicitly
+// accepted that.
 //
-// An empty root list is not a small misconfiguration: it is the difference
-// between a service that can touch a workspace and one that can touch the
-// whole filesystem, so it has to be asked for by name.
-var ErrNoAllowedRoots = errors.New("agent: allowed_roots is empty, which disables the path jail entirely; pass --no-jail to start anyway")
+// On an agent with exec disabled, an empty root list is not a small
+// misconfiguration: it is the difference between a service that can touch a
+// workspace and one that can touch the whole filesystem, so it has to be asked
+// for by name. On an exec-enabled agent it is not a condition at all — see
+// Config.JailEnforced.
+var ErrNoAllowedRoots = errors.New("agent: exec is disabled and allowed_roots is empty, which leaves no path jail; pass --no-jail to start anyway")
 
 // Config is the agent's on-disk configuration, as documented in
 // examples/agent.yaml.
@@ -46,8 +49,13 @@ type Config struct {
 	TLS TLSConfig `yaml:"tls"`
 
 	// AllowedRoots are the absolute paths the jail confines filesystem access
-	// to. Empty means no jail, which Validate refuses unless AllowNoJail is
-	// set on the ValidateOptions.
+	// to.
+	//
+	// They apply only to an agent with exec disabled. See ExecConfig.Enabled:
+	// a caller who can run commands does not need FileService to reach a path,
+	// so on an exec-enabled agent these are ignored rather than enforced
+	// half-way. When they do apply, an empty list means no jail, which Validate
+	// refuses unless AllowNoJail is set on the ValidateOptions.
 	AllowedRoots []string `yaml:"allowed_roots"`
 
 	Exec    ExecConfig    `yaml:"exec"`
@@ -96,6 +104,14 @@ type TLSConfig struct {
 // ExecConfig bounds one-shot command execution (#7) and is enforced centrally
 // by the policy layer (#17).
 type ExecConfig struct {
+	// Enabled turns ExecService on. It defaults to true — running commands is
+	// what this product is for — and turning it off is the only configuration
+	// in which the path jail is a boundary rather than a decoration.
+	//
+	// A pointer because the default is true: a plain bool cannot tell
+	// "enabled: false" from a key the operator never wrote.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
 	DefaultTimeout Duration `yaml:"default_timeout"`
 	MaxTimeout     Duration `yaml:"max_timeout"`
 	MaxOutputBytes int64    `yaml:"max_output_bytes"`
@@ -104,6 +120,22 @@ type ExecConfig struct {
 	DenyCommands  []string `yaml:"deny_commands"`
 	AllowCommands []string `yaml:"allow_commands,omitempty"`
 }
+
+// IsEnabled reports whether ExecService is on. An unset field means yes.
+func (e ExecConfig) IsEnabled() bool { return e.Enabled == nil || *e.Enabled }
+
+// JailEnforced reports whether the path jail actually confines this agent.
+//
+// It does so only when exec is disabled. With ExecService available, a caller
+// never has to go through FileService to reach a path:
+//
+//	argv: ["sh", "-c", "echo pwned > /etc/passwd"]
+//
+// needs no shell flag and no write RPC, and `tee`, `cp`, `dd` and `python -c`
+// all do the same job. A path check that stops nobody while looking like a
+// security control is worse than no check, because it is what operators plan
+// around — so the jail is wired in only where it is real.
+func (c *Config) JailEnforced() bool { return !c.Exec.IsEnabled() }
 
 // ProcessConfig bounds the background process supervisor (#11–#15).
 type ProcessConfig struct {
@@ -240,6 +272,10 @@ func (c *Config) applyDefaults() {
 	if c.TLS.RequireClientOU == "" {
 		c.TLS.RequireClientOU = DefaultClientOU
 	}
+	if c.Exec.Enabled == nil {
+		enabled := true
+		c.Exec.Enabled = &enabled
+	}
 	if c.Exec.DefaultTimeout <= 0 {
 		c.Exec.DefaultTimeout = Duration(120 * time.Second)
 	}
@@ -348,7 +384,11 @@ func (c *Config) Validate(opts ValidateOptions) error {
 
 	// Checked last and on its own, so the caller can match on it: this is the
 	// one failure with a documented override rather than a typo to fix.
-	if len(c.AllowedRoots) == 0 && !opts.AllowNoJail {
+	//
+	// It only bites when the jail is enforced. On an exec-enabled agent there
+	// is no jail for allowed_roots to be missing from, so refusing to start
+	// would be demanding a setting that changes nothing.
+	if c.JailEnforced() && len(c.AllowedRoots) == 0 && !opts.AllowNoJail {
 		return ErrNoAllowedRoots
 	}
 	return nil

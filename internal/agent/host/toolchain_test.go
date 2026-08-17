@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -180,6 +181,58 @@ func TestProbe_DefaultsFinishPromptly(t *testing.T) {
 		assert.NotEmpty(t, tc.GetName())
 		assert.False(t, strings.Contains(tc.GetVersion(), "\n"), "a version must be a single line")
 	}
+}
+
+// The probe environment carries PATH and nothing that identifies a user or
+// holds a credential — and, on Windows, the handful of variables a process
+// cannot start without.
+//
+// A bare PATH is correct on Unix and wrong on Windows: a child launched without
+// SystemRoot fails to initialise, so every toolchain on every Windows host
+// would be reported as present-but-unversioned. The allowlist is asserted here
+// on every platform because that failure cannot be reproduced on the ones CI
+// mostly runs.
+func TestProbeEnv_PassesPathAndNothingSecret(t *testing.T) {
+	values := map[string]string{
+		"PATH":                  "/usr/bin",
+		"SystemRoot":            `C:\Windows`,
+		"windir":                `C:\Windows`,
+		"COMSPEC":               `C:\Windows\system32\cmd.exe`,
+		"PATHEXT":               ".COM;.EXE",
+		"NUMBER_OF_PROCESSORS":  "8",
+		"TEMP":                  `C:\Temp`,
+		"TMP":                   `C:\Temp`,
+		"AWS_SECRET_ACCESS_KEY": "hunter2",
+		"GITHUB_TOKEN":          "ghp_hunter2",
+		"HOME":                  "/root",
+	}
+	env := host.BuildProbeEnvForTest(func(name string) string { return values[name] })
+
+	assert.Contains(t, env, "PATH=/usr/bin")
+	for _, secret := range []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "HOME"} {
+		for _, entry := range env {
+			assert.False(t, strings.HasPrefix(entry, secret+"="),
+				"the daemon's environment must not reach a version probe: %s", entry)
+		}
+	}
+
+	// Whatever this platform's allowlist names is passed through when set, and
+	// omitted when not.
+	for _, name := range host.ProbePassthroughForTest() {
+		if values[name] == "" {
+			continue
+		}
+		assert.Contains(t, env, name+"="+values[name],
+			"%s must reach the child on this platform", name)
+	}
+	if runtime.GOOS == "windows" {
+		assert.Contains(t, host.ProbePassthroughForTest(), "SystemRoot",
+			"a Windows child started without SystemRoot fails to initialise")
+	}
+
+	// Nothing is emitted for a variable that is not set.
+	empty := host.BuildProbeEnvForTest(func(string) string { return "" })
+	assert.Equal(t, []string{"PATH="}, empty)
 }
 
 func manyTools(n int) []host.Tool {

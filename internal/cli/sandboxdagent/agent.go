@@ -106,9 +106,9 @@ func newEnrollCommand(out io.Writer) *cobra.Command {
 			"private key never leaves the machine. The control plane's certificate is\n" +
 			"verified against --ca-fingerprint during the TLS handshake, before the\n" +
 			"token is transmitted.\n\n" +
-			"It then writes agent.yaml beside the issued certificate. --root is what\n" +
-			"fills in allowed_roots; without at least one, the daemon refuses to start\n" +
-			"unless `serve --no-jail` is passed.",
+			"It then writes agent.yaml beside the issued certificate. --root fills in\n" +
+			"allowed_roots, which is enforced only when exec.enabled is false: a caller\n" +
+			"that can run commands reaches any path without FileService.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error { return runEnroll(out, f) },
 	}
@@ -120,7 +120,7 @@ func newEnrollCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&f.listen, "listen", agent.DefaultListen, "address this agent will serve on once enrolled")
 	cmd.Flags().StringVar(&f.dir, "dir", "", "directory to write the certificate, key, and config into (default: the system config directory when elevated, else <config dir>/agent)")
 	cmd.Flags().StringArrayVar(&f.addresses, "address", nil, "host:port the control plane will dial this agent by; repeatable")
-	cmd.Flags().StringArrayVar(&f.roots, "root", nil, "absolute path the agent may read and write under; repeatable")
+	cmd.Flags().StringArrayVar(&f.roots, "root", nil, "absolute path the agent may read and write under; repeatable. Enforced only when exec.enabled is false")
 	_ = cmd.MarkFlagRequired("token")
 	return cmd
 }
@@ -245,13 +245,16 @@ func runEnroll(out io.Writer, f enrollFlags) error {
 	if err := summarizeLeaf(p, resp.GetCertificatePem()); err != nil {
 		return err
 	}
-	if len(cfg.AllowedRoots) == 0 {
-		p.Println("WARNING: no --root given, so allowed_roots is empty and there is no path")
-		p.Println("         jail. The daemon refuses to start that way unless `serve` is")
-		p.Println("         given --no-jail.")
-	} else {
+	// allowed_roots is only a boundary on an agent with exec disabled, and
+	// enroll writes the default config, which has exec on. Saying "the roots
+	// confine this agent" here would be the first place the false confidence
+	// gets planted.
+	if len(cfg.AllowedRoots) > 0 {
 		p.Printf("roots:       %v\n", cfg.AllowedRoots)
 	}
+	p.Println("NOTE: exec is enabled, so allowed_roots is not enforced: a caller runs")
+	p.Println("      [\"sh\",\"-c\",\"...\"] and reaches any path this account can. Set")
+	p.Println("      exec.enabled: false in the config to make the roots a real jail.")
 	return p.Err()
 }
 

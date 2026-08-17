@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -47,8 +48,21 @@ func newTestFleet(t *testing.T) *testFleet {
 }
 
 // agentConfig writes the agent's certificate, key, and CA bundle to a temp
-// directory and returns a config pointing at them.
+// directory and returns a config pointing at them, with exec left at its
+// default — which means the jail is off however many roots are passed.
 func (f *testFleet) agentConfig(t *testing.T, roots ...string) *agent.Config {
+	t.Helper()
+	return f.config(t, true, roots...)
+}
+
+// jailedConfig is agentConfig with exec disabled, which is the one
+// configuration where allowed_roots is enforced.
+func (f *testFleet) jailedConfig(t *testing.T, roots ...string) *agent.Config {
+	t.Helper()
+	return f.config(t, false, roots...)
+}
+
+func (f *testFleet) config(t *testing.T, execEnabled bool, roots ...string) *agent.Config {
 	t.Helper()
 	dir := t.TempDir()
 	certPEM, keyPEM := f.sign(ca.ProfileAgent, "test-agent", []string{"test-agent", "localhost"})
@@ -71,6 +85,7 @@ func (f *testFleet) agentConfig(t *testing.T, roots ...string) *agent.Config {
 		},
 		AllowedRoots: roots,
 		StateDir:     filepath.Join(dir, "state"),
+		Exec:         agent.ExecConfig{Enabled: &execEnabled},
 	}
 	require.NoError(t, cfg.Validate(agent.ValidateOptions{AllowNoJail: len(roots) == 0}))
 	return cfg
@@ -160,6 +175,34 @@ func (s *countingService) seenPrincipal() string {
 // is under test, and a failing case is diagnosed from assertions rather than
 // from log noise.
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// syncBuffer is a log sink a test can read while the daemon is still writing
+// to it. slog does not serialise a handler's writer against anything but
+// itself, and the daemon logs from its own goroutines, so a bare bytes.Buffer
+// here is a race the detector finds rather than a convenience.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// capturedLogger returns a logger writing to a buffer a test can read at any
+// time, for the assertions about what the daemon announces at startup.
+func capturedLogger() (*slog.Logger, *syncBuffer) {
+	buf := &syncBuffer{}
+	return slog.New(slog.NewTextHandler(buf, nil)), buf
+}
 
 // newBufconn returns an in-memory listener for a server that is built but
 // never served.

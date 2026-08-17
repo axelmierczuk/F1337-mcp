@@ -76,9 +76,11 @@ operator                control plane              new host
 - `EnrollmentService` is the one endpoint an unauthenticated caller may reach,
   because the enrolling host has no certificate yet. It is server-authenticated
   TLS plus the bearer token.
-- **Pin the CA fingerprint.** Without `--ca-fingerprint`, enrollment trusts
-  whatever certificate the control plane presents, and a network attacker can
-  impersonate it. The installer warns when you omit it.
+- **Pin the CA fingerprint.** `enroll` requires `--ca-fingerprint` and refuses
+  to run without it. Unpinned, enrollment would trust whatever certificate the
+  control plane presents, and a network attacker who can answer on that address
+  collects the token. The installers require it for the same reason, and refuse
+  before they download anything.
 
 ## The account the agent runs as
 
@@ -99,15 +101,47 @@ The systemd unit sets `KillMode=process` and the launchd job sets
 
 ## Filesystem confinement
 
-Paths are resolved to absolute form, symlinks are resolved, and only then is
-containment under an allowed root checked.
+**The path jail and `exec` are mutually exclusive, and `exec` is on by
+default.** An agent that can run commands is not confined by a path check:
 
-Doing it in that order is the whole point. Checking for `..` in the requested
-path before resolution is a jail that any symlink inside it walks straight out
-of.
+```
+argv: ["sh", "-c", "echo pwned > /etc/passwd"]
+```
 
-An agent configured with no allowed roots has no jail. It refuses to start that
-way unless explicitly forced, and reports the condition in `sandbox_info`.
+That is one `ExecService` call. It needs no `shell: true` — you exec `sh`
+directly — and `tee`, `cp`, `dd` and `python -c` all do the same job. So with
+exec enabled the jail stops **nothing** an attacker would do, while an operator
+who reads `allowed_roots` in their config reasonably concludes the agent is
+confined to them. A control that stops honest mistakes but not dishonest ones,
+while looking like a security control, is worse than no control, because it is
+what people plan around.
+
+So:
+
+| `exec.enabled` | `allowed_roots` | `GetHostInfo.allowed_roots` |
+| --- | --- | --- |
+| `true` (default) | ignored, with a warning at every start naming why | empty — the agent reports itself unconfined |
+| `false` | enforced on every `FileService` path | the resolved roots |
+
+The wire behaviour matters as much as the enforcement. `allowed_roots` is what
+`sandbox_info` and `sandbox_select` show the model to tell it where it may
+write; reporting roots that constrain nothing is the model-facing version of
+the same lie.
+
+When the jail *is* in force, paths are resolved to absolute form, symlinks are
+resolved, and only then is containment under an allowed root checked. Doing it
+in that order is the whole point: checking for `..` in the requested path before
+resolution is a jail that any symlink inside it walks straight out of.
+
+An exec-disabled agent with no allowed roots has no jail either. It refuses to
+start that way unless explicitly forced, and reports the condition in
+`sandbox_info`.
+
+If you want a filesystem boundary on an agent that runs commands, it has to come
+from outside the agent: a container, a VM, a `ProtectSystem=strict` unit with
+`ReadWritePaths` (see [docs/service.md](service.md)), or a user account that
+cannot read what you care about. Those are enforced by something the agent
+cannot talk its way past.
 
 ## Execution
 

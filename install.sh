@@ -2,7 +2,8 @@
 # sandboxd-agent installer.
 #
 #   curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
-#     | sh -s -- --token <enrollment-token> --control <control-host:9443>
+#     | sh -s -- --token <enrollment-token> --control <control-host:9443> \
+#         --ca-fingerprint <sha256-of-the-fleet-CA> --root /path/to/workspace
 #
 # Downloads the release binary for this platform, verifies its SHA-256 against
 # the release checksum file, installs it, and optionally enrolls the host and
@@ -10,8 +11,8 @@
 #
 # Piping a script from the network into a shell is trust-on-first-use no matter
 # how careful the script is. This one at least refuses to install an artifact
-# whose checksum does not match the one published alongside it, and it pins the
-# control-plane CA when you give it a fingerprint.
+# whose checksum does not match the one published alongside it, and it always
+# pins the control-plane CA — enrollment will not run without a fingerprint.
 
 set -eu
 
@@ -40,15 +41,20 @@ Usage: install.sh [options]
 
 Options:
   --token <token>          Enrollment token from `sandboxctl enroll mint`.
-                           When set, the host enrolls after installation.
+                           When set, the host enrolls after installation, and
+                           --control and --ca-fingerprint become required.
   --control <host:port>    Control-plane enrollment endpoint.
-  --ca-fingerprint <hex>   SHA-256 fingerprint of the control-plane CA to pin.
-                           Strongly recommended: without it, enrollment trusts
-                           whatever certificate the control plane presents.
+  --ca-fingerprint <hex>   SHA-256 fingerprint of the control-plane CA to pin,
+                           from `sandboxctl ca fingerprint`. Required with
+                           --token: enrollment refuses to run unpinned.
   --listen <addr:port>     Address the agent serves gRPC on (default 0.0.0.0:8722).
-  --name <name>            Sandbox name to request (default: system hostname).
+  --name <name>            Sandbox name to request. Only for a token that
+                           reserved none; the control plane refuses a name
+                           other than the one its token authorizes.
   --root <path>            Filesystem root the agent may access. Repeatable.
-                           Without any, the agent starts with no path jail.
+                           Enforced only when exec.enabled is false in the
+                           config: a caller that can run commands reaches any
+                           path without going through FileService.
   --version <vX.Y.Z>       Release to install (default: latest).
   --install-dir <path>     Install prefix (default: /usr/local/bin, or
                            ~/.local/bin for an unprivileged install).
@@ -75,6 +81,23 @@ while [ $# -gt 0 ]; do
     *)                 die "unknown option: $1 (try --help)" ;;
   esac
 done
+
+# Checked here rather than at the enroll step, so an invocation that cannot
+# possibly enroll costs nothing. Discovering it after the download leaves a
+# binary installed on a host that never joined the fleet, which is the worst of
+# both outcomes.
+if [ -n "$TOKEN" ]; then
+  [ -n "$CONTROL" ] || die "--token requires --control <host:port>"
+  if [ -z "$CA_FINGERPRINT" ]; then
+    die "--token requires --ca-fingerprint <hex>
+
+\`sandboxd-agent enroll\` refuses to run unpinned. Without the fingerprint,
+anything that can answer on the network collects the token, and the token is
+the only thing between an attacker and a fleet identity.
+
+Get it from the control host with: sandboxctl ca fingerprint"
+  fi
+fi
 
 # ---------------------------------------------------------------- platform ---
 
@@ -220,14 +243,10 @@ esac
 # --------------------------------------------------------------- enroll ------
 
 if [ -n "$TOKEN" ]; then
-  [ -n "$CONTROL" ] || die "--token requires --control"
-
-  set -- enroll --token "$TOKEN" --control "$CONTROL" --listen "$LISTEN"
+  set -- enroll --token "$TOKEN" --control "$CONTROL" \
+    --ca-fingerprint "$CA_FINGERPRINT" --listen "$LISTEN"
   if [ -n "$NAME" ]; then
     set -- "$@" --name "$NAME"
-  fi
-  if [ -n "$CA_FINGERPRINT" ]; then
-    set -- "$@" --ca-fingerprint "$CA_FINGERPRINT"
   fi
   # Intentional word splitting: --root is repeatable and roots are collected
   # into a single space-separated string above.
@@ -236,12 +255,12 @@ if [ -n "$TOKEN" ]; then
     set -- "$@" --root "$root"
   done
 
-  if [ -z "$CA_FINGERPRINT" ]; then
-    warn "enrolling without --ca-fingerprint: the control plane's certificate is not pinned"
-  fi
-  if [ -z "$ALLOWED_ROOTS" ]; then
-    warn "no --root given: the agent will start without a filesystem jail"
-  fi
+  # Said whether or not roots were given, because it is true either way: the
+  # default config has exec on, and an agent that runs commands is not confined
+  # by a path check. See docs/security.md.
+  warn "exec is enabled, so allowed_roots is not enforced: this agent can read and"
+  warn "write every path its account can. Set exec.enabled: false in the config to"
+  warn "make --root a real jail."
 
   log "enrolling with ${CONTROL}"
   "${INSTALL_DIR}/sandboxd-agent" "$@" || die "enrollment failed"
@@ -263,8 +282,10 @@ else
     ${INSTALL_DIR}/sandboxd-agent enroll \\
       --token <enrollment-token> \\
       --control <control-host:9443> \\
+      --ca-fingerprint <sha256-of-the-fleet-CA> \\
       --root /path/to/workspace
 
   Mint a token on the control host with: sandboxctl enroll mint
+  Read its CA fingerprint with:          sandboxctl ca fingerprint
 EOF
 fi

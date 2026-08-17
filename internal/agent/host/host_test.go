@@ -20,8 +20,12 @@ import (
 
 func newService(t *testing.T, roots ...string) (*host.Service, agent.Deps) {
 	t.Helper()
-	jail, err := agent.NewJail(roots)
-	require.NoError(t, err)
+	jail := agent.Unconfined()
+	if len(roots) > 0 {
+		var err error
+		jail, err = agent.NewJail(roots)
+		require.NoError(t, err)
+	}
 
 	deps := agent.Deps{
 		Config:    &agent.Config{AllowedRoots: roots},
@@ -90,6 +94,35 @@ func TestGetHostInfo_AllowedRoots(t *testing.T) {
 	resp, err = noJail.GetHostInfo(context.Background(), &sandboxdv1.GetHostInfoRequest{})
 	require.NoError(t, err)
 	assert.Empty(t, resp.GetAllowedRoots())
+}
+
+// allowed_roots reports what the jail enforces, never what the config wrote
+// down.
+//
+// This is the exec-enabled shape: roots in the config, no jail in force. The
+// field is what sandbox_info and sandbox_select show the model to tell it where
+// it may write, so echoing back roots that constrain nothing would be the
+// model-facing version of exactly the false confidence this design removed.
+func TestGetHostInfo_ReportsTheJailNotTheConfig(t *testing.T) {
+	root := t.TempDir()
+	deps := agent.Deps{
+		Config:    &agent.Config{AllowedRoots: []string{root}}, // exec on by default
+		Jail:      agent.Unconfined(),
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Status:    agent.NewStatus(),
+		Version:   "1.2.3-test",
+		StartedAt: time.Now().UTC(),
+	}
+	require.False(t, deps.Config.JailEnforced(), "guard: this is the exec-enabled configuration")
+
+	built, err := host.New(deps)
+	require.NoError(t, err)
+	svc := built.(*host.Service)
+
+	resp, err := svc.GetHostInfo(context.Background(), &sandboxdv1.GetHostInfoRequest{})
+	require.NoError(t, err)
+	assert.Empty(t, resp.GetAllowedRoots(),
+		"an agent whose jail is off must report itself unconfined, not repeat its ignored roots")
 }
 
 // Toolchain probing is opt-in: the default call does not pay for it.

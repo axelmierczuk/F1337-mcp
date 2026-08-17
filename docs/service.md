@@ -73,7 +73,11 @@ correct on a daemon serving HTTP breaks this one:
   skipping one directive, so the rendered unit says why it was omitted.
 - **`ProtectSystem=strict` is opt-in.** It is the right shape, but a toolchain
   that writes anywhere outside the roots stops working under it. Use it when
-  you know what your builds touch.
+  you know what your builds touch. It is also the only filesystem boundary that
+  survives an exec-enabled agent: the agent's own path jail is off in that
+  configuration (see [security.md](security.md#filesystem-confinement)), and a
+  kernel-enforced `ReadWritePaths` is not something a `sh -c` can talk its way
+  past.
 - **`PrivateDevices`, `RestrictAddressFamilies`, and `SystemCallFilter` are not
   set at any level.** The agent runs arbitrary programs; each of those turns an
   ordinary build failure into an unexplainable one.

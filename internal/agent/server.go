@@ -99,8 +99,7 @@ func New(opts Options) (*Server, error) {
 
 	jailed := opts.Jail
 	if jailed == nil {
-		jailed, err = NewJail(opts.Config.AllowedRoots)
-		if err != nil {
+		if jailed, err = jailFor(opts.Config, opts.Log); err != nil {
 			return nil, err
 		}
 	}
@@ -171,6 +170,44 @@ func New(opts Options) (*Server, error) {
 	}, nil
 }
 
+// jailFor builds the jail the daemon hands its services, and announces which
+// of the three states it ended up in.
+//
+// The states are not symmetrical and the logging is not decoration. An agent
+// that ignores configured roots must say so at every start: an operator who
+// wrote allowed_roots into their config and never heard otherwise reasonably
+// concludes the agent is confined to them, and that belief is the thing this
+// wiring exists to remove.
+func jailFor(cfg *Config, log *slog.Logger) (Jail, error) {
+	if !cfg.JailEnforced() {
+		if len(cfg.AllowedRoots) > 0 {
+			log.Warn("ALLOWED_ROOTS ARE IGNORED",
+				"roots", cfg.AllowedRoots,
+				"reason", `exec is enabled, and a caller with ExecService reaches any path without FileService: argv ["sh","-c","echo x > /etc/passwd"] needs no shell flag and no write RPC`,
+				"consequence", "this agent can read and write every path its account can, and reports itself as unconfined",
+				"remedy", "set exec.enabled: false to make allowed_roots a boundary rather than a decoration")
+		} else {
+			log.Warn("STARTING WITHOUT A PATH JAIL",
+				"reason", "exec is enabled, and an agent that runs arbitrary commands cannot be confined by a path check",
+				"consequence", "every path this account can reach is reachable through this agent")
+		}
+		return Unconfined(), nil
+	}
+
+	if len(cfg.AllowedRoots) == 0 {
+		// Config.Validate refuses this unless the operator passed --no-jail, so
+		// reaching here means they did. It is named rather than left to fall
+		// out of an empty slice, and logged every start, because a jail that
+		// was disabled for one afternoon of debugging and never re-enabled is
+		// exactly what this line exists to keep visible.
+		log.Warn("STARTING WITHOUT A PATH JAIL",
+			"reason", "exec is disabled but allowed_roots is empty and --no-jail was passed",
+			"consequence", "every path on this host is reachable through FileService")
+		return Unconfined(), nil
+	}
+	return NewJail(cfg.AllowedRoots)
+}
+
 // Addr returns the address the server accepts on.
 func (s *Server) Addr() net.Addr { return s.lis.Addr() }
 
@@ -207,7 +244,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	s.log.Info("serving",
 		"address", s.lis.Addr().String(),
 		"services", s.ServiceNames(),
+		"exec_enabled", s.cfg.Exec.IsEnabled(),
 		"jail", s.deps.Jail.Enabled(),
+		// The jail's roots, not the config's: with exec enabled those differ,
+		// and this line should say what is in force rather than what was
+		// written down.
 		"allowed_roots", s.deps.Jail.Roots(),
 		"require_client_ou", s.cfg.TLS.RequireClientOU,
 		"version", s.deps.Version,
@@ -226,6 +267,12 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	select {
 	case err := <-errCh:
+		// The accept loop stopped on its own: a listener closed from outside,
+		// or an accept failure gRPC judged permanent. The services still get
+		// their shutdown hook. Persisting the supervisor's process records is
+		// what that hook is for, and losing them because a socket died is a
+		// worse outcome than the dead socket.
+		s.shutdown()
 		if err != nil {
 			return fmt.Errorf("agent: serve: %w", err)
 		}

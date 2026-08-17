@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/test/bufconn"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
@@ -25,7 +26,9 @@ import (
 func TestServer_ServiceRegistrationSeam(t *testing.T) {
 	fleet := newTestFleet(t)
 	root := t.TempDir()
-	cfg := fleet.agentConfig(t, root)
+	// Exec disabled, so the jail assertions below are about a jail that is
+	// actually in force; see TestServer_ExecEnabledDisablesTheJail.
+	cfg := fleet.jailedConfig(t, root)
 
 	var got agent.Deps
 	var built atomic.Int64
@@ -50,6 +53,70 @@ func TestServer_ServiceRegistrationSeam(t *testing.T) {
 	assert.True(t, got.Jail.Enabled())
 	assert.Equal(t, []string{resolved(t, root)}, got.Jail.Roots())
 	assert.Equal(t, []string{"host"}, h.server.ServiceNames())
+}
+
+// Exec and the jail are mutually exclusive.
+//
+// A caller with ExecService never has to go through FileService to reach a
+// path — argv ["sh","-c","echo x > /etc/passwd"] needs no shell flag and no
+// write RPC — so on an exec-enabled agent the configured roots confine nothing.
+// They are ignored rather than half-enforced, because a control that stops
+// honest mistakes and not dishonest ones, while looking like a security
+// control, is what operators plan around.
+func TestServer_ExecEnabledDisablesTheJail(t *testing.T) {
+	fleet := newTestFleet(t)
+	root := t.TempDir()
+
+	log, logs := capturedLogger()
+	h := start(t, fleet.agentConfig(t, root), []agent.Registration{registration("host", newCountingService())},
+		func(o *agent.Options) { o.Log = log })
+
+	jail := h.server.Deps().Jail
+	assert.False(t, jail.Enabled(), "exec is enabled, so there is no jail")
+	assert.Empty(t, jail.Roots(),
+		"an agent whose jail is off must report no roots: this is what sandbox_select tells the model it may write to")
+
+	// Resolution still works — services call Resolve unconditionally — it just
+	// permits everything.
+	outside := filepath.Join(t.TempDir(), "elsewhere")
+	got, err := jail.Resolve(outside)
+	require.NoError(t, err)
+	assert.Equal(t, resolved(t, filepath.Dir(outside))+string(filepath.Separator)+"elsewhere", got)
+
+	// And it is never silent: configured roots that are being ignored are said
+	// out loud, with the reason, at every start.
+	logged := logs.String()
+	assert.Contains(t, logged, "ALLOWED_ROOTS ARE IGNORED")
+	assert.Contains(t, logged, "level=WARN")
+	assert.Contains(t, logged, "sh")
+	assert.Contains(t, logged, "exec.enabled: false")
+}
+
+// With exec disabled the roots are a real boundary, and are enforced.
+func TestServer_ExecDisabledEnforcesTheJail(t *testing.T) {
+	fleet := newTestFleet(t)
+	root := t.TempDir()
+
+	h := start(t, fleet.jailedConfig(t, root), []agent.Registration{registration("host", newCountingService())})
+
+	jail := h.server.Deps().Jail
+	require.True(t, jail.Enabled())
+	assert.Equal(t, []string{resolved(t, root)}, jail.Roots())
+
+	_, err := jail.Resolve(filepath.Join(t.TempDir(), "elsewhere"))
+	require.ErrorIs(t, err, agent.ErrOutsideJail)
+}
+
+// An exec-disabled agent with no roots is the --no-jail case, and it says so.
+func TestServer_ExecDisabledWithNoRootsWarns(t *testing.T) {
+	fleet := newTestFleet(t)
+
+	log, logs := capturedLogger()
+	start(t, fleet.jailedConfig(t), []agent.Registration{registration("host", newCountingService())},
+		func(o *agent.Options) { o.Log = log })
+
+	assert.Contains(t, logs.String(), "STARTING WITHOUT A PATH JAIL")
+	assert.Contains(t, logs.String(), "level=WARN")
 }
 
 // A factory that fails takes the daemon down with it, rather than leaving a
@@ -214,6 +281,49 @@ func TestServer_ShutdownParticipantErrorDoesNotBlockExit(t *testing.T) {
 
 	require.NoError(t, h.stop(t))
 	assert.True(t, second.ran.Load(), "a failing participant must not stop the ones after it")
+}
+
+// A daemon whose accept loop dies on its own still runs its shutdown
+// participants.
+//
+// The listener can go away without anyone cancelling the context: a socket
+// closed from outside, or an accept failure gRPC judges permanent. Returning
+// straight out of Serve there would skip every Shutdowner — and the supervisor's
+// Shutdown is what persists the process records that let #11 re-adopt its
+// children after a restart. Losing them because a socket died is a worse
+// outcome than the dead socket.
+func TestServer_AcceptLoopFailureStillRunsShutdowners(t *testing.T) {
+	fleet := newTestFleet(t)
+	rec := &shutdownRecorder{countingService: *newCountingService()}
+
+	lis := bufconn.Listen(1024 * 1024)
+	srv, err := agent.New(agent.Options{
+		Config:   fleet.agentConfig(t),
+		Log:      discardLogger(),
+		Version:  "0.0.0-test",
+		Services: []agent.Registration{registration("host", rec)},
+		Listener: lis,
+	})
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(context.Background()) }()
+
+	// Kill the listener out from under the accept loop. Whether Serve got as
+	// far as Accept first does not matter: either way the accept fails and
+	// gRPC returns the error.
+	require.NoError(t, lis.Close())
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a dead accept loop is reported, not swallowed")
+	case <-time.After(20 * time.Second):
+		t.Fatal("Serve did not return after its listener was closed")
+	}
+	assert.True(t, rec.ran.Load(),
+		"a Shutdowner must run even when the daemon is stopping because its listener died")
+	state, _, _ := srv.Deps().Status.Snapshot()
+	assert.Equal(t, sandboxdv1.HealthResponse_STATUS_DRAINING, state)
 }
 
 // failingShutdowner registers no gRPC handlers — only one service in a daemon

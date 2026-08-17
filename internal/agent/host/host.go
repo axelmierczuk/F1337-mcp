@@ -53,7 +53,10 @@ func New(deps agent.Deps) (agent.Service, error) {
 			Hostname:      hostname,
 			PathSeparator: string(filepath.Separator),
 		},
-		diskPath: resourceDiskPath(deps.Config.AllowedRoots),
+		// The jail's roots, not the config's: on an exec-enabled agent the
+		// config names roots that are not in force, and the filesystem worth
+		// reporting free space for is the one the agent actually writes to.
+		diskPath: resourceDiskPath(deps.Jail.Roots()),
 	}, nil
 }
 
@@ -87,7 +90,14 @@ func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRe
 			DiskAvailableBytes:   res.DiskAvailableBytes,
 			LoadAverage_1M:       res.LoadAverage1m,
 		},
-		AgentVersion:           s.deps.Version,
+		AgentVersion: s.deps.Version,
+		// The jail's roots, never the config's. This field is what
+		// sandbox_info and sandbox_select show the model to tell it where it
+		// may write, so on an agent whose jail is off it must be empty — the
+		// proto's documented "no path jail" — rather than repeating roots that
+		// constrain nothing. Returning the configured list there would be the
+		// model-facing version of the same lie the startup warning exists to
+		// stop telling the operator.
 		AllowedRoots:           s.deps.Jail.Roots(),
 		StartedAt:              timestamppb.New(s.deps.StartedAt),
 		AuthenticatedPrincipal: principal,

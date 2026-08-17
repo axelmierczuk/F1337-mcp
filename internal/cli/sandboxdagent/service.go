@@ -158,9 +158,13 @@ func runServiceInstall(out io.Writer, configPath, userName string, level Hardeni
 	p.Printf("  state:     %s (left in place by uninstall)\n", params.StateDir)
 	p.Printf("  logs:      %s\n", params.LogDir)
 	p.Printf("  hardening: %s\n", params.Hardening)
-	if len(cfg.AllowedRoots) == 0 {
-		p.Println("  WARNING: the config has no allowed_roots, so the agent will refuse to")
-		p.Println("           start unless serve is given --no-jail.")
+	switch {
+	case !cfg.JailEnforced():
+		p.Println("  NOTE: exec is enabled, so allowed_roots is not enforced. This agent")
+		p.Println("        can read and write every path the account above can.")
+	case len(cfg.AllowedRoots) == 0:
+		p.Println("  WARNING: exec is disabled and the config has no allowed_roots, so the")
+		p.Println("           agent will refuse to start unless serve is given --no-jail.")
 	}
 
 	if wasRunning {

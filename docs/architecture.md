@@ -171,7 +171,15 @@ indistinguishable from a hung agent, and the model has no way to recover.
 
 ## Filesystem
 
-Every path passes through `internal/security/jail` before any syscall:
+The path jail is wired in only on an agent with `exec.enabled: false`. With exec
+on — the default — one `ExecService` call runs
+`["sh","-c","echo x > /etc/passwd"]` without touching `FileService` at all, so
+the roots would confine nothing an attacker would do. They are ignored rather
+than half-enforced, the daemon warns about it at every start, and `GetHostInfo`
+reports the agent as unconfined. See [security.md](security.md).
+
+Where it *is* in force, every path passes through `internal/security/jail`
+before any syscall:
 
 1. Resolve to an absolute path.
 2. Resolve symlinks fully.
