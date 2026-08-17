@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"sort"
@@ -14,10 +13,10 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"google.golang.org/grpc"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/tunnel"
 )
 
 // fleet_forward is `ssh -L`, and saying so is worth more than a paragraph
@@ -48,8 +47,6 @@ const (
 	// forwardPreflightTimeout bounds the one-shot connection that checks the
 	// sandbox-side port answers before a listener is opened.
 	forwardPreflightTimeout = 10 * time.Second
-	// forwardCopyBuffer is the local-to-sandbox pump buffer.
-	forwardCopyBuffer = 32 * 1024
 )
 
 // registerForward adds fleet_forward and gives the Registrar the manager
@@ -630,215 +627,17 @@ func nextAcceptBackoff(current time.Duration) time.Duration {
 }
 
 // carry runs one accepted connection over one gRPC stream.
+//
+// The pump itself is [tunnel.Carry], shared with the SOCKS proxy. This is the
+// forward's half: which target, and nothing else. See the package comment on
+// internal/tunnel for why there is only one copy of the rest.
 func (r *Registrar) carry(ctx context.Context, f *activeForward, client sandboxdv1.ForwardServiceClient, conn net.Conn) error {
+	// The accepted socket is this function's to release: tunnel.Carry leaves it
+	// open so that a caller with a protocol of its own can answer on it, and a
+	// forward has nothing to say.
 	defer func() { _ = conn.Close() }()
-
-	// Per-connection cancellation, so a stream whose pumps have finished
-	// releases its gRPC resources immediately rather than at forward teardown.
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Cancelling the context has to close the socket, not merely the stream.
-	// A pump parked in conn.Read is not waiting on a context, so without this
-	// fleet_forward(stop=true) would block forever joining a goroutine that
-	// is blocked on a client which has no reason to say anything — and the
-	// tool call that asked for the teardown would never return.
-	stopOnCancel := context.AfterFunc(streamCtx, func() { _ = conn.Close() })
-	defer stopOnCancel()
-
-	stream, err := client.Forward(streamCtx)
-	if err != nil {
-		return fmt.Errorf("opening a forward stream: %w", err)
-	}
-	if err := stream.Send(&sandboxdv1.ForwardRequest{
-		Event: &sandboxdv1.ForwardRequest_Open{Open: &sandboxdv1.ForwardOpen{
-			RemotePort: uint32(f.key.remotePort), //nolint:gosec // range-checked when the forward was opened
-			RemoteHost: f.key.remoteHost,
-		}},
-	}); err != nil {
-		return fmt.Errorf("opening a forward to %s: %w", f.key.remoteLabel(), err)
-	}
-
-	first, err := stream.Recv()
-	if err != nil {
-		return fmt.Errorf("connecting to %s: %w", f.key.remoteLabel(), err)
-	}
-	opened := first.GetOpened()
-	if opened == nil {
-		return fmt.Errorf("the agent answered a forward open with an unexpected message")
-	}
-	if !opened.GetSuccess() {
-		// Close the local connection rather than leaving it hanging: a client
-		// that gets an immediate reset retries or reports, and a client left
-		// waiting on a socket that will never answer does neither.
-		return errors.New(opened.GetError())
-	}
-
-	var (
-		wg      sync.WaitGroup
-		sendErr error
-		recvErr error
-	)
-
-	// Local to sandbox. The local client closing its write side ends this
-	// direction and only this direction: the response still has to come back.
-	//
-	// A local socket that *failed* is a different event, and it is why this
-	// cancels where a clean half-close must not. localToStream reports EOF —
-	// which is both a half-close and this side's own teardown closing the
-	// socket underneath it — as no error at all, so a non-nil error here means
-	// the local client is gone rather than merely finished: killed mid-request,
-	// or reset. There is nobody left to deliver a response to, and without the
-	// cancel the receiving pump stays parked in stream.Recv until the
-	// sandbox-side server happens to close — holding one goroutine, one
-	// descriptor, one gRPC stream and one slot against the agent's
-	// forward.max_connections. A server that neither writes nor closes when its
-	// peer half-closes never gets there at all, and an aborted request is
-	// ordinary traffic on a forward that stays open for hours.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if sendErr = localToStream(conn, stream); sendErr != nil {
-			cancel()
-		}
-	}()
-
-	// Sandbox to local. A close *event* does not stop the other direction: a
-	// server that closed its write half has not necessarily stopped reading,
-	// and a client still sending must still be delivered.
-	//
-	// The stream *ending* is different, and cancelling on it is what stops this
-	// connection outliving its own transport. Once this pump returns there is
-	// no stream left — the agent's handler has returned, so it has already
-	// consumed everything the caller sent, or the RPC failed outright — and
-	// nothing the local client says afterwards can reach the sandbox. Without
-	// the cancel, the other pump stays parked in conn.Read on a client with no
-	// reason to speak: one goroutine, one descriptor and one gRPC stream held
-	// until the whole forward is torn down, per connection, on exactly the
-	// long-lived forward where they accumulate. An agent restart under an idle
-	// keep-alive connection is all it takes.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer cancel()
-		recvErr = streamToLocal(stream, conn)
-	}()
-
-	wg.Wait()
-	// The local socket failing is a cause rather than a consequence, so it is
-	// the one to report: this side's own teardown closes that socket with
-	// net.ErrClosed, which localToStream reports as no error, so a non-nil
-	// sendErr is always the client's own failure and never a knock-on of the
-	// stream ending. It is what a reader of the forward's last_error needs —
-	// "connection reset by peer" rather than "the forward stream ended:
-	// context canceled", which is this function describing its own cleanup.
-	if sendErr != nil {
-		return sendErr
-	}
-	return recvErr
+	return tunnel.Carry(ctx, client, conn, tunnel.Target{
+		Host: f.key.remoteHost,
+		Port: f.key.remotePort,
+	}, nil)
 }
-
-// forwardSender is the send half of the client stream, narrowed so a test can
-// drive it.
-type forwardSender interface {
-	Send(*sandboxdv1.ForwardRequest) error
-	CloseSend() error
-}
-
-// localToStream copies local bytes onto the stream and half-closes at EOF.
-func localToStream(conn net.Conn, stream forwardSender) error {
-	buf := make([]byte, forwardCopyBuffer)
-	for {
-		n, err := conn.Read(buf)
-		if n > 0 {
-			if sendErr := stream.Send(&sandboxdv1.ForwardRequest{
-				Event: &sandboxdv1.ForwardRequest_Data{Data: buf[:n]},
-			}); sendErr != nil {
-				// The stream is gone; the receiving pump reports why.
-				return nil //nolint:nilerr // the other direction carries the real error
-			}
-		}
-		if err != nil {
-			// EOF here is the local client half-closing, which is an ordinary
-			// and meaningful event: tell the far end, then stop sending.
-			_ = stream.Send(&sandboxdv1.ForwardRequest{
-				Event: &sandboxdv1.ForwardRequest_Close{Close: &sandboxdv1.ForwardClose{
-					Reason: "the local client closed its write side",
-				}},
-			})
-			_ = stream.CloseSend()
-			if isLocalClose(err) {
-				return nil
-			}
-			return fmt.Errorf("reading from the local connection: %w", err)
-		}
-	}
-}
-
-// forwardReceiver is the receive half of the client stream.
-type forwardReceiver interface {
-	Recv() (*sandboxdv1.ForwardResponse, error)
-}
-
-// streamToLocal copies sandbox bytes onto the local connection.
-func streamToLocal(stream forwardReceiver, conn net.Conn) error {
-	for {
-		resp, err := stream.Recv()
-		switch {
-		case errors.Is(err, io.EOF):
-			return closeLocalWrite(conn)
-		case err != nil:
-			// Half-closing rather than closing outright: a client that is
-			// still reading gets a clean EOF instead of a reset that looks like
-			// a truncated response.
-			_ = closeLocalWrite(conn)
-			return fmt.Errorf("the forward stream ended: %w", err)
-		}
-
-		if resp.GetClose() != nil {
-			// The sandbox-side server closed its write side. The local client
-			// may still be sending, so shut down only the write half here —
-			// and then keep receiving.
-			//
-			// Returning here instead would end this pump, which ends carry,
-			// which cancels the stream. CloseSend does not wait for the agent
-			// to have consumed what was already sent, so a cancel that lands
-			// first drops the client's last bytes: the request is silently
-			// truncated and the server never sees the end of it. The stream
-			// ends on its own once the agent's handler returns, which is the
-			// point at which there is genuinely nothing left in flight.
-			_ = closeLocalWrite(conn)
-			continue
-		}
-		data := resp.GetData()
-		if len(data) == 0 {
-			continue
-		}
-		if _, err := conn.Write(data); err != nil {
-			return nil //nolint:nilerr // the local client hung up; nothing left to report to it
-		}
-	}
-}
-
-func closeLocalWrite(conn net.Conn) error {
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		if err := tcp.CloseWrite(); err != nil && !isLocalClose(err) {
-			return nil //nolint:nilerr // a connection already gone is not a failure of this direction
-		}
-		return nil
-	}
-	return conn.Close()
-}
-
-// isLocalClose reports whether err is an ordinary end of a local connection.
-func isLocalClose(err error) bool {
-	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
-}
-
-// compile-time check that the generated client stream satisfies the narrowed
-// interfaces above, so a regeneration that changes their shape fails here
-// rather than at the first forwarded byte.
-var (
-	_ forwardSender   = (grpc.BidiStreamingClient[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse])(nil)
-	_ forwardReceiver = (grpc.BidiStreamingClient[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse])(nil)
-)
