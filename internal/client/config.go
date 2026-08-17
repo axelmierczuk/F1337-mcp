@@ -11,7 +11,7 @@ import (
 )
 
 // DefaultMaxMessageSize overrides gRPC's 4 MiB default, which bites hardest
-// on sandbox_read of anything but a small file and surfaces as an opaque
+// on fleet_read of anything but a small file and surfaces as an opaque
 // ResourceExhausted with no hint that it is a configured limit rather than a
 // real failure.
 const DefaultMaxMessageSize = 32 * 1024 * 1024 // 32 MiB
@@ -28,7 +28,7 @@ type Config struct {
 	// CACertPEM is the fleet CA bundle. Every agent's server certificate
 	// must chain to it.
 	CACertPEM []byte
-	// CertPEM and KeyPEM are the control leaf sandboxd-mcp presents as its
+	// CertPEM and KeyPEM are the control leaf fleet-mcp presents as its
 	// client certificate.
 	CertPEM []byte
 	KeyPEM  []byte

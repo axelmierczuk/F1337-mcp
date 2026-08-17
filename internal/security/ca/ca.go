@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 )
 
 const (
@@ -86,8 +86,8 @@ func Init(dir string, force bool) (*CA, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   "sandboxd fleet CA",
-			Organization: []string{"sandboxd"},
+			CommonName:   "fleet CA",
+			Organization: []string{"fleet"},
 		},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.Add(caLifetime),

@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 func newTestPool(t *testing.T, fleet *testFleet, dialOpts ...grpc.DialOption) *client.Pool {
@@ -138,7 +138,7 @@ func TestPool_AgentLeafAsClientCert_RejectedByServer(t *testing.T) {
 
 	// Misconfigure the pool with an agent leaf instead of a control leaf as
 	// its own client identity.
-	agentCertPEM, agentKeyPEM := fleet.agentCert("sandboxd-mcp")
+	agentCertPEM, agentKeyPEM := fleet.agentCert("fleet-mcp")
 	pool, err := client.NewPool(client.Config{
 		CACertPEM:   fleet.ca.CertPEM(),
 		CertPEM:     agentCertPEM,

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // maxLineBytes is the longest single log line the supervisor will emit. A

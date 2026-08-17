@@ -1,10 +1,10 @@
 {
   "mcpServers": {
-    "sandboxd": {
-      "command": "sandboxd-mcp",
+    "fleet": {
+      "command": "fleet-mcp",
       "args": ["serve"],
       "env": {
-        "SANDBOXD_CONFIG_DIR": "${HOME}/.config/sandboxd"
+        "FLEET_CONFIG_DIR": "${HOME}/.config/fleet"
       }
     }
   }

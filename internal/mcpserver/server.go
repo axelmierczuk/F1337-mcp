@@ -27,22 +27,22 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/version"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/version"
 )
 
 // ServerName is the implementation name reported at initialize.
-const ServerName = "sandboxd"
+const ServerName = "fleet"
 
 // Instructions is what a client that surfaces server instructions shows the
 // model. It carries the select-then-act workflow once, here, instead of
 // repeating it in nineteen tool descriptions that are paid for on every
 // request.
-const Instructions = `sandboxd gives you tools on remote development machines ("sandboxes") over mTLS.
+const Instructions = `fleet gives you tools on remote development machines ("sandboxes") over mTLS.
 
-Select before you act. Call sandbox_list to see the fleet, then sandbox_select to
+Select before you act. Call fleet_list to see the fleet, then fleet_select to
 choose a target; every later call acts on that selection. Pass "sandbox" on a call
 to override it for that call only. Nothing is ever targeted implicitly: with no
 selection and no argument a call fails with the list of available sandboxes, even
@@ -51,21 +51,21 @@ when the fleet has exactly one member.
 Every result carries "sandbox", the host that actually served the call. Check it
 if you are unsure where you are running.
 
-Paths are on the sandbox, not on this workstation. sandbox_select and
-sandbox_info report the roots the agent allows writes under; if they instead
+Paths are on the sandbox, not on this workstation. fleet_select and
+fleet_info report the roots the agent allows writes under; if they instead
 report "unconfined", the agent enforces no path jail and every path is writable,
-which is not the same as none being writable. Use sandbox_process_start, not
-sandbox_exec, for anything meant to outlive the call.
+which is not the same as none being writable. Use fleet_process_start, not
+fleet_exec, for anything meant to outlive the call.
 
 Registering a sandbox does not enroll it: minting credentials is an operator
-action via sandboxctl.`
+action via fleetctl.`
 
 // Options configures a Server. The zero value is usable: every path defaults
 // under the user's config directory.
 type Options struct {
 	// ConfigDir overrides where the registry and credentials are read from.
 	// Empty resolves through registry.ConfigDir, which honours
-	// SANDBOXD_CONFIG_DIR.
+	// FLEET_CONFIG_DIR.
 	ConfigDir string
 	// RegistryPath overrides the registry file. Empty is
 	// <config dir>/registry.yaml.
@@ -98,7 +98,7 @@ type Options struct {
 	CallTimeout time.Duration
 }
 
-// Server is a configured sandboxd MCP server, not yet connected to a
+// Server is a configured fleet MCP server, not yet connected to a
 // transport.
 type Server struct {
 	mcp       *mcp.Server
@@ -119,7 +119,7 @@ type Server struct {
 // registers every tool.
 //
 // It deliberately does not require credentials to exist. A workstation that
-// has run `sandboxctl ca init` but not yet issued itself a control leaf can
+// has run `fleetctl ca init` but not yet issued itself a control leaf can
 // still list, add and remove sandboxes; the missing certificate surfaces as a
 // tool error on the first call that actually needs to reach an agent, naming
 // the file and the command that creates it. Failing at startup instead would
@@ -161,7 +161,7 @@ func New(opts Options) (*Server, error) {
 
 	s.mcp = mcp.NewServer(&mcp.Implementation{
 		Name:        ServerName,
-		Title:       "sandboxd",
+		Title:       "fleet",
 		Version:     version.Version,
 		Description: "Development tools on remote sandbox machines.",
 	}, &mcp.ServerOptions{
@@ -178,7 +178,7 @@ func New(opts Options) (*Server, error) {
 		CallTimeout:  opts.CallTimeout,
 	})
 	// Some tools own state that outlives the call that created it —
-	// sandbox_forward's local listeners, which is the whole point of a
+	// fleet_forward's local listeners, which is the whole point of a
 	// forward. Released here, so a listener cannot survive the process that
 	// opened it and hold its port against the next one.
 	s.closers = append(s.closers, s.registrar.Close)

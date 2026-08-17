@@ -47,7 +47,7 @@
 // An empty root list is not "allow everything". [New] refuses it, the zero
 // value of Jail refuses every path, and a nil *Jail refuses every path. The
 // only way to run without confinement is [Unconfined], which an operator must
-// ask for explicitly and which the agent reports in sandbox_info.
+// ask for explicitly and which the agent reports in fleet_info.
 //
 // # What this cannot do
 //

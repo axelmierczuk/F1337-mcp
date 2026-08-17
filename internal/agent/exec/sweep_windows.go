@@ -1,6 +1,6 @@
 package exec
 
-import "github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+import "github.com/axelmierczuk/fleet-mcp/internal/platform"
 
 // sweepGroup kills whatever is left of a finished command's process group.
 //

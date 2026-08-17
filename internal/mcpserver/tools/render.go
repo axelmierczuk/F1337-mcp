@@ -5,11 +5,11 @@ import (
 	"strings"
 	"time"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
-// Health values reported by sandbox_list and sandbox_info. They are short
+// Health values reported by fleet_list and fleet_info. They are short
 // strings rather than an enum name because they land in model context on
 // every fleet check, and "unreachable" says everything STATUS_UNREACHABLE
 // does in a third of the tokens.
@@ -19,7 +19,7 @@ const (
 	healthDraining    = "draining"
 	healthUnreachable = "unreachable"
 	// healthUnknown means nothing has probed this sandbox yet — not that the
-	// probe failed. sandbox_list without refresh reports it for a sandbox no
+	// probe failed. fleet_list without refresh reports it for a sandbox no
 	// call has touched since the server started.
 	healthUnknown = "unknown"
 )

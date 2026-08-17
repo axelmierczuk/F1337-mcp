@@ -16,8 +16,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
 )
 
 // transferResult mirrors tools.TransferResult for decoding.
@@ -72,7 +72,7 @@ func TestTransfer_PushesASingleFileByteForByte(t *testing.T) {
 	writeLocal(t, source, content, 0o644)
 	destination := f.path("main.go")
 
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": source, "destination": destination,
 	}))
 
@@ -100,7 +100,7 @@ func TestTransfer_PushesATreeWithStructurePreserved(t *testing.T) {
 	writeLocal(t, filepath.Join(project, "node_modules", "left-pad", "index.js"), "module.exports=1\n", 0o644)
 
 	destination := f.path("workspace")
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": project, "destination": destination, "recursive": true,
 	}))
 
@@ -122,7 +122,7 @@ func TestTransfer_DirectoryWithoutRecursiveIsRefused(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	writeLocal(t, filepath.Join(local, "tree", "a.txt"), "a\n", 0o644)
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "push", "source": filepath.Join(local, "tree"), "destination": f.path("tree"),
 	})
 
@@ -140,7 +140,7 @@ func TestTransfer_CallerExcludePatternsAreHonoured(t *testing.T) {
 	writeLocal(t, filepath.Join(project, "logs", "deep.log"), "noise\n", 0o644)
 
 	destination := f.path("workspace")
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": project, "destination": destination,
 		"recursive": true, "exclude": []any{"*.log"},
 	}))
@@ -159,7 +159,7 @@ func TestTransfer_AnInvalidExcludePatternIsRefused(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	writeLocal(t, filepath.Join(local, "a.txt"), "a\n", 0o644)
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "push", "source": filepath.Join(local, "a.txt"),
 		"destination": f.path("a.txt"), "exclude": []any{"build["},
 	})
@@ -181,7 +181,7 @@ func TestTransfer_ExecutableBitSurvivesAPush(t *testing.T) {
 	writeLocal(t, source, "#!/bin/sh\nexit 0\n", 0o755)
 	destination := f.path("build.sh")
 
-	f.ok("sandbox_transfer", map[string]any{
+	f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": source, "destination": destination,
 	})
 
@@ -212,7 +212,7 @@ func TestTransfer_ASymlinkOutOfTheSourceTreeIsSkippedAndReported(t *testing.T) {
 	require.NoError(t, os.Symlink(filepath.Join(project, "sub", "target.txt"), filepath.Join(project, "internal-link.txt")))
 
 	destination := f.path("workspace")
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": project, "destination": destination, "recursive": true,
 	}))
 
@@ -249,10 +249,10 @@ func TestTransfer_RepeatPushSkipsUnchangedFiles(t *testing.T) {
 	args := map[string]any{
 		"direction": "push", "source": project, "destination": destination, "recursive": true,
 	}
-	first := structured[transferResult](t, f.ok("sandbox_transfer", args))
+	first := structured[transferResult](t, f.ok("fleet_transfer", args))
 	require.Equal(t, 2, first.Files)
 
-	second := structured[transferResult](t, f.ok("sandbox_transfer", args))
+	second := structured[transferResult](t, f.ok("fleet_transfer", args))
 	assert.Zero(t, second.Files, "an unchanged tree must not be re-sent")
 	assert.Equal(t, 2, second.Unchanged)
 	assert.Contains(t, second.Note, "force")
@@ -260,7 +260,7 @@ func TestTransfer_RepeatPushSkipsUnchangedFiles(t *testing.T) {
 	// Edit one file and it goes again — the other still does not.
 	time.Sleep(1100 * time.Millisecond) // filesystem timestamp granularity
 	writeLocal(t, filepath.Join(project, "a.go"), "package a // changed\n", 0o644)
-	third := structured[transferResult](t, f.ok("sandbox_transfer", args))
+	third := structured[transferResult](t, f.ok("fleet_transfer", args))
 	assert.Equal(t, 1, third.Files)
 	assert.Equal(t, 1, third.Unchanged)
 
@@ -273,7 +273,7 @@ func TestTransfer_RepeatPushSkipsUnchangedFiles(t *testing.T) {
 	for k, v := range args {
 		forced[k] = v
 	}
-	fourth := structured[transferResult](t, f.ok("sandbox_transfer", forced))
+	fourth := structured[transferResult](t, f.ok("fleet_transfer", forced))
 	assert.Equal(t, 2, fourth.Files)
 	assert.Zero(t, fourth.Unchanged)
 }
@@ -311,12 +311,12 @@ func TestTransfer_RepeatPushSkipsUnchangedFilesWhateverTheDestinationIsSpelledLi
 	sep := string(filepath.Separator)
 	roundabout := plain + sep + ".." + sep + "workspace"
 
-	first := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	first := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": project, "destination": plain, "recursive": true,
 	}))
 	require.Equal(t, 2, first.Files)
 
-	second := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	second := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": project, "destination": roundabout, "recursive": true,
 	}))
 	assert.Zero(t, second.Files,
@@ -324,7 +324,7 @@ func TestTransfer_RepeatPushSkipsUnchangedFilesWhateverTheDestinationIsSpelledLi
 	assert.Equal(t, 2, second.Unchanged)
 
 	// And the reverse order, so neither spelling is privileged.
-	third := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	third := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": project, "destination": plain, "recursive": true,
 	}))
 	assert.Zero(t, third.Files)
@@ -343,7 +343,7 @@ func TestTransfer_PullsASingleFileByteForByte(t *testing.T) {
 	writeRemote(t, source, content)
 	destination := filepath.Join(local, "report.txt")
 
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": source, "destination": destination,
 	}))
 
@@ -366,7 +366,7 @@ func TestTransfer_PullsATreeWithStructurePreserved(t *testing.T) {
 	writeRemote(t, filepath.Join(remote, "node_modules", "junk.js"), "1\n")
 
 	destination := filepath.Join(local, "pulled")
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": remote, "destination": destination, "recursive": true,
 	}))
 
@@ -390,7 +390,7 @@ func TestTransfer_ExecutableBitSurvivesAPull(t *testing.T) {
 	require.NoError(t, os.Chmod(source, 0o755))
 	destination := filepath.Join(local, "run.sh")
 
-	f.ok("sandbox_transfer", map[string]any{"direction": "pull", "source": source, "destination": destination})
+	f.ok("fleet_transfer", map[string]any{"direction": "pull", "source": source, "destination": destination})
 
 	info, err := os.Stat(destination)
 	require.NoError(t, err)
@@ -414,7 +414,7 @@ func TestTransfer_ARemoteSymlinkIsSkippedAndReported(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, filepath.Join(remote, "link.txt")))
 
 	destination := filepath.Join(local, "pulled")
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": remote, "destination": destination, "recursive": true,
 	}))
 
@@ -441,7 +441,7 @@ func TestTransfer_PullOutsideTheWorkingDirectoryIsRefused(t *testing.T) {
 	writeRemote(t, source, "payload\n")
 	outside := filepath.Join(t.TempDir(), "escaped.txt")
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "pull", "source": source, "destination": outside,
 	})
 
@@ -452,7 +452,7 @@ func TestTransfer_PullOutsideTheWorkingDirectoryIsRefused(t *testing.T) {
 
 	// The override is a real escape hatch, not a message with nothing behind
 	// it.
-	f.ok("sandbox_transfer", map[string]any{
+	f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": source, "destination": outside, "allow_outside_working_dir": true,
 	})
 	assert.FileExists(t, outside)
@@ -525,7 +525,7 @@ func TestTransfer_APulledNameCannotEscapeTheDestination(t *testing.T) {
 	}
 
 	destination := filepath.Join(local, "pulled")
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": remote, "destination": destination, "recursive": true,
 	}))
 
@@ -570,7 +570,7 @@ func TestTransfer_APulledEntryCannotEscapeThroughASymlinkedDirectory(t *testing.
 	require.NoError(t, os.MkdirAll(destination, 0o750))
 	require.NoError(t, os.Symlink(escapeTarget, filepath.Join(destination, "logs")))
 
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": remote, "destination": destination, "recursive": true,
 	}))
 
@@ -598,7 +598,7 @@ func TestTransfer_ASymlinkedDestinationCannotEscapeTheWorkingDirectory(t *testin
 	escapeTarget := t.TempDir()
 	require.NoError(t, os.Symlink(escapeTarget, filepath.Join(local, "way-out")))
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "pull", "source": source, "destination": filepath.Join(local, "way-out", "landed.txt"),
 	})
 
@@ -621,7 +621,7 @@ func TestTransfer_APushDestinationOutsideTheJailIsRejected(t *testing.T) {
 	writeLocal(t, source, "payload\n", 0o644)
 	outside := filepath.Join(t.TempDir(), "escaped.txt")
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "push", "source": source, "destination": outside,
 	})
 
@@ -641,7 +641,7 @@ func TestTransfer_PushIsNotConfinedToTheWorkingDirectory(t *testing.T) {
 	elsewhere := filepath.Join(t.TempDir(), "from-elsewhere.txt")
 	writeLocal(t, elsewhere, "content\n", 0o644)
 
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": elsewhere, "destination": f.path("arrived.txt"),
 	}))
 	assert.Equal(t, 1, out.Files)
@@ -660,7 +660,7 @@ func TestTransfer_FileCountCapNamesTheLimit(t *testing.T) {
 		writeLocal(t, filepath.Join(project, fmt.Sprintf("f%05d.txt", i)), "x", 0o644)
 	}
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "push", "source": project, "destination": f.path("many"), "recursive": true,
 	})
 
@@ -676,13 +676,13 @@ func TestTransfer_MissingSourceSaysWhichSideItLookedOn(t *testing.T) {
 	local := localWorkspace(t)
 	f := newAgentFixture(t, backendOptions{})
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "push", "source": filepath.Join(local, "nope.txt"), "destination": f.path("nope.txt"),
 	})
 	assert.Contains(t, text, "this workstation")
 	assert.Contains(t, text, "use pull")
 
-	text = f.fails("sandbox_transfer", map[string]any{
+	text = f.fails("fleet_transfer", map[string]any{
 		"direction": "pull", "source": f.path("nope.txt"), "destination": filepath.Join(local, "nope.txt"),
 	})
 	assert.Contains(t, text, "sandbox build-box")
@@ -695,7 +695,7 @@ func TestTransfer_BadDirectionIsRefusedWithTheTwoThatWork(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	writeLocal(t, filepath.Join(local, "a.txt"), "a\n", 0o644)
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "upload", "source": filepath.Join(local, "a.txt"), "destination": f.path("a.txt"),
 	})
 
@@ -731,7 +731,7 @@ func TestTransfer_APulledFileIsNeverHeldWhole(t *testing.T) {
 	f.clients.onFiles = sampler.start
 	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
 
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": source, "destination": destination,
 	}))
 
@@ -743,7 +743,7 @@ func TestTransfer_APulledFileIsNeverHeldWhole(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(heapPayload), info.Size(), "and all of it has to land")
 
-	assertHeapBounded(t, sampler, heapPayload, "sandbox_transfer pull")
+	assertHeapBounded(t, sampler, heapPayload, "fleet_transfer pull")
 }
 
 // TestTransfer_APushedFileIsNeverHeldWhole, the same property in the other
@@ -764,7 +764,7 @@ func TestTransfer_APushedFileIsNeverHeldWhole(t *testing.T) {
 	f.clients.onFiles = sampler.start
 	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
 
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "push", "source": source, "destination": destination,
 	}))
 
@@ -776,7 +776,7 @@ func TestTransfer_APushedFileIsNeverHeldWhole(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(heapPayload), info.Size())
 
-	assertHeapBounded(t, sampler, heapPayload, "sandbox_transfer push")
+	assertHeapBounded(t, sampler, heapPayload, "fleet_transfer push")
 }
 
 // truncatingFiles serves a ReadFile stream that delivers one chunk and then
@@ -811,7 +811,7 @@ func TestTransfer_ATruncatedReadIsNotCommitted(t *testing.T) {
 
 	f.clients.filesOverride = &truncatingFiles{FileServiceClient: f.backend.files}
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "pull", "source": source, "destination": destination,
 	})
 
@@ -853,7 +853,7 @@ func TestTransfer_AReadThatNeverReportedAResultIsNotCommitted(t *testing.T) {
 
 	f.clients.filesOverride = &resultlessFiles{FileServiceClient: f.backend.files}
 
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "pull", "source": source, "destination": destination,
 	})
 
@@ -897,7 +897,7 @@ func TestTransfer_PullingASymlinkIsRefusedRatherThanFollowed(t *testing.T) {
 	f.clients.filesOverride = &symlinkSourceFiles{FileServiceClient: f.backend.files}
 
 	destination := filepath.Join(local, "landed.txt")
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "pull", "source": f.path("link.txt"), "destination": destination,
 	})
 
@@ -960,7 +960,7 @@ func TestTransfer_AnInterruptedPullLeavesNoPartialFile(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = f.session.CallTool(ctx, &mcp.CallToolParams{Name: "sandbox_transfer", Arguments: map[string]any{
+		_, _ = f.session.CallTool(ctx, &mcp.CallToolParams{Name: "fleet_transfer", Arguments: map[string]any{
 			"direction": "pull", "source": source, "destination": destination,
 		}})
 	}()

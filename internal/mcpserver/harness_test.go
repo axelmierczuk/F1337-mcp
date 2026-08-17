@@ -18,14 +18,14 @@ import (
 	protobuf "google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
-// fakeHost stands in for one sandboxd-agent's HostService. The agent itself
+// fakeHost stands in for one fleet-agent's HostService. The agent itself
 // (#5) is being built concurrently and is not on main, and a fake client is
 // what makes "refresh: false issues no probes" assertable on a count rather
 // than on elapsed time.
@@ -64,7 +64,7 @@ func newFakeHost() *fakeHost {
 			AgentVersion:           "0.1.0-test",
 			AllowedRoots:           []string{"/home/build/workspace"},
 			StartedAt:              timestamppb.New(time.Now().Add(-90 * time.Minute)),
-			AuthenticatedPrincipal: "sandboxd-mcp",
+			AuthenticatedPrincipal: "fleet-mcp",
 		},
 	}
 }

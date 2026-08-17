@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
 )
 
 // negotiatedProtocolVersion is the version this server is built against.
@@ -48,7 +48,7 @@ func TestStdio_InitializeThenListTools(t *testing.T) {
 
 	instructions, _ := initResult["instructions"].(string)
 	require.NotEmpty(t, instructions, "initialize must carry instructions")
-	assert.Contains(t, instructions, "sandbox_select",
+	assert.Contains(t, instructions, "fleet_select",
 		"instructions must teach the select-then-act workflow")
 
 	toolList, ok := responses[2]["tools"].([]any)
@@ -90,7 +90,7 @@ func TestStdio_InitializeThenListTools(t *testing.T) {
 		assertEchoInSchema(t, name, output)
 	}
 
-	for _, want := range []string{"sandbox_list", "sandbox_select", "sandbox_add", "sandbox_remove", "sandbox_info"} {
+	for _, want := range []string{"fleet_list", "fleet_select", "fleet_add", "fleet_remove", "fleet_info"} {
 		assert.Truef(t, seen[want], "tools/list is missing %s", want)
 	}
 }
@@ -114,7 +114,7 @@ func TestStdio_DiscoverNegotiatesLatestProtocol(t *testing.T) {
 	assert.Contains(t, versions, negotiatedProtocolVersion)
 
 	instructions, _ := result["instructions"].(string)
-	assert.Contains(t, instructions, "sandbox_select")
+	assert.Contains(t, instructions, "fleet_select")
 
 	capabilities, ok := result["capabilities"].(map[string]any)
 	require.True(t, ok)
@@ -165,8 +165,8 @@ func TestStdio_StdoutCarriesOnlyJSONRPC(t *testing.T) {
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"fixture-client","version":"1.0.0"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sandbox_list","arguments":{}}}`,
-		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"sandbox_info","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fleet_list","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fleet_info","arguments":{}}}`,
 	}, 4)
 
 	require.NotEmpty(t, stdout, "the server wrote nothing to stdout at all")
@@ -232,7 +232,7 @@ func TestStdio_ExitsWhenStdinCloses(t *testing.T) {
 }
 
 // TestServer_RegistersTheFleetGroup pins which tools resolve a sandbox
-// before they run and which name their own subject. sandbox_info is the only
+// before they run and which name their own subject. fleet_info is the only
 // fleet tool that targets: the other four operate on the registry, which is
 // what makes them usable before anything has been selected.
 func TestServer_RegistersTheFleetGroup(t *testing.T) {
@@ -251,20 +251,20 @@ func TestServer_RegistersTheFleetGroup(t *testing.T) {
 	// by every group that followed. Each entry still has to be registered and
 	// still has to target the way it says.
 	for name, wantTargeted := range map[string]bool{
-		"sandbox_list":   false,
-		"sandbox_select": false,
-		"sandbox_add":    false,
-		"sandbox_remove": false,
-		"sandbox_info":   true,
+		"fleet_list":   false,
+		"fleet_select": false,
+		"fleet_add":    false,
+		"fleet_remove": false,
+		"fleet_info":   true,
 
-		"sandbox_exec":     true,
-		"sandbox_read":     true,
-		"sandbox_write":    true,
-		"sandbox_edit":     true,
-		"sandbox_ls":       true,
-		"sandbox_glob":     true,
-		"sandbox_grep":     true,
-		"sandbox_transfer": true,
+		"fleet_exec":     true,
+		"fleet_read":     true,
+		"fleet_write":    true,
+		"fleet_edit":     true,
+		"fleet_ls":       true,
+		"fleet_glob":     true,
+		"fleet_grep":     true,
+		"fleet_transfer": true,
 	} {
 		got, ok := targeted[name]
 		if assert.Truef(t, ok, "%s must be registered", name) {
@@ -295,7 +295,7 @@ func TestServer_StartsWithoutCredentials(t *testing.T) {
 
 	// Registry-only tools work with no certificate at all.
 	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{
-		Name:      "sandbox_add",
+		Name:      "fleet_add",
 		Arguments: map[string]any{"name": "build-box", "address": "build-box.internal:8722"},
 	})
 	require.NoError(t, err)
@@ -304,14 +304,14 @@ func TestServer_StartsWithoutCredentials(t *testing.T) {
 	// The first call that has to reach an agent names the missing file and
 	// the command that creates it.
 	res, err = session.CallTool(t.Context(), &mcp.CallToolParams{
-		Name:      "sandbox_info",
+		Name:      "fleet_info",
 		Arguments: map[string]any{"sandbox": "build-box"},
 	})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	text := resultText(res)
 	assert.Contains(t, text, filepath.Join(dir, "ca", "ca.crt"))
-	assert.Contains(t, text, "sandboxctl")
+	assert.Contains(t, text, "fleetctl")
 }
 
 // ---------------------------------------------------------------- helpers
@@ -364,7 +364,7 @@ func countResponses(requests []string) int {
 // transport test: anything anywhere in the server that prints, logs, or
 // panics to stdout lands in the captured lines. Replacing os.Stderr too is
 // what lets the server keep its default log destination, so the test covers
-// the wiring a real `sandboxd-mcp serve` uses rather than one the test chose.
+// the wiring a real `fleet-mcp serve` uses rather than one the test chose.
 //
 // It waits for wantResponses lines before closing stdin. Closing it earlier
 // races the handlers: the transport tears the session down on EOF, and a

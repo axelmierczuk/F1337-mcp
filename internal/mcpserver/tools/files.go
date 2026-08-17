@@ -13,9 +13,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 )
 
 // Bounds the file tools apply to their own side of a call. The agent has its
@@ -23,17 +23,17 @@ import (
 // limits are sized for a program reading a file and these are sized for a
 // model reading one in its context window.
 const (
-	// DefaultReadLines is the window sandbox_read returns when the caller
+	// DefaultReadLines is the window fleet_read returns when the caller
 	// names no limit. It matches the agent's own default, so a read that hits
 	// it hits one limit rather than two at different numbers.
 	DefaultReadLines = 2000
 
-	// maxReadBytes bounds the content one sandbox_read may return, whatever
+	// maxReadBytes bounds the content one fleet_read may return, whatever
 	// the line window works out to. Two thousand lines of a minified bundle is
 	// not two thousand lines of source.
 	maxReadBytes = 1024 * 1024
 
-	// DefaultGrepMatches is how many matches sandbox_grep asks for when the
+	// DefaultGrepMatches is how many matches fleet_grep asks for when the
 	// caller names none. Deliberately below the agent's own default of 500:
 	// a search that returns five hundred lines has answered a question the
 	// model did not ask, and max_matches stops the walk, so asking for fewer
@@ -46,11 +46,11 @@ const (
 	// maxRenderedLine bounds one rendered line of grep output or context.
 	maxRenderedLine = 400
 
-	// DefaultListEntries is the directory listing size sandbox_ls asks for
+	// DefaultListEntries is the directory listing size fleet_ls asks for
 	// when the caller names none.
 	DefaultListEntries = 500
 
-	// DefaultGlobResults is the match count sandbox_glob asks for when the
+	// DefaultGlobResults is the match count fleet_glob asks for when the
 	// caller names none.
 	DefaultGlobResults = 300
 
@@ -69,7 +69,7 @@ const (
 // mismatch shows up as silent misuse rather than as an error.
 func registerFiles(r *Registrar) {
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_read",
+		Name:  "fleet_read",
 		Title: "Read a file",
 		Description: "Read a file on the selected sandbox, line-numbered, with the same offset/limit meaning as the built-in Read. " +
 			"Defaults to the first 2000 lines and says so when there are more. Binary files are reported, not mangled.",
@@ -77,27 +77,27 @@ func registerFiles(r *Registrar) {
 	}, r.sandboxRead)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:        "sandbox_write",
+		Name:        "fleet_write",
 		Title:       "Write a file",
-		Description: "Write a whole file on the selected sandbox. Streamed and written via a temporary file, so an interrupted write leaves no truncated file. Use sandbox_edit to change part of an existing file.",
+		Description: "Write a whole file on the selected sandbox. Streamed and written via a temporary file, so an interrupted write leaves no truncated file. Use fleet_edit to change part of an existing file.",
 	}, r.sandboxWrite)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_edit",
+		Name:  "fleet_edit",
 		Title: "Edit a file",
 		Description: "Replace an exact string in a file on the selected sandbox and return a diff. " +
 			"Whitespace is significant. Without replace_all the edit fails unless old_string matches exactly once, leaving the file untouched.",
 	}, r.sandboxEdit)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:        "sandbox_ls",
+		Name:        "fleet_ls",
 		Title:       "List a directory",
 		Description: "List a directory on the selected sandbox: directories first, then files with human-readable sizes.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, r.sandboxLs)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_glob",
+		Name:  "fleet_glob",
 		Title: "Find files by pattern",
 		Description: "Find files on the selected sandbox by glob pattern, newest first. The pattern is anchored at root: *.go does not recurse, **/*.go does. " +
 			".git, node_modules, vendor and target are skipped unless include_default_ignored is set.",
@@ -105,7 +105,7 @@ func registerFiles(r *Registrar) {
 	}, r.sandboxGlob)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_grep",
+		Name:  "fleet_grep",
 		Title: "Search file contents",
 		Description: "Search file contents on the selected sandbox with an RE2 pattern, rendered as path:line: text. " +
 			"Runs on the sandbox, so a large tree is never streamed across the network. include_glob matches at any depth.",
@@ -142,7 +142,7 @@ func clampCount(n int, fallback uint32) uint32 {
 
 // ------------------------------------------------------------------ read
 
-// ReadArgs are the arguments to sandbox_read.
+// ReadArgs are the arguments to fleet_read.
 type ReadArgs struct {
 	TargetArgs
 	// Path is the file to read.
@@ -155,7 +155,7 @@ type ReadArgs struct {
 	Raw bool `json:"raw,omitempty" jsonschema:"return the bytes base64-encoded instead of text; required to read a binary file"`
 }
 
-// ReadResult is the sandbox_read result.
+// ReadResult is the fleet_read result.
 type ReadResult struct {
 	// Echo carries the sandbox the file was read from.
 	Echo
@@ -358,7 +358,7 @@ func numberLines(content string, first int) (rendered string, crlf bool) {
 
 // ----------------------------------------------------------------- write
 
-// WriteArgs are the arguments to sandbox_write.
+// WriteArgs are the arguments to fleet_write.
 type WriteArgs struct {
 	TargetArgs
 	// Path is the file to write.
@@ -373,7 +373,7 @@ type WriteArgs struct {
 	Append bool `json:"append,omitempty" jsonschema:"append to the file instead of replacing it"`
 }
 
-// WriteResult is the sandbox_write result.
+// WriteResult is the fleet_write result.
 type WriteResult struct {
 	// Echo carries the sandbox the file was written on.
 	Echo
@@ -485,7 +485,7 @@ func writeStream(ctx context.Context, files sandboxdv1.FileServiceClient, header
 
 // ------------------------------------------------------------------ edit
 
-// EditArgs are the arguments to sandbox_edit.
+// EditArgs are the arguments to fleet_edit.
 type EditArgs struct {
 	TargetArgs
 	// Path is the file to edit.
@@ -498,7 +498,7 @@ type EditArgs struct {
 	ReplaceAll bool `json:"replace_all,omitempty" jsonschema:"replace every occurrence instead of requiring exactly one"`
 }
 
-// EditResult is the sandbox_edit result.
+// EditResult is the fleet_edit result.
 type EditResult struct {
 	// Echo carries the sandbox the file was edited on.
 	Echo
@@ -546,7 +546,7 @@ func (r *Registrar) sandboxEdit(ctx context.Context, _ *mcp.CallToolRequest, tar
 
 // -------------------------------------------------------------------- ls
 
-// LsArgs are the arguments to sandbox_ls.
+// LsArgs are the arguments to fleet_ls.
 type LsArgs struct {
 	TargetArgs
 	// Path is the directory to list.
@@ -573,7 +573,7 @@ type LsEntry struct {
 	Symlink string `json:"symlink,omitempty" jsonschema:"target, when this entry is a symlink"`
 }
 
-// LsResult is the sandbox_ls result.
+// LsResult is the fleet_ls result.
 type LsResult struct {
 	// Echo carries the sandbox the directory is on.
 	Echo
@@ -652,7 +652,7 @@ func (r *Registrar) sandboxLs(ctx context.Context, _ *mcp.CallToolRequest, targe
 
 // ------------------------------------------------------------------ glob
 
-// GlobArgs are the arguments to sandbox_glob.
+// GlobArgs are the arguments to fleet_glob.
 type GlobArgs struct {
 	TargetArgs
 	// Pattern is the glob, anchored at Root.
@@ -667,7 +667,7 @@ type GlobArgs struct {
 	IncludeDefaultIgnored bool `json:"include_default_ignored,omitempty" jsonschema:"walk into .git, node_modules, vendor and target, which are skipped by default"`
 }
 
-// GlobResult is the sandbox_glob result.
+// GlobResult is the fleet_glob result.
 type GlobResult struct {
 	// Echo carries the sandbox that was searched.
 	Echo
@@ -738,7 +738,7 @@ func (r *Registrar) sandboxGlob(ctx context.Context, _ *mcp.CallToolRequest, tar
 
 // ------------------------------------------------------------------ grep
 
-// GrepArgs are the arguments to sandbox_grep.
+// GrepArgs are the arguments to fleet_grep.
 type GrepArgs struct {
 	TargetArgs
 	// Pattern is the RE2 expression to search for.
@@ -761,7 +761,7 @@ type GrepArgs struct {
 	IncludeDefaultIgnored bool `json:"include_default_ignored,omitempty" jsonschema:"search inside .git, node_modules, vendor and target, which are skipped by default"`
 }
 
-// GrepResult is the sandbox_grep result.
+// GrepResult is the fleet_grep result.
 type GrepResult struct {
 	// Echo carries the sandbox that was searched.
 	Echo

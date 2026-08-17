@@ -59,7 +59,7 @@ func (j *Jail) OpenFile(path string, flag int, perm fs.FileMode) (*os.File, erro
 //
 // It is true only on Linux, with a kernel providing openat2 (5.6 and later)
 // and no seccomp filter blocking it. Callers that need to state their
-// guarantees honestly — an audit record, or sandbox_info — should report it
+// guarantees honestly — an audit record, or fleet_info — should report it
 // rather than assume it.
 func (j *Jail) Atomic() bool {
 	return j.Confined() && atomicOpenSupported()

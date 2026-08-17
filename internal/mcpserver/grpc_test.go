@@ -23,10 +23,10 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 // agentServer is a HostService served over a real gRPC listener, as opposed
@@ -61,7 +61,7 @@ func TestEndToEnd_OverRealMTLS(t *testing.T) {
 
 	stop, dialOpt := serveAgentOverBufconn(t, authority, "agent-a")
 
-	controlCert, controlKey := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	controlCert, controlKey := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	pool, err := client.NewPool(client.Config{
 		CACertPEM:   authority.CertPEM(),
 		CertPEM:     controlCert,
@@ -85,15 +85,15 @@ func TestEndToEnd_OverRealMTLS(t *testing.T) {
 
 	session := connect(t, server)
 
-	callTool(t, session, "sandbox_add", map[string]any{"name": "agent-a", "address": "agent-a:8722"}, false)
+	callTool(t, session, "fleet_add", map[string]any{"name": "agent-a", "address": "agent-a:8722"}, false)
 
-	res := callTool(t, session, "sandbox_select", map[string]any{"name": "agent-a"}, false)
+	res := callTool(t, session, "fleet_select", map[string]any{"name": "agent-a"}, false)
 	selected := structured[selectResult](t, res)
 	assert.Equal(t, "agent-a", selected.Sandbox)
 	assert.Equal(t, "linux/arm64", selected.Platform)
 	assert.Equal(t, []string{"/srv/work"}, selected.AllowedRoots)
 
-	res = callTool(t, session, "sandbox_list", map[string]any{"refresh": true}, false)
+	res = callTool(t, session, "fleet_list", map[string]any{"refresh": true}, false)
 	listed := structured[listResult](t, res)
 	require.Len(t, listed.Sandboxes, 1)
 	assert.Equal(t, "serving", listed.Sandboxes[0].Health)
@@ -103,13 +103,13 @@ func TestEndToEnd_OverRealMTLS(t *testing.T) {
 	// rather than a gRPC status the model cannot act on.
 	stop()
 
-	res = callTool(t, session, "sandbox_info", map[string]any{}, true)
+	res = callTool(t, session, "fleet_info", map[string]any{}, true)
 	text := resultText(res)
 	assert.Contains(t, text, "agent-a", "the error must name the sandbox")
 	assert.Contains(t, text, "agent-a:8722", "and the address that did not answer")
 	assert.NotContains(t, text, "rpc error: code =")
 
-	res = callTool(t, session, "sandbox_list", map[string]any{"refresh": true}, false)
+	res = callTool(t, session, "fleet_list", map[string]any{"refresh": true}, false)
 	listed = structured[listResult](t, res)
 	require.Len(t, listed.Sandboxes, 1)
 	assert.Equal(t, "unreachable", listed.Sandboxes[0].Health,
@@ -126,7 +126,7 @@ func TestLazyPool_BuildsFromCredentialsOnDisk(t *testing.T) {
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
 
-	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
 
@@ -141,11 +141,11 @@ func TestLazyPool_BuildsFromCredentialsOnDisk(t *testing.T) {
 	session := connect(t, server)
 	// 127.0.0.1:1 is closed, so this fails at the connection rather than at
 	// the credentials — which is the point: the pool was built.
-	callTool(t, session, "sandbox_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
+	callTool(t, session, "fleet_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
 
-	text := resultText(callTool(t, session, "sandbox_info", map[string]any{"sandbox": "closed"}, true))
+	text := resultText(callTool(t, session, "fleet_info", map[string]any{"sandbox": "closed"}, true))
 	assert.NotContains(t, text, "control certificate", "the credentials on disk must have been used")
-	assert.NotContains(t, text, "sandboxctl ca sign")
+	assert.NotContains(t, text, "fleetctl ca sign")
 	assert.Truef(t,
 		strings.Contains(text, "unreachable") || strings.Contains(text, "timed out"),
 		"expected a connection failure, got: %s", text)
@@ -166,20 +166,20 @@ func TestLazyPool_NoticesCredentialsAppearingMidSession(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	session := connect(t, server)
-	callTool(t, session, "sandbox_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
+	callTool(t, session, "fleet_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
 
-	text := resultText(callTool(t, session, "sandbox_info", map[string]any{"sandbox": "closed"}, true))
-	require.Contains(t, text, "sandboxctl ca init", "the first failure must name the missing CA")
+	text := resultText(callTool(t, session, "fleet_info", map[string]any{"sandbox": "closed"}, true))
+	require.Contains(t, text, "fleetctl ca init", "the first failure must name the missing CA")
 
 	// The operator goes and creates them, without restarting the server.
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
-	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
 
-	text = resultText(callTool(t, session, "sandbox_info", map[string]any{"sandbox": "closed"}, true))
-	assert.NotContains(t, text, "sandboxctl ca init",
+	text = resultText(callTool(t, session, "fleet_info", map[string]any{"sandbox": "closed"}, true))
+	assert.NotContains(t, text, "fleetctl ca init",
 		"the same session must pick up credentials that appeared after it started")
 	assert.Truef(t,
 		strings.Contains(text, "unreachable") || strings.Contains(text, "timed out"),
@@ -198,7 +198,7 @@ func TestLazyPool_DoesNotRebuildAfterClose(t *testing.T) {
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
 
-	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
 
@@ -210,19 +210,19 @@ func TestLazyPool_DoesNotRebuildAfterClose(t *testing.T) {
 	require.NoError(t, err)
 
 	session := connect(t, server)
-	callTool(t, session, "sandbox_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
+	callTool(t, session, "fleet_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
 
 	// Shut the server down without ever having built the pool, so a rebuild
 	// would be unmistakable.
 	require.NoError(t, server.Close())
 
-	text := resultText(callTool(t, session, "sandbox_info", map[string]any{"sandbox": "closed"}, true))
+	text := resultText(callTool(t, session, "fleet_info", map[string]any{"sandbox": "closed"}, true))
 	assert.Contains(t, text, "shutting down",
 		"a call arriving after Close must be refused, not answered with a pool nothing will close")
 	assert.Contains(t, text, "closed", "and the refusal still names the sandbox it was aimed at")
 
 	// Registry-only tools keep working: they never needed a client.
-	callTool(t, session, "sandbox_list", map[string]any{}, false)
+	callTool(t, session, "fleet_list", map[string]any{}, false)
 }
 
 // ---------------------------------------------------------------- helpers

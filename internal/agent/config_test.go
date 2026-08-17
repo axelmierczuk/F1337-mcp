@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
 )
 
 // The schema in examples/agent.yaml is the one the daemon loads. This parses
@@ -29,17 +29,17 @@ func TestLoad_ShippedExample(t *testing.T) {
 	assert.Equal(t, "sandboxd-control", cfg.TLS.RequireClientOU)
 
 	// The example is a Linux config, and Load resolves paths against the
-	// platform it is running on: "/etc/sandboxd/agent.crt" is an absolute path
+	// platform it is running on: "/etc/fleet/agent.crt" is an absolute path
 	// on Unix and a *relative* one on Windows, where absolute means a drive
 	// letter. Load rebasing it there is correct, so the exact strings are
 	// asserted only where they mean what the file meant. Everything else in
 	// this test — the schema, the defaults, the durations — is what stops the
 	// example drifting from the code, and that check runs everywhere.
 	if runtime.GOOS != "windows" {
-		assert.Equal(t, "/etc/sandboxd/agent.crt", cfg.TLS.Certificate)
-		assert.Equal(t, "/etc/sandboxd/agent.key", cfg.TLS.PrivateKey)
-		assert.Equal(t, "/etc/sandboxd/ca.crt", cfg.TLS.CABundle)
-		assert.Equal(t, []string{"/home/build/workspace", "/tmp/sandboxd"}, cfg.AllowedRoots)
+		assert.Equal(t, "/etc/fleet/agent.crt", cfg.TLS.Certificate)
+		assert.Equal(t, "/etc/fleet/agent.key", cfg.TLS.PrivateKey)
+		assert.Equal(t, "/etc/fleet/ca.crt", cfg.TLS.CABundle)
+		assert.Equal(t, []string{"/home/build/workspace", "/tmp/fleet"}, cfg.AllowedRoots)
 	}
 	assert.NotEmpty(t, cfg.TLS.Certificate)
 	assert.NotEmpty(t, cfg.TLS.PrivateKey)
@@ -74,7 +74,7 @@ func TestLoad_ShippedExample(t *testing.T) {
 	assert.Empty(t, cfg.Exec.AllowCommands)
 
 	if runtime.GOOS != "windows" {
-		assert.Equal(t, "/var/log/sandboxd/audit.jsonl", cfg.Audit.Path)
+		assert.Equal(t, "/var/log/fleet/audit.jsonl", cfg.Audit.Path)
 		// Validate insists allowed_roots are absolute, which the example's are
 		// on the platform it was written for.
 		require.NoError(t, cfg.Validate(agent.ValidateOptions{}))
@@ -323,10 +323,10 @@ func TestResolveConfigPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, explicit, got)
 
-	t.Setenv(agent.EnvConfig, "/opt/sandboxd/agent.yaml")
+	t.Setenv(agent.EnvConfig, "/opt/fleet/agent.yaml")
 	got, err = agent.ResolveConfigPath("")
 	require.NoError(t, err)
-	assert.Equal(t, "/opt/sandboxd/agent.yaml", got)
+	assert.Equal(t, "/opt/fleet/agent.yaml", got)
 }
 
 // Health reports what Status holds, and Status is only ever atomics.

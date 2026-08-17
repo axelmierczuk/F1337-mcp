@@ -6,7 +6,7 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "sandboxd/v1/common.proto";
 
-option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
 
 // ProcessService supervises long-running background processes: dev servers,
 // watchers, fuzzers, queue workers.
@@ -144,7 +144,7 @@ message ProcessStatus {
   // Number of times the supervisor has restarted this process.
   uint32 restart_count = 11;
   RestartPolicy restart_policy = 12;
-  // Most recent output line, so sandbox_process_list is useful on its own
+  // Most recent output line, so fleet_process_list is useful on its own
   // without a follow-up logs call for every process.
   string last_log_line = 13;
   // Total bytes of output captured since the process last started.

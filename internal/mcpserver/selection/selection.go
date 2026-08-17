@@ -8,13 +8,13 @@
 // A pure handle design is correct and unusable — the model must thread the
 // handle through every call, and it will eventually drop it. A pure implicit
 // design is usable and incorrect — it breaks with concurrent clients and
-// cannot survive a restart. So sandboxd does both, in a fixed order:
+// cannot survive a restart. So fleet does both, in a fixed order:
 //
 //  1. The call's explicit sandbox argument (name or handle). Always wins.
 //  2. The sticky default recorded for the calling client identity, taken from
 //     _meta and persisted in the registry.
 //  3. Otherwise a structured error listing the available sandboxes and naming
-//     sandbox_select.
+//     fleet_select.
 //
 // There is deliberately no fourth rule. In particular, a fleet of exactly one
 // sandbox does not resolve implicitly: implicit targeting is how the wrong
@@ -33,14 +33,14 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 // MetaKeyClientID is the _meta key a client sets to name itself explicitly.
 // It takes precedence over everything else, and is the way two clients that
 // report the same implementation name keep independent selections.
-const MetaKeyClientID = "io.sandboxd/clientId"
+const MetaKeyClientID = "io.fleet/clientId"
 
 // handlePrefix marks a sandbox reference as a handle rather than a name.
 //
@@ -111,7 +111,7 @@ func (t *Target) Call() mcperr.Call {
 // with no extra persistence to keep in sync. It is one-way: a handle names a
 // sandbox only by matching against the registered names.
 func HandleFor(name string) string {
-	sum := sha256.Sum256([]byte("sandboxd/handle/v1\x00" + name))
+	sum := sha256.Sum256([]byte("fleet/handle/v1\x00" + name))
 	return handlePrefix + hex.EncodeToString(sum[:8])
 }
 
@@ -126,9 +126,9 @@ type NoTargetError struct {
 
 func (e *NoTargetError) Error() string {
 	if len(e.Available) == 0 {
-		return "no sandbox selected, and none are registered. Enroll a host with `sandboxctl enroll mint` (see docs/quickstart.md), or register an already-enrolled agent with sandbox_add"
+		return "no sandbox selected, and none are registered. Enroll a host with `fleetctl enroll mint` (see docs/quickstart.md), or register an already-enrolled agent with fleet_add"
 	}
-	return fmt.Sprintf("no sandbox selected. Call sandbox_select(name=\"%s\") to choose one for subsequent calls, or pass sandbox=\"%s\" to target this call only. Registered: %s",
+	return fmt.Sprintf("no sandbox selected. Call fleet_select(name=\"%s\") to choose one for subsequent calls, or pass sandbox=\"%s\" to target this call only. Registered: %s",
 		e.Available[0], e.Available[0], strings.Join(e.Available, ", "))
 }
 
@@ -143,14 +143,14 @@ type UnknownSandboxError struct {
 
 func (e *UnknownSandboxError) Error() string {
 	if len(e.Available) == 0 {
-		return fmt.Sprintf("unknown sandbox %q: no sandboxes are registered. Enroll one with `sandboxctl enroll mint`, or register an already-enrolled agent with sandbox_add", e.Ref)
+		return fmt.Sprintf("unknown sandbox %q: no sandboxes are registered. Enroll one with `fleetctl enroll mint`, or register an already-enrolled agent with fleet_add", e.Ref)
 	}
 	return fmt.Sprintf("unknown sandbox %q. Registered: %s", e.Ref, strings.Join(e.Available, ", "))
 }
 
 // StaleSelectionError is returned when a client's sticky default names a
 // sandbox that is no longer registered — it was removed by another client, or
-// by sandboxctl, while this one still pointed at it.
+// by fleetctl, while this one still pointed at it.
 //
 // It is distinct from UnknownSandboxError because the model did nothing wrong
 // and the fix is different: re-select, do not correct a typo.
@@ -163,9 +163,9 @@ type StaleSelectionError struct {
 
 func (e *StaleSelectionError) Error() string {
 	if len(e.Available) == 0 {
-		return fmt.Sprintf("the selected sandbox %q is no longer registered, and no others are. Register one with sandbox_add", e.Name)
+		return fmt.Sprintf("the selected sandbox %q is no longer registered, and no others are. Register one with fleet_add", e.Name)
 	}
-	return fmt.Sprintf("the selected sandbox %q is no longer registered. Call sandbox_select to choose another. Registered: %s",
+	return fmt.Sprintf("the selected sandbox %q is no longer registered. Call fleet_select to choose another. Registered: %s",
 		e.Name, strings.Join(e.Available, ", "))
 }
 
@@ -219,7 +219,7 @@ func NewResolver(fleet *registry.Registry, opts *Options) *Resolver {
 //
 // In order of precedence:
 //
-//  1. The io.sandboxd/clientId key in the request's _meta. A client that runs
+//  1. The io.fleet/clientId key in the request's _meta. A client that runs
 //     several concurrent sessions and wants each to hold its own selection
 //     sets this.
 //  2. The client implementation name, which protocol 2026-07-28 carries in
@@ -379,7 +379,7 @@ func (r *Resolver) Clear(id Identity) error {
 // ClearSelectionsFor drops every sticky default pointing at sandboxName —
 // persisted and in-memory alike — and reports how many were cleared.
 //
-// sandbox_remove goes through here rather than straight to the registry so the
+// fleet_remove goes through here rather than straight to the registry so the
 // unidentified client's selection is cleared too. Missing it would leave the
 // one selection removal cannot see still aimed at a sandbox that is gone.
 func (r *Resolver) ClearSelectionsFor(sandboxName string) (int, error) {

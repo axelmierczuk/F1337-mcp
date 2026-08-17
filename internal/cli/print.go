@@ -1,4 +1,4 @@
-// Package cli holds the output plumbing shared by the sandboxd binaries.
+// Package cli holds the output plumbing shared by the fleet binaries.
 package cli
 
 import (

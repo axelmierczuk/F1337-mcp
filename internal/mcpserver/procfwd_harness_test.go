@@ -23,15 +23,15 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	agentforward "github.com/axelmierczuk/sandboxd-mcp/internal/agent/forward"
-	agentprocess "github.com/axelmierczuk/sandboxd-mcp/internal/agent/process"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	agentforward "github.com/axelmierczuk/fleet-mcp/internal/agent/forward"
+	agentprocess "github.com/axelmierczuk/fleet-mcp/internal/agent/process"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // The process and forward tools are tested against the real agent services,
@@ -57,9 +57,9 @@ import (
 // processes that outlive the call that started them, so they are entered
 // through a test function and run until they are signalled. Both mechanisms
 // live in one package and neither is the other's dispatcher: a child of this
-// one leaves SANDBOXD_MCP_TEST_HELPER unset, so TestMain hands it to m.Run and
+// one leaves FLEET_MCP_TEST_HELPER unset, so TestMain hands it to m.Run and
 // TestM2HelperChild picks it up.
-const m2HelperEnv = "SANDBOXD_MCP_M2_HELPER"
+const m2HelperEnv = "FLEET_MCP_M2_HELPER"
 
 // TestM2HelperChild is the entry point of every process the process-tool tests
 // supervise. It is not a test.
@@ -149,7 +149,7 @@ func m2HelperMain() {
 		//
 		// It says so once the disposition is actually installed, and the test
 		// waits for that line with a ready probe. Without it the test races the
-		// child's own startup: sandbox_process_start returns as soon as the
+		// child's own startup: fleet_process_start returns as soon as the
 		// process is spawned, and a SIGTERM that arrives before this line has
 		// been printed is delivered to a process still carrying the default
 		// disposition, which kills it — so the stop does not escalate and the
@@ -445,7 +445,7 @@ func newLiveFixture(t *testing.T, opts liveAgentOptions) *liveFixture {
 
 	const clientName = "m2-test-client"
 	// The sticky selection is written straight into the registry rather than
-	// made through sandbox_select, which would need a HostService this fixture
+	// made through fleet_select, which would need a HostService this fixture
 	// deliberately does not serve.
 	require.NoError(t, fleet.SetSelection("client:"+clientName, liveSandboxName))
 

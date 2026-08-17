@@ -12,3 +12,17 @@ lint:
 breaking:
   use:
     - FILE
+  except:
+    # FILE_SAME_GO_PACKAGE guards the identity of the *generated Go import
+    # path*, not the wire contract. The sandboxd-mcp → fleet-mcp module rename
+    # changes exactly that and nothing else: the proto package is still
+    # sandboxd.v1, and every message, field number, service and fully-qualified
+    # method path is byte-identical, so an agent built before the rename and a
+    # control plane built after it still speak to each other. Every rule that
+    # does protect the wire — FILE_SAME_PACKAGE, FIELD_SAME_NUMBER, the RPC and
+    # service name rules — stays on.
+    #
+    # This exclusion only has to survive until the rename lands on main; once
+    # main carries the new path, later PRs compare against it and never trip
+    # the rule. It is safe to delete then.
+    - FILE_SAME_GO_PACKAGE

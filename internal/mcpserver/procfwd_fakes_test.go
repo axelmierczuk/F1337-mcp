@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // Minimal ProcessService and ForwardService clients for the fleet-wide walks
@@ -85,7 +85,7 @@ func (s *fakeLogStream) Recv() (*sandboxdv1.GetProcessLogsResponse, error) {
 }
 
 // fakeForward accepts an open and reports success, which is all the preflight
-// in sandbox_forward asks of it.
+// in fleet_forward asks of it.
 type fakeForward struct{}
 
 func (fakeForward) Forward(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], error) {

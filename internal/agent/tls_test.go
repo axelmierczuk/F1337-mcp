@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/credentials"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 // A control leaf issued by the fleet CA is the one identity that gets through,
@@ -38,7 +38,7 @@ func TestServer_ControlLeafIsAccepted(t *testing.T) {
 	// background, and both those calls and this one are real traffic through
 	// the same handshake.
 	assert.GreaterOrEqual(t, svc.servedCount(), int64(1))
-	assert.Equal(t, "sandboxd-mcp", svc.seenPrincipal(),
+	assert.Equal(t, "fleet-mcp", svc.seenPrincipal(),
 		"the principal must be the client leaf's common name, taken from the verified chain")
 }
 
@@ -78,7 +78,7 @@ func TestServer_ClientCertFromAnotherCA_Rejected(t *testing.T) {
 	// a control-profile leaf, so the OU matches and only the chain does not.
 	imposter, err := ca.Init(filepath.Join(t.TempDir(), "imposter-ca"), false)
 	require.NoError(t, err)
-	certPEM, keyPEM := signLeafWith(t, imposter, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeafWith(t, imposter, ca.ProfileControl, "fleet-mcp", nil)
 
 	hostClient := h.hostClient(t, fleet.ca.CertPEM(), certPEM, keyPEM)
 
@@ -140,7 +140,7 @@ func TestAuthorizePeer_RejectsWrongOUEvenWithClientAuthUsage(t *testing.T) {
 		VerifiedChains:   [][]*x509.Certificate{{control, fleet.ca.Certificate()}},
 	}, agent.DefaultClientOU)
 	require.NoError(t, err)
-	assert.Equal(t, "sandboxd-mcp", accepted.Subject.CommonName)
+	assert.Equal(t, "fleet-mcp", accepted.Subject.CommonName)
 }
 
 // An unverified connection is refused even if a certificate was presented.

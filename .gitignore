@@ -12,7 +12,7 @@ coverage.*
 *.pem
 *.key
 *.crt
-/.sandboxd/
+/.fleet/
 
 # Editor and OS noise
 .DS_Store

@@ -9,15 +9,15 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
-// init registers ProcessService with every sandboxd-agent daemon that links
-// this package. See internal/cli/sandboxdagent/services.go for the import that
+// init registers ProcessService with every fleet-agent daemon that links
+// this package. See internal/cli/fleetagent/services.go for the import that
 // does.
 func init() {
 	agent.Register("process", New)

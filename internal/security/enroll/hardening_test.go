@@ -18,9 +18,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
 )
 
 // enrollOnce runs one full enrollment against svc and returns the response.
@@ -235,7 +235,7 @@ func TestRateLimiter_GlobalAndPerPeer(t *testing.T) {
 	require.NoError(t, short.Allow("10.0.0.1"))
 }
 
-// `sandboxctl enroll mint` and `sandboxctl serve` are separate processes, so a
+// `fleetctl enroll mint` and `fleetctl serve` are separate processes, so a
 // token that only exists in the minting process's memory can never be
 // redeemed.
 func TestTokenStore_PersistsAcrossProcesses(t *testing.T) {

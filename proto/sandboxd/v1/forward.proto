@@ -2,13 +2,13 @@ syntax = "proto3";
 
 package sandboxd.v1;
 
-option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
 
 // ForwardService tunnels TCP connections from the MCP server host to a port on
 // the sandbox.
 //
 // This closes the remote dev loop: the model starts a dev server with
-// sandbox_process_start, forwards its port, and can then reach it over
+// fleet_process_start, forwards its port, and can then reach it over
 // localhost the same way it would a local server.
 service ForwardService {
   // Forward carries a single TCP connection. The MCP server opens one stream

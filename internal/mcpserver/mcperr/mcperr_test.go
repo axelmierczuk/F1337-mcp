@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
 )
 
 func TestMap_NilPassesThrough(t *testing.T) {
@@ -58,7 +58,7 @@ func TestMap_CodesBecomeReadableMessages(t *testing.T) {
 		{
 			name:     "unauthenticated points at the certificate, not the request",
 			err:      status.Error(codes.Unauthenticated, "bad certificate"),
-			contains: []string{"build-box", "certificate", "sandboxctl"},
+			contains: []string{"build-box", "certificate", "fleetctl"},
 		},
 		{
 			name:     "resource exhausted explains the size limit",

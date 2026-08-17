@@ -14,19 +14,19 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/mcperr"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
-// maxSandboxNameLength bounds a name accepted by sandbox_add. It matches the
+// maxSandboxNameLength bounds a name accepted by fleet_add. It matches the
 // bound enrollment applies to the one identifier an unauthenticated host can
 // put into a certificate subject, so a name added here is a name that could
 // have been enrolled.
 const maxSandboxNameLength = 128
 
-// Bounds on the labels sandbox_add accepts. See [checkLabels].
+// Bounds on the labels fleet_add accepts. See [checkLabels].
 const (
 	maxLabels           = 32
 	maxLabelKeyLength   = 64
@@ -35,17 +35,17 @@ const (
 
 // enrollmentHint is what an empty fleet gets told. Adding a sandbox is an
 // operator action; the model needs to know that rather than retrying.
-const enrollmentHint = "No sandboxes are registered. Enrolling one mints credentials and is an operator action: `sandboxctl enroll mint --name <name> --address <host:port>`, then install the agent on the host (docs/quickstart.md). A host that is already enrolled but missing here can be registered with sandbox_add."
+const enrollmentHint = "No sandboxes are registered. Enrolling one mints credentials and is an operator action: `fleetctl enroll mint --name <name> --address <host:port>`, then install the agent on the host (docs/quickstart.md). A host that is already enrolled but missing here can be registered with fleet_add."
 
 // unconfinedNote is what a host with no allowed roots is reported as.
 //
 // An agent reports no roots when its path jail is off, and the jail is off
 // whenever ExecService is enabled: a caller with exec does not need
-// sandbox_write to leave the jail, it runs `sh -c 'echo x > /etc/passwd'`. So
+// fleet_write to leave the jail, it runs `sh -c 'echo x > /etc/passwd'`. So
 // the two are mutually exclusive, and roots are enforced only on an agent with
 // exec disabled.
 //
-// sandbox_select returns roots precisely so the model learns where it may
+// fleet_select returns roots precisely so the model learns where it may
 // write. Answering that question with an absent list is the model-facing
 // version of the same false confidence the mutual exclusion exists to remove,
 // read from the other end: "no roots" is silently indistinguishable from
@@ -56,35 +56,35 @@ const unconfinedNote = "This sandbox is unconfined: the agent reports no allowed
 // registerFleet adds the five fleet tools.
 func registerFleet(r *Registrar) {
 	AddFleet(r, &mcp.Tool{
-		Name:        "sandbox_list",
+		Name:        "fleet_list",
 		Title:       "List sandboxes",
 		Description: "List registered sandboxes with platform, health, labels and which one is selected. Health is cached unless refresh is set.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, r.sandboxList)
 
 	AddFleet(r, &mcp.Tool{
-		Name:        "sandbox_select",
+		Name:        "fleet_select",
 		Title:       "Select a sandbox",
 		Description: "Set the default sandbox for subsequent calls. Returns a handle plus the host's platform and the roots it allows writes under.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
 	}, r.sandboxSelect)
 
 	AddFleet(r, &mcp.Tool{
-		Name:        "sandbox_add",
+		Name:        "fleet_add",
 		Title:       "Register a sandbox",
-		Description: "Register an already-enrolled agent by name and address. Does not enroll: minting credentials is an operator action via sandboxctl.",
+		Description: "Register an already-enrolled agent by name and address. Does not enroll: minting credentials is an operator action via fleetctl.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
 	}, r.sandboxAdd)
 
 	AddFleet(r, &mcp.Tool{
-		Name:        "sandbox_remove",
+		Name:        "fleet_remove",
 		Title:       "Deregister a sandbox",
 		Description: "Remove a sandbox from the local registry. Does not uninstall the agent or touch the host.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), IdempotentHint: true},
 	}, r.sandboxRemove)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:        "sandbox_info",
+		Name:        "fleet_info",
 		Title:       "Describe a sandbox",
 		Description: "Full detail for one sandbox: platform, resources, allowed roots, agent version and uptime. include_toolchains probes the filesystem and is measurably slower.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
@@ -95,7 +95,7 @@ func boolPtr(b bool) *bool { return &b }
 
 // ---------------------------------------------------------------- list
 
-// ListArgs are the arguments to sandbox_list.
+// ListArgs are the arguments to fleet_list.
 type ListArgs struct {
 	// Refresh probes each sandbox instead of reading cached health.
 	Refresh bool `json:"refresh,omitempty" jsonschema:"probe every sandbox now instead of reporting cached health"`
@@ -103,7 +103,7 @@ type ListArgs struct {
 	Label string `json:"label,omitempty" jsonschema:"only list sandboxes carrying this label, as key=value"`
 }
 
-// SandboxLine is one sandbox in a sandbox_list result. Every field is
+// SandboxLine is one sandbox in a fleet_list result. Every field is
 // omitempty: a twenty-sandbox listing is paid for on every fleet check.
 type SandboxLine struct {
 	// Name is the fleet-unique name, and what to pass as sandbox.
@@ -126,7 +126,7 @@ type SandboxLine struct {
 	Selected bool `json:"selected,omitempty"`
 }
 
-// ListResult is the sandbox_list result.
+// ListResult is the fleet_list result.
 type ListResult struct {
 	// Echo carries the selected sandbox, empty when nothing is selected.
 	Echo
@@ -207,16 +207,16 @@ func (r *Registrar) sandboxList(ctx context.Context, req *mcp.CallToolRequest, i
 
 	switch {
 	case len(out.Sandboxes) == 0 && in.Label != "":
-		out.Hint = fmt.Sprintf("No sandbox carries the label %q. Call sandbox_list without a filter to see every registered sandbox.", in.Label)
+		out.Hint = fmt.Sprintf("No sandbox carries the label %q. Call fleet_list without a filter to see every registered sandbox.", in.Label)
 	case len(out.Sandboxes) == 0:
 		out.Hint = enrollmentHint
 	case stale != "":
-		out.Hint = fmt.Sprintf("The previously selected sandbox %q is no longer registered. Call sandbox_select to choose another.", stale)
+		out.Hint = fmt.Sprintf("The previously selected sandbox %q is no longer registered. Call fleet_select to choose another.", stale)
 	case selected == "":
-		out.Hint = "No sandbox is selected. Call sandbox_select before any tool that acts on a host."
+		out.Hint = "No sandbox is selected. Call fleet_select before any tool that acts on a host."
 	}
 
-	// The echo for sandbox_list is the selected sandbox; empty is the honest
+	// The echo for fleet_list is the selected sandbox; empty is the honest
 	// answer when nothing is selected, and the hint above says so.
 	return out, selected, nil
 }
@@ -233,13 +233,13 @@ func containsName(sandboxes []registry.Sandbox, name string) bool {
 
 // ------------------------------------------------------------- select
 
-// SelectArgs are the arguments to sandbox_select.
+// SelectArgs are the arguments to fleet_select.
 type SelectArgs struct {
 	// Name is the sandbox to make the default target.
 	Name string `json:"name" jsonschema:"name of the sandbox to make the default target"`
 }
 
-// SelectResult is the sandbox_select result. It carries platform and allowed
+// SelectResult is the fleet_select result. It carries platform and allowed
 // roots so the model learns where it may write without a second call.
 type SelectResult struct {
 	// Echo carries the newly selected sandbox.
@@ -320,7 +320,7 @@ func (r *Registrar) sandboxSelect(ctx context.Context, req *mcp.CallToolRequest,
 
 // ---------------------------------------------------------------- add
 
-// AddArgs are the arguments to sandbox_add.
+// AddArgs are the arguments to fleet_add.
 type AddArgs struct {
 	// Name is the fleet-unique name for the sandbox.
 	Name string `json:"name" jsonschema:"fleet-unique name for the sandbox; must match the name it was enrolled under"`
@@ -330,7 +330,7 @@ type AddArgs struct {
 	Labels map[string]string `json:"labels,omitempty" jsonschema:"free-form labels, e.g. {\"arch\":\"arm64\"}"`
 }
 
-// AddResult is the sandbox_add result.
+// AddResult is the fleet_add result.
 type AddResult struct {
 	// Echo carries the registered sandbox.
 	Echo
@@ -365,7 +365,7 @@ func (r *Registrar) sandboxAdd(_ context.Context, _ *mcp.CallToolRequest, in Add
 		if getErr != nil {
 			return AddResult{}, "", err
 		}
-		return AddResult{}, "", fmt.Errorf("sandbox %q is already registered at %s. Remove it with sandbox_remove first if the address has changed; registering does not overwrite",
+		return AddResult{}, "", fmt.Errorf("sandbox %q is already registered at %s. Remove it with fleet_remove first if the address has changed; registering does not overwrite",
 			name, existing.Address)
 	case err != nil:
 		return AddResult{}, "", err
@@ -400,11 +400,11 @@ func checkSandboxName(name string) error {
 	return nil
 }
 
-// checkLabels bounds the free-form metadata a sandbox_add call attaches.
+// checkLabels bounds the free-form metadata a fleet_add call attaches.
 //
 // Labels are the one part of the call with no shape of their own, and they are
 // paid for twice: once in the registry file that every later operation rewrites
-// whole, and again in every sandbox_list result, which lands in model context
+// whole, and again in every fleet_list result, which lands in model context
 // on every fleet check. The labels enrollment attaches come from the operator's
 // token and are the operator's business; these come from the model, so they are
 // bounded here, before the registry is touched.
@@ -470,13 +470,13 @@ func checkAddress(address string) error {
 
 // ------------------------------------------------------------- remove
 
-// RemoveArgs are the arguments to sandbox_remove.
+// RemoveArgs are the arguments to fleet_remove.
 type RemoveArgs struct {
 	// Name is the sandbox to deregister, by name or handle.
 	Name string `json:"name" jsonschema:"name or handle of the sandbox to deregister"`
 }
 
-// RemoveResult is the sandbox_remove result.
+// RemoveResult is the fleet_remove result.
 type RemoveResult struct {
 	// Echo carries the deregistered sandbox.
 	Echo
@@ -505,7 +505,7 @@ func (r *Registrar) sandboxRemove(_ context.Context, _ *mcp.CallToolRequest, in 
 	// exists in which a selection points at something that is gone. The
 	// reverse order would leave one, and a dangling selection is worse than
 	// none. This reaches every client identity, not just the caller: the
-	// client that ran sandbox_remove is rarely the only one that had it
+	// client that ran fleet_remove is rarely the only one that had it
 	// selected. It goes through the resolver rather than straight to the
 	// registry so it also reaches the unidentified client, whose selection is
 	// held in memory rather than in the registry file.
@@ -554,14 +554,14 @@ func (r *Registrar) sandboxRemove(_ context.Context, _ *mcp.CallToolRequest, in 
 
 // --------------------------------------------------------------- info
 
-// InfoArgs are the arguments to sandbox_info.
+// InfoArgs are the arguments to fleet_info.
 type InfoArgs struct {
 	TargetArgs
 	// IncludeToolchains probes the filesystem for installed toolchains.
 	IncludeToolchains bool `json:"include_toolchains,omitempty" jsonschema:"probe the host for installed toolchains; measurably slower"`
 }
 
-// InfoResources is the capacity half of a sandbox_info result, rendered in
+// InfoResources is the capacity half of a fleet_info result, rendered in
 // units a reader can use rather than raw byte counts.
 type InfoResources struct {
 	// CPUCores is the number of logical cores.
@@ -588,7 +588,7 @@ type InfoToolchain struct {
 	Path string `json:"path,omitempty"`
 }
 
-// InfoResult is the sandbox_info result.
+// InfoResult is the fleet_info result.
 type InfoResult struct {
 	// Echo carries the sandbox this describes.
 	Echo
@@ -728,7 +728,7 @@ func (r *Registrar) hostInfo(ctx context.Context, target *selection.Target, incl
 		return nil, c.Map(err)
 	}
 
-	// Cache what the model will ask for again: platform for sandbox_list,
+	// Cache what the model will ask for again: platform for fleet_list,
 	// agent version for compatibility checks. A failure here is not the
 	// caller's problem — the answer is already in hand.
 	if err := d.Fleet.UpdateHostInfo(target.Name(), registry.Platform{
@@ -746,7 +746,7 @@ func (r *Registrar) hostInfo(ctx context.Context, target *selection.Target, incl
 	return info, nil
 }
 
-// healthView is one sandbox's health as sandbox_list reports it.
+// healthView is one sandbox's health as fleet_list reports it.
 type healthView struct {
 	status       string
 	detail       string

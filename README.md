@@ -2,7 +2,7 @@
   <img src="docs/assets/logo.svg" alt="Three connected sandboxes" width="120">
 </p>
 
-# sandboxd
+# fleet
 
 **Let your coding agent choose which machine it runs on.**
 
@@ -12,7 +12,7 @@ work like the tools it already has, except they run on a machine you
 designate instead of your laptop.
 
 > [!WARNING]
-> `sandboxd-agent` is a remote code execution service. That is its purpose,
+> `fleet-agent` is a remote code execution service. That is its purpose,
 > not a caveat. Read [docs/security.md](docs/security.md) before installing
 > it anywhere.
 
@@ -26,14 +26,14 @@ designate instead of your laptop.
 
 Three binaries, one Go module:
 
-- **`sandboxd-mcp`** — runs on your workstation. The MCP server your agent
+- **`fleet-mcp`** — runs on your workstation. The MCP server your agent
   talks to. Owns the registry of known sandboxes and the current selection.
-- **`sandboxd-agent`** — runs on every sandbox host. Listens over gRPC/mTLS,
+- **`fleet-agent`** — runs on every sandbox host. Listens over gRPC/mTLS,
   runs commands, and supervises background processes.
-- **`sandboxctl`** — runs on your workstation. Sets up the CA, mints
+- **`fleetctl`** — runs on your workstation. Sets up the CA, mints
   enrollment tokens, and inspects the fleet.
 
-The agent CLI (Claude Code, Cursor, etc.) calls `sandbox_select` to pick a
+The agent CLI (Claude Code, Cursor, etc.) calls `fleet_select` to pick a
 host, then uses the same exec/file/process tools it already knows — they
 just execute wherever you pointed them.
 
@@ -42,23 +42,23 @@ just execute wherever you pointed them.
 **1. Get the workstation tools:**
 
 ```sh
-go install github.com/axelmierczuk/sandboxd-mcp/cmd/sandboxd-mcp@latest
-go install github.com/axelmierczuk/sandboxd-mcp/cmd/sandboxctl@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-mcp@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
 ```
 
 **2. Create a CA and mint an enrollment token:**
 
 ```sh
-sandboxctl ca init
-sandboxctl serve &                    # enrollment endpoint, :9443
-sandboxctl enroll mint --name build-box
+fleetctl ca init
+fleetctl serve &                    # enrollment endpoint, :9443
+fleetctl enroll mint --name build-box
 # → token: sbx_ey...   ca fingerprint: 9f2c...
 ```
 
 **3. Enroll a machine as a sandbox:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
   | sh -s -- --token sbx_ey... \
              --control your-workstation:9443 \
              --ca-fingerprint 9f2c... \
@@ -74,28 +74,28 @@ installs a system service. Use `install.ps1` on Windows.
 ```json
 {
   "mcpServers": {
-    "sandboxd": {
-      "command": "sandboxd-mcp",
+    "fleet": {
+      "command": "fleet-mcp",
       "args": ["serve"]
     }
   }
 }
 ```
 
-Done. `sandbox_list` should show `build-box`.
+Done. `fleet_list` should show `build-box`.
 
 ## Tools
 
 Nineteen tools across five groups — see [docs/tools.md](docs/tools.md) for
 full schemas.
 
-- **Fleet** — `sandbox_list`, `sandbox_select`, `sandbox_add`, `sandbox_remove`, `sandbox_info`
-- **Execute** — `sandbox_exec`
-- **Background processes** — `sandbox_process_start`, `sandbox_process_list`, `sandbox_process_logs`, `sandbox_process_signal`, `sandbox_process_restart`
-- **Files** — `sandbox_read`, `sandbox_write`, `sandbox_edit`, `sandbox_ls`, `sandbox_glob`, `sandbox_grep`
-- **Bridge** — `sandbox_transfer`, `sandbox_forward`
+- **Fleet** — `fleet_list`, `fleet_select`, `fleet_add`, `fleet_remove`, `fleet_info`
+- **Execute** — `fleet_exec`
+- **Background processes** — `fleet_process_start`, `fleet_process_list`, `fleet_process_logs`, `fleet_process_signal`, `fleet_process_restart`
+- **Files** — `fleet_read`, `fleet_write`, `fleet_edit`, `fleet_ls`, `fleet_glob`, `fleet_grep`
+- **Bridge** — `fleet_transfer`, `fleet_forward`
 
-`sandbox_select` sets a sticky default sandbox (persisted per client), and
+`fleet_select` sets a sticky default sandbox (persisted per client), and
 every targeted tool can override it with an optional `sandbox` argument.
 Every result echoes back which sandbox actually served it, so the agent
 never silently acts on the wrong host.
@@ -108,7 +108,7 @@ never silently acts on the wrong host.
 - **Caps and audit.** Wall-clock timeouts, output limits, append-only JSONL
   log of every exec and write.
 
-`sandboxd` does not sandbox — it's remote execution against a host you
+`fleet` does not sandbox — it's remote execution against a host you
 designate. Isolation is whatever that host already provides (VM, container,
 dedicated machine). Full threat model in [docs/security.md](docs/security.md).
 
@@ -127,7 +127,7 @@ gRPC/protobuf, buf for proto tooling, GoReleaser for release builds.
 ## Status
 
 Early. Protocol schema and build pipeline are in place; implementation is
-tracked in [#29](https://github.com/axelmierczuk/sandboxd-mcp/issues/29).
+tracked in [#29](https://github.com/axelmierczuk/fleet-mcp/issues/29).
 See [docs/architecture.md](docs/architecture.md) for the full design.
 
 ## License

@@ -15,10 +15,10 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // DefaultDrainTimeout bounds how long shutdown waits for in-flight RPCs.
@@ -286,7 +286,7 @@ func auditFor(cfg *Config, log *slog.Logger) *policy.Audit {
 // This is the single place that decides whether the jail is in force. Nothing
 // downstream reads Config.AllowedRoots to answer that question — they ask the
 // jail, which is why an exec-enabled agent reports itself unconfined all the
-// way out to sandbox_select.
+// way out to fleet_select.
 func jailFor(cfg *Config, log *slog.Logger) (*jail.Jail, error) {
 	if !cfg.JailEnforced() {
 		if len(cfg.AllowedRoots) > 0 {

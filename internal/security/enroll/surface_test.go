@@ -11,8 +11,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
 )
 
 // Rounds 1, 2 and 3 each found the same defect one field over: listen_addresses
@@ -56,8 +56,8 @@ var enrollRequestSurface = map[string]fieldAccount{
 			"reserves one; a name the control plane did not choose reaches neither the subject nor the " +
 			"SANs — asserted by TestEnroll_HostChosenNameStaysOutOfTheSubject.",
 	},
-	"platform.os":             {boundedText: true, why: "Registry value, printed by `sandboxctl list`. Not an identity."},
-	"platform.arch":           {boundedText: true, why: "Registry value, printed by `sandboxctl list`. Not an identity."},
+	"platform.os":             {boundedText: true, why: "Registry value, printed by `fleetctl list`. Not an identity."},
+	"platform.arch":           {boundedText: true, why: "Registry value, printed by `fleetctl list`. Not an identity."},
 	"platform.kernel_version": {boundedText: true, why: "Registry value. Not an identity."},
 	"platform.hostname":       {boundedText: true, why: "Registry value. Deliberately not the certified name — a host's claim about itself."},
 	"platform.path_separator": {boundedText: true, why: "Registry value. Not an identity."},
@@ -68,7 +68,7 @@ var enrollRequestSurface = map[string]fieldAccount{
 			"else — asserted by TestEnroll_RequestedAddressesCannotWidenTheCertificate. Entry [0] becomes " +
 			"the registry address when the token authorized none, which is the residual round 3 recorded.",
 	},
-	"agent_version": {boundedText: true, why: "Registry value, printed by `sandboxctl list`. Not an identity."},
+	"agent_version": {boundedText: true, why: "Registry value, printed by `fleetctl list`. Not an identity."},
 }
 
 // TestEnrollRequest_EveryFieldIsAccountedFor is the test that ends the class.

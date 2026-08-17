@@ -17,14 +17,14 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
-// init registers ExecService with every sandboxd-agent daemon that links this
-// package. See internal/cli/sandboxdagent/services.go for the import that does.
+// init registers ExecService with every fleet-agent daemon that links this
+// package. See internal/cli/fleetagent/services.go for the import that does.
 func init() {
 	agent.Register("exec", New)
 }
@@ -425,7 +425,7 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 		// The call takes its process tree with it. A grandchild that outlived
 		// its parent — `sh -c 'sleep 100 &'` leaves one behind — must not
 		// outlive the RPC: exec is one-shot by contract, and docs/tools.md
-		// points anything longer-lived at sandbox_process_start.
+		// points anything longer-lived at fleet_process_start.
 		//
 		// Sweep then close, and what each of those does is per platform: see
 		// sweepGroup. Only when the child really leads its own group, though.

@@ -13,8 +13,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // renamePath is os.Rename, indirected so a test can make it report a
@@ -352,7 +352,7 @@ func (s *Service) copySymlink(ctx context.Context, source, destination string) e
 	if len(base) > 64 {
 		base = base[:64]
 	}
-	tmpPath := filepath.Join(dir, "."+base+".sandboxd-"+randomSuffix()+".tmp")
+	tmpPath := filepath.Join(dir, "."+base+".fleet-"+randomSuffix()+".tmp")
 	if err := os.Symlink(target, tmpPath); err != nil {
 		return fileError(destination, err)
 	}

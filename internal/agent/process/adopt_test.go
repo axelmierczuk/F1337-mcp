@@ -17,8 +17,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // newRawSupervisor builds a supervisor that does not stop its processes when the
@@ -219,7 +219,7 @@ func closeMidDrain(t *testing.T, seq int) (persistedOffset, captured int64) {
 //
 // The record names a pid that now belongs to an unrelated process. Adopting it
 // on the pid alone would have the supervisor signalling something it does not
-// own — on a machine that also runs real workloads, that is how sandboxd kills
+// own — on a machine that also runs real workloads, that is how fleet kills
 // someone's database.
 func TestPIDReuseProducesOrphanedAndNoSignal(t *testing.T) {
 	t.Parallel()
@@ -532,4 +532,64 @@ func TestArgvHashMismatchIsNotedButDoesNotBlockAdoption(t *testing.T) {
 	note, adopt := sup.adoptionDecision(p, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING)
 	require.True(t, adopt, "argv can legitimately change across a re-exec; it is a sanity check, not the test")
 	require.Contains(t, note, "argv hash does not match")
+}
+
+// TestAdoptionRestoresTheSpawningAgentsJobName covers the Windows half of the
+// fleet rebrand.
+//
+// A process's job object is named when it is spawned, and the rebrand changed
+// the prefix that name is built from. An agent upgraded across the rename
+// re-adopts processes whose jobs are still called "sandboxd-process-…", and it
+// reaches a re-adopted tree by reopening the job *by name*. Recomputing the
+// name from the current prefix would produce one no running job answers to, and
+// every group signal to a surviving process — every stop, every restart — would
+// fail on a host that did nothing wrong but upgrade.
+//
+// The name therefore comes off the persisted record rather than the constant.
+// This runs on every platform because the bug is in the bookkeeping, not in the
+// Win32 call: the field is persisted and restored identically everywhere.
+func TestAdoptionRestoresTheSpawningAgentsJobName(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	survivor := exec.Command(exe, "-helper", "sleep") //nolint:gosec // the command is this test binary
+	survivor.Env = helperEnviron()
+	require.NoError(t, survivor.Start())
+	t.Cleanup(func() {
+		_ = survivor.Process.Kill()
+		_ = survivor.Wait()
+	})
+
+	const legacyJob = "sandboxd-process-upgraded-0001"
+	st, err := newStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, st.save(persisted{
+		ID:          "upgraded-0001",
+		Name:        "upgraded",
+		Argv:        []string{"whatever"},
+		PID:         survivor.Process.Pid,
+		JobName:     legacyJob,
+		State:       "READY",
+		StartedAt:   time.Now().Add(-time.Minute),
+		MaxLogBytes: 1 << 18,
+	}))
+
+	sup := newRawSupervisor(t, dir)
+	r, ok := sup.lookup("upgraded-0001")
+	require.True(t, ok)
+	require.Equal(t, legacyJob, r.jobName,
+		"a re-adopted process keeps the job name the agent that spawned it used")
+
+	// And a record this agent creates is named with the current prefix, so the
+	// compatibility path does not pin new processes to the old name.
+	//
+	// newRecord rather than start: the name is assigned at construction, so
+	// spawning a process to read it back would add a live child to a supervisor
+	// that deliberately outlives its children — and on Windows the capture files
+	// it holds open then block the temp directory's cleanup.
+	fresh := newRecord(sup, "fresh-0001", dir)
+	require.Equal(t, jobObjectName("fresh-0001"), fresh.jobName)
+	require.Contains(t, fresh.jobName, "fleet-process-")
 }

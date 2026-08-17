@@ -17,13 +17,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
-// init registers ForwardService with every sandboxd-agent daemon that links
-// this package. See internal/cli/sandboxdagent/services.go for the import that
+// init registers ForwardService with every fleet-agent daemon that links
+// this package. See internal/cli/fleetagent/services.go for the import that
 // does.
 func init() {
 	agent.Register("forward", New)
@@ -183,7 +183,7 @@ func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequ
 		sendErr := stream.Send(&sandboxdv1.ForwardResponse{
 			Event: &sandboxdv1.ForwardResponse_Opened{Opened: &sandboxdv1.ForwardOpened{
 				Success: false,
-				Error: fmt.Sprintf("could not connect to %s on the sandbox: %s. Check something is listening there — sandbox_process_list reports the ports each supervised process holds",
+				Error: fmt.Sprintf("could not connect to %s on the sandbox: %s. Check something is listening there — fleet_process_list reports the ports each supervised process holds",
 					net.JoinHostPort(call.reportedHost(), strconv.FormatUint(uint64(call.port), 10)), dialMessage(err)),
 			}},
 		})

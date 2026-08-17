@@ -390,8 +390,8 @@ const file_sandboxd_v1_exec_proto_rawDesc = "" +
 	"truncation\x18\x06 \x01(\v2\x17.sandboxd.v1.TruncationR\n" +
 	"truncation2L\n" +
 	"\vExecService\x12=\n" +
-	"\x04Exec\x12\x18.sandboxd.v1.ExecRequest\x1a\x19.sandboxd.v1.ExecResponse0\x01B\xad\x01\n" +
-	"\x0fcom.sandboxd.v1B\tExecProtoP\x01ZBgithub.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
+	"\x04Exec\x12\x18.sandboxd.v1.ExecRequest\x1a\x19.sandboxd.v1.ExecResponse0\x01B\xaa\x01\n" +
+	"\x0fcom.sandboxd.v1B\tExecProtoP\x01Z?github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
 
 var (
 	file_sandboxd_v1_exec_proto_rawDescOnce sync.Once

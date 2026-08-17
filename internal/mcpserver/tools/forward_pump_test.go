@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // The half-close contract, asserted on the pump rather than through a live
@@ -308,7 +308,7 @@ func TestCarry_ReleasesAConnectionWhoseLocalClientDied(t *testing.T) {
 // had closed itself.
 func TestForwardKey_StopCallNamesTheHostThatIsPartOfTheKey(t *testing.T) {
 	loopback := forwardKey{sandbox: "build-box", remotePort: 3000}
-	assert.Equal(t, "sandbox_forward(remote_port=3000, stop=true)", loopback.stopCall())
+	assert.Equal(t, "fleet_forward(remote_port=3000, stop=true)", loopback.stopCall())
 
 	named := forwardKey{sandbox: "build-box", remoteHost: "db.internal", remotePort: 5432}
 	assert.Contains(t, named.stopCall(), "remote_host")
@@ -421,8 +421,8 @@ func (l *alwaysFailingListener) Accept() (net.Conn, error) {
 // once.
 //
 // activeForward.close closes the listener, cancels, and then joins — so a
-// backoff that only waited out its timer would hold sandbox_forward(stop=true),
-// sandbox_remove and the MCP server's own shutdown for up to the cap, on a
+// backoff that only waited out its timer would hold fleet_forward(stop=true),
+// fleet_remove and the MCP server's own shutdown for up to the cap, on a
 // listener that has already been closed. The retry is what makes a transient
 // failure survivable; the cancellation is what stops it making teardown wait.
 func TestAcceptLoop_TearingDownDuringABackoffReturnsAtOnce(t *testing.T) {
@@ -459,7 +459,7 @@ func TestAcceptLoop_TearingDownDuringABackoffReturnsAtOnce(t *testing.T) {
 // ------------------------------------------------------------ the listing
 
 // The manager tears down a whole sandbox's forwards together, which is what
-// sandbox_remove needs: a forward whose sandbox has been deregistered points at
+// fleet_remove needs: a forward whose sandbox has been deregistered points at
 // a channel this server has closed.
 func TestForwardManager_StopForSandboxClosesOnlyThatSandboxesForwards(t *testing.T) {
 	m := newForwardManager(slog.New(slog.DiscardHandler))

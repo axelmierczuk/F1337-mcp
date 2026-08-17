@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/fsutil"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 )
 
 // schemaVersion is bumped when the on-disk shape changes incompatibly.
@@ -325,7 +325,7 @@ func (r *Registry) ClearSelection(clientID string) error {
 // sandboxName, returning how many were cleared.
 //
 // Selections are keyed by client identity, so deregistering a sandbox has to
-// reach all of them: the client that ran sandbox_remove is rarely the only
+// reach all of them: the client that ran fleet_remove is rarely the only
 // one that had it selected, and a selection left pointing at a sandbox that
 // no longer exists is worse than no selection at all. Callers should clear
 // before removing, so the intermediate state is "registered but unselected"

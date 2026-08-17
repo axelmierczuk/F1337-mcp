@@ -13,8 +13,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	agentfs "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"
 )
 
 func grep(t *testing.T, svc *agentfs.Service, req *sandboxdv1.GrepRequest) *fakeGrepStream {

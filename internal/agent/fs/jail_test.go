@@ -11,10 +11,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	agentfs "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
 )
 
 // call names one RPC and the request that reaches outside, so every RPC in the
@@ -154,7 +154,7 @@ func TestNew_RequiresAJail(t *testing.T) {
 }
 
 // FileService is registered with every daemon that links this package, which is
-// what the import in internal/cli/sandboxdagent/services.go relies on.
+// what the import in internal/cli/fleetagent/services.go relies on.
 func TestService_IsRegisteredWithTheDaemon(t *testing.T) {
 	names := make([]string, 0)
 	for _, reg := range agent.Registered() {

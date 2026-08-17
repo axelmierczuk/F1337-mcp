@@ -11,8 +11,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 // TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines is the running
@@ -29,7 +29,7 @@ func TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines(t *testing.T) {
 	dir := t.TempDir()
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
-	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
 
@@ -59,7 +59,7 @@ func TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines(t *testing.T) {
 
 		// 127.0.0.1:1 is closed, so the call reaches the pool and fails there
 		// rather than at the credentials: the pool is genuinely built.
-		callTool(t, session, "sandbox_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
+		callTool(t, session, "fleet_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
 
 		var wg sync.WaitGroup
 		for range 4 {
@@ -70,7 +70,7 @@ func TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines(t *testing.T) {
 				// depends on where it was when Close landed, and both are
 				// correct. What is asserted is what is left behind.
 				_, _ = session.CallTool(t.Context(), &mcp.CallToolParams{
-					Name: "sandbox_info", Arguments: map[string]any{"sandbox": "closed"},
+					Name: "fleet_info", Arguments: map[string]any{"sandbox": "closed"},
 				})
 			}()
 		}

@@ -14,8 +14,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	agentfs "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"
 )
 
 func readAll(t *testing.T, svc *agentfs.Service, req *sandboxdv1.ReadFileRequest) *fakeReadStream {
@@ -328,7 +328,7 @@ func writeLargeFile(t *testing.T, path string, size int) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, f.Close()) }()
 
-	block := []byte(strings.Repeat("sandboxd streams this file rather than buffering it.\n", 512))
+	block := []byte(strings.Repeat("fleet streams this file rather than buffering it.\n", 512))
 	for written := 0; written < size; {
 		n := min(len(block), size-written)
 		m, err := f.Write(block[:n])

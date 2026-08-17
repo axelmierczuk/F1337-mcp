@@ -35,7 +35,7 @@ import (
 // helperEnv marks a copy of this binary that was started as a helper rather
 // than as a test run. It is read before flag.Parse, so the helper's own
 // arguments never reach the testing package's flag set.
-const helperEnv = "SANDBOXD_PLATFORM_TEST_HELPER"
+const helperEnv = "FLEET_PLATFORM_TEST_HELPER"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(helperEnv) != "" {

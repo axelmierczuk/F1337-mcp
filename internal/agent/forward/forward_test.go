@@ -24,9 +24,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // These drive ForwardService directly over a gRPC connection, which is the
@@ -401,7 +401,7 @@ func TestForward_ADeadPortIsReportedAsAFailedOpen(t *testing.T) {
 	require.NotNil(t, opened)
 	assert.False(t, opened.GetSuccess())
 	assert.Contains(t, opened.GetError(), strconv.Itoa(dead))
-	assert.Contains(t, opened.GetError(), "sandbox_process_list",
+	assert.Contains(t, opened.GetError(), "fleet_process_list",
 		"the message should say how to check what is listening")
 }
 

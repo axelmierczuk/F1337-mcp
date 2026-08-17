@@ -16,13 +16,13 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 )
 
 // Five tools, not one action-dispatched tool.
 //
-// A single sandbox_process(action=…) call would need a union-typed argument
+// A single fleet_process(action=…) call would need a union-typed argument
 // object: argv and ready_probe are meaningless for a signal, signal and
 // grace_seconds are meaningless for a start, and process_id is required for
 // four of the five and forbidden for the fifth. That is precisely the shape
@@ -91,7 +91,7 @@ func gracePeriodFor(graceSeconds int) time.Duration {
 	return defaultGraceSeconds * time.Second
 }
 
-// signalDeadline bounds a sandbox_process_signal call.
+// signalDeadline bounds a fleet_process_signal call.
 //
 // A graceful stop blocks on the agent for the whole grace period before it
 // answers, so the deadline has to clear it. Anything else answers immediately
@@ -103,7 +103,7 @@ func signalDeadline(gracefulStop bool, graceSeconds int, callTimeout time.Durati
 	return max(callTimeout, gracePeriodFor(graceSeconds)+followSlack)
 }
 
-// probeAdvice is the one sentence in sandbox_process_start's description that
+// probeAdvice is the one sentence in fleet_process_start's description that
 // prevents a class of "the server is broken" misdiagnoses. A dev server that
 // takes eight seconds to bind refuses the connection a model makes one second
 // after "started", and the model concludes the server is broken rather than
@@ -113,21 +113,21 @@ const probeAdvice = "Strongly recommended: pass ready_probe (usually tcp_port fo
 // registerProcess adds the five background-process tools.
 func registerProcess(r *Registrar) {
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_process_start",
+		Name:  "fleet_process_start",
 		Title: "Start a background process",
-		Description: "Spawn a supervised background process on the sandbox — a dev server, watcher, or worker — that keeps running after this call returns and outlives the MCP session. Use sandbox_exec for a command that should run to completion. " +
+		Description: "Spawn a supervised background process on the sandbox — a dev server, watcher, or worker — that keeps running after this call returns and outlives the MCP session. Use fleet_exec for a command that should run to completion. " +
 			probeAdvice + " With a probe set, this call waits for it to pass unless wait_for_ready is explicitly false; if the probe times out the process is left running and ready_error plus its recent logs come back so you can see why.",
 	}, r.processStart)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:        "sandbox_process_list",
+		Name:        "fleet_process_list",
 		Title:       "List background processes",
 		Description: "List every process the sandbox's agent is tracking, including ones that have exited but not been reaped. Returns a compact table with state, name, pid, uptime, restart count, listening ports and the last output line, so the fleet's processes can be understood without a logs call per process.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, r.processList)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_process_logs",
+		Name:  "fleet_process_logs",
 		Title: "Read background process logs",
 		Description: "Read a supervised process's buffered output, optionally following new output. Following is always bounded by follow_seconds (the agent clamps it to its own maximum), so this call always returns. " +
 			"Lines the process wrote to stderr are prefixed \"E| \" and lines the supervisor itself wrote — a restart, a backoff, an adoption note — are prefixed \"S| \"; stdout is unprefixed. A gap caused by the process outrunning the log buffer is marked inline.",
@@ -135,7 +135,7 @@ func registerProcess(r *Registrar) {
 	}, r.processLogs)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_process_signal",
+		Name:  "fleet_process_signal",
 		Title: "Signal a background process",
 		Description: "Send a signal to a supervised process, or stop it gracefully with graceful_stop (SIGTERM, wait grace_seconds, then SIGKILL) — the result reports whether it had to escalate to SIGKILL. " +
 			"Signals reach the whole process group by default, because signalling only the leader routinely leaves orphans holding the port. Set disable_restart when stopping a process whose restart policy would otherwise bring it straight back.",
@@ -143,7 +143,7 @@ func registerProcess(r *Registrar) {
 	}, r.processSignal)
 
 	AddTargeted(r, &mcp.Tool{
-		Name:        "sandbox_process_restart",
+		Name:        "fleet_process_restart",
 		Title:       "Restart a background process",
 		Description: "Stop a supervised process and start it again from the same spec, keeping its process id and its log history. Waits for the readiness probe to pass again when the process has one, unless wait_for_ready is explicitly false.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
@@ -152,7 +152,7 @@ func registerProcess(r *Registrar) {
 
 // ---------------------------------------------------------------- shared
 
-// ProcessLine is one row of sandbox_process_list.
+// ProcessLine is one row of fleet_process_list.
 //
 // Every field but the identifiers is omitempty: twenty of these are paid for
 // on every list call, and a field that says nothing should cost nothing.
@@ -359,7 +359,7 @@ func (r *Registrar) processCallError(ctx context.Context, target *selection.Targ
 	known := r.knownProcesses(ctx, target, client)
 	switch {
 	case len(known) == 0:
-		return fmt.Errorf("sandbox %s is tracking no process with id %q, and no processes at all. Start one with sandbox_process_start",
+		return fmt.Errorf("sandbox %s is tracking no process with id %q, and no processes at all. Start one with fleet_process_start",
 			target.Name(), processID)
 	default:
 		return fmt.Errorf("sandbox %s is tracking no process with id %q. Tracked process ids: %s",
@@ -482,7 +482,7 @@ func secondsToDuration(s float64) time.Duration {
 	return time.Duration(s * float64(time.Second))
 }
 
-// ProcessStartArgs are the arguments to sandbox_process_start.
+// ProcessStartArgs are the arguments to fleet_process_start.
 type ProcessStartArgs struct {
 	TargetArgs
 	// Argv is the executable and its arguments. Not shell-parsed.
@@ -506,7 +506,7 @@ type ProcessStartArgs struct {
 	ReplaceExisting bool `json:"replace_existing,omitempty" jsonschema:"stop and replace a still-running process that already has this name"`
 }
 
-// ProcessStartResult is the sandbox_process_start result.
+// ProcessStartResult is the fleet_process_start result.
 type ProcessStartResult struct {
 	// Echo carries the sandbox this started on.
 	Echo
@@ -593,7 +593,7 @@ func (r *Registrar) processStart(ctx context.Context, _ *mcp.CallToolRequest, ta
 	case probe == nil:
 		out.Note = "No ready probe was configured, so this process is spawned but not known to be usable. " + probeAdvice
 	case !wait:
-		out.Note = "Started without waiting: wait_for_ready was false, so the probe result is not in yet. Call sandbox_process_list to see whether the state has reached \"ready\"."
+		out.Note = "Started without waiting: wait_for_ready was false, so the probe result is not in yet. Call fleet_process_list to see whether the state has reached \"ready\"."
 	case resp.GetReadyError() != "":
 		out.Ready = boolPtr(false)
 		out.ReadyError = resp.GetReadyError()
@@ -601,7 +601,7 @@ func (r *Registrar) processStart(ctx context.Context, _ *mcp.CallToolRequest, ta
 		// the caller only that something is wrong, and its next move is always
 		// a logs call — so make it unnecessary.
 		out.RecentLogs = r.recentLogs(ctx, target, client, st.GetProcessId())
-		out.Note = fmt.Sprintf("The readiness probe did not pass, and the process is deliberately left running so its logs can be read. Stop it with sandbox_process_signal(process_id=%q, graceful_stop=true, disable_restart=true) if it is not going to recover.",
+		out.Note = fmt.Sprintf("The readiness probe did not pass, and the process is deliberately left running so its logs can be read. Stop it with fleet_process_signal(process_id=%q, graceful_stop=true, disable_restart=true) if it is not going to recover.",
 			st.GetProcessId())
 	default:
 		out.Ready = boolPtr(true)
@@ -666,7 +666,7 @@ func (r *Registrar) recentLogs(ctx context.Context, target *selection.Target, cl
 
 // ----------------------------------------------------------------- list
 
-// ProcessListArgs are the arguments to sandbox_process_list.
+// ProcessListArgs are the arguments to fleet_process_list.
 type ProcessListArgs struct {
 	TargetArgs
 	// States filters by state.
@@ -675,7 +675,7 @@ type ProcessListArgs struct {
 	NamePattern string `json:"name_pattern,omitempty" jsonschema:"only list processes whose name matches this RE2 pattern"`
 }
 
-// ProcessListResult is the sandbox_process_list result.
+// ProcessListResult is the fleet_process_list result.
 type ProcessListResult struct {
 	// Echo carries the sandbox this listing came from.
 	Echo
@@ -727,9 +727,9 @@ func (r *Registrar) processList(ctx context.Context, _ *mcp.CallToolRequest, tar
 
 	switch {
 	case len(out.Processes) == 0 && (len(in.States) > 0 || in.NamePattern != ""):
-		out.Hint = "No process matches that filter. Call sandbox_process_list with no filter to see everything the agent is tracking."
+		out.Hint = "No process matches that filter. Call fleet_process_list with no filter to see everything the agent is tracking."
 	case len(out.Processes) == 0:
-		out.Hint = "The agent is tracking no processes. Start one with sandbox_process_start."
+		out.Hint = "The agent is tracking no processes. Start one with fleet_process_start."
 	}
 	return out, nil
 }
@@ -858,11 +858,11 @@ func writeRow(b *strings.Builder, cells []string, widths []int) {
 
 // ----------------------------------------------------------------- logs
 
-// ProcessLogsArgs are the arguments to sandbox_process_logs.
+// ProcessLogsArgs are the arguments to fleet_process_logs.
 type ProcessLogsArgs struct {
 	TargetArgs
 	// ProcessID names the process.
-	ProcessID string `json:"process_id" jsonschema:"process id from sandbox_process_start or sandbox_process_list"`
+	ProcessID string `json:"process_id" jsonschema:"process id from fleet_process_start or fleet_process_list"`
 	// Stream selects stdout, stderr, or both.
 	Stream string `json:"stream,omitempty" jsonschema:"stdout, stderr, or both (default). Lines the supervisor itself wrote are returned only for \"both\""`
 	// TailLines returns only the last N lines.
@@ -877,7 +877,7 @@ type ProcessLogsArgs struct {
 	FollowSeconds int `json:"follow_seconds,omitempty" jsonschema:"how long to follow for, in seconds; defaults to 20 and is clamped to the agent's maximum. Following is always bounded"`
 }
 
-// ProcessLogsResult is the sandbox_process_logs result.
+// ProcessLogsResult is the fleet_process_logs result.
 type ProcessLogsResult struct {
 	// Echo carries the sandbox these logs came from.
 	Echo
@@ -912,7 +912,7 @@ type LogTruncation struct {
 
 func (r *Registrar) processLogs(ctx context.Context, _ *mcp.CallToolRequest, target *selection.Target, in ProcessLogsArgs) (ProcessLogsResult, error) {
 	if strings.TrimSpace(in.ProcessID) == "" {
-		return ProcessLogsResult{}, errors.New("process_id is required; sandbox_process_list reports the ids the agent is tracking")
+		return ProcessLogsResult{}, errors.New("process_id is required; fleet_process_list reports the ids the agent is tracking")
 	}
 	stream, err := parseStream(in.Stream)
 	if err != nil {
@@ -1134,11 +1134,11 @@ func renderLogLine(line *sandboxdv1.LogLine) string {
 
 // --------------------------------------------------------------- signal
 
-// ProcessSignalArgs are the arguments to sandbox_process_signal.
+// ProcessSignalArgs are the arguments to fleet_process_signal.
 type ProcessSignalArgs struct {
 	TargetArgs
 	// ProcessID names the process.
-	ProcessID string `json:"process_id" jsonschema:"process id from sandbox_process_start or sandbox_process_list"`
+	ProcessID string `json:"process_id" jsonschema:"process id from fleet_process_start or fleet_process_list"`
 	// Signal is the portable signal name.
 	Signal string `json:"signal,omitempty" jsonschema:"TERM, KILL, INT, HUP, USR1 or USR2. Ignored when graceful_stop is set"`
 	// GracefulStop asks for TERM, wait, KILL.
@@ -1151,7 +1151,7 @@ type ProcessSignalArgs struct {
 	DisableRestart bool `json:"disable_restart,omitempty" jsonschema:"suppress the restart policy for this stop, so an intentional stop is not immediately undone"`
 }
 
-// ProcessSignalResult is the sandbox_process_signal result.
+// ProcessSignalResult is the fleet_process_signal result.
 type ProcessSignalResult struct {
 	// Echo carries the sandbox this ran on.
 	Echo
@@ -1167,7 +1167,7 @@ type ProcessSignalResult struct {
 
 func (r *Registrar) processSignal(ctx context.Context, _ *mcp.CallToolRequest, target *selection.Target, in ProcessSignalArgs) (ProcessSignalResult, error) {
 	if strings.TrimSpace(in.ProcessID) == "" {
-		return ProcessSignalResult{}, errors.New("process_id is required; sandbox_process_list reports the ids the agent is tracking")
+		return ProcessSignalResult{}, errors.New("process_id is required; fleet_process_list reports the ids the agent is tracking")
 	}
 	if in.GraceSeconds < 0 {
 		return ProcessSignalResult{}, fmt.Errorf("grace_seconds %d is negative", in.GraceSeconds)
@@ -1245,11 +1245,11 @@ func parseSignal(s string) (sandboxdv1.SignalProcessRequest_Signal, error) {
 
 // -------------------------------------------------------------- restart
 
-// ProcessRestartArgs are the arguments to sandbox_process_restart.
+// ProcessRestartArgs are the arguments to fleet_process_restart.
 type ProcessRestartArgs struct {
 	TargetArgs
 	// ProcessID names the process.
-	ProcessID string `json:"process_id" jsonschema:"process id from sandbox_process_start or sandbox_process_list"`
+	ProcessID string `json:"process_id" jsonschema:"process id from fleet_process_start or fleet_process_list"`
 	// GraceSeconds is how long to wait before escalating the stop half.
 	GraceSeconds int `json:"grace_seconds,omitempty" jsonschema:"how long to wait after SIGTERM before escalating to SIGKILL while stopping; zero means the agent default"`
 	// WaitForReady blocks until the probe passes again. Unset means "yes, if
@@ -1259,7 +1259,7 @@ type ProcessRestartArgs struct {
 	ReadyTimeoutSeconds float64 `json:"ready_timeout_seconds,omitempty" jsonschema:"how long the readiness probe may take after the restart; defaults to 30, the agent's own probe default. Set it to the ready_probe.timeout_seconds this process was started with if that was longer, or this call gives up before the agent does"`
 }
 
-// ProcessRestartResult is the sandbox_process_restart result.
+// ProcessRestartResult is the fleet_process_restart result.
 type ProcessRestartResult struct {
 	// Echo carries the sandbox this ran on.
 	Echo
@@ -1279,7 +1279,7 @@ type ProcessRestartResult struct {
 
 func (r *Registrar) processRestart(ctx context.Context, _ *mcp.CallToolRequest, target *selection.Target, in ProcessRestartArgs) (ProcessRestartResult, error) {
 	if strings.TrimSpace(in.ProcessID) == "" {
-		return ProcessRestartResult{}, errors.New("process_id is required; sandbox_process_list reports the ids the agent is tracking")
+		return ProcessRestartResult{}, errors.New("process_id is required; fleet_process_list reports the ids the agent is tracking")
 	}
 	if in.GraceSeconds < 0 {
 		return ProcessRestartResult{}, fmt.Errorf("grace_seconds %d is negative", in.GraceSeconds)

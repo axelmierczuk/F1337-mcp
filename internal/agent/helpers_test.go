@@ -25,10 +25,10 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 )
 
 // testFleet is a real fleet CA plus the leaves an agent and a control plane
@@ -91,11 +91,11 @@ func (f *testFleet) config(t *testing.T, execEnabled bool, roots ...string) *age
 	return cfg
 }
 
-// controlLeaf issues the leaf sandboxd-mcp presents. The common name is
+// controlLeaf issues the leaf fleet-mcp presents. The common name is
 // fixed: it is the principal every test that checks authentication asserts on.
 func (f *testFleet) controlLeaf() (certPEM, keyPEM []byte) {
 	f.t.Helper()
-	return f.sign(ca.ProfileControl, "sandboxd-mcp", nil)
+	return f.sign(ca.ProfileControl, "fleet-mcp", nil)
 }
 
 func (f *testFleet) agentLeaf(cn string) (certPEM, keyPEM []byte) {

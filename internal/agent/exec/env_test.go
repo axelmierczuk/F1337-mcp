@@ -40,7 +40,7 @@ func TestBuildBaseEnv_CarriesTheAllowlistAndNothingElse(t *testing.T) {
 		// instead of inheriting one.
 		"GITHUB_TOKEN":          credential,
 		"AWS_SECRET_ACCESS_KEY": credential,
-		"SANDBOXD_ENROLL_TOKEN": credential,
+		"FLEET_ENROLL_TOKEN":    credential,
 		"NPM_TOKEN":             credential,
 		"SSH_AUTH_SOCK":         "/tmp/ssh-agent.sock",
 		"USER":                  "whoever-installed-the-service",

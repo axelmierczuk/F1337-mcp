@@ -7,7 +7,7 @@
               │  JSON-RPC over stdio
               ▼
    ┌──────────────────────────────────────┐
-   │ sandboxd-mcp                         │
+   │ fleet-mcp                            │
    │   internal/mcpserver/tools           │  tool handlers
    │   internal/mcpserver/selection       │  which sandbox does this call target
    │   internal/registry                  │  fleet inventory, sticky default
@@ -16,7 +16,7 @@
               │  gRPC / mTLS  (:8722)
               ▼
    ┌──────────────────────────────────────┐
-   │ sandboxd-agent                       │
+   │ fleet-agent                          │
    │   internal/agent/host                │  HostService
    │   internal/agent/exec                │  ExecService
    │   internal/agent/fs                  │  FileService
@@ -27,13 +27,13 @@
    └──────────────────────────────────────┘
 
    ┌──────────────────────────────────────┐
-   │ sandboxctl                (:9443)    │
+   │ fleetctl                (:9443)      │
    │   internal/security/ca               │  CA, signing, rotation
    │   internal/security/enroll           │  EnrollmentService, tokens
    └──────────────────────────────────────┘
 ```
 
-`sandboxctl` is a separate control plane rather than a subcommand of the MCP
+`fleetctl` is a separate control plane rather than a subcommand of the MCP
 server for one reason: the MCP server is a process a model can reach. The CA
 signing key must not be.
 
@@ -49,27 +49,27 @@ through every subsequent call, and it will eventually drop it. A pure implicit
 design is usable and incorrect: it breaks with concurrent clients and cannot
 survive a restart.
 
-`sandboxd` resolves the target in a fixed order:
+`fleet` resolves the target in a fixed order:
 
 1. The call's explicit `sandbox` argument, if present. Always wins.
 2. The sticky default recorded for the calling client identity (taken from
    `_meta`), persisted in the registry.
 3. Otherwise: a structured error listing available sandboxes and instructing the
-   model to call `sandbox_select`.
+   model to call `fleet_select`.
 
-`sandbox_select` sets (2) and returns a handle usable as (1).
+`fleet_select` sets (2) and returns a handle usable as (1).
 
 There is deliberately no fourth rule. A fleet of exactly one sandbox does not
 resolve implicitly either: a fleet grows from one to two without anyone
 revisiting the calls written while it had one member.
 
-**Client identity** is taken from `_meta`, in order: the `io.sandboxd/clientId`
+**Client identity** is taken from `_meta`, in order: the `io.fleet/clientId`
 key, if the client sets one; otherwise the client implementation name, which
 protocol `2026-07-28` carries in `_meta` as
 `io.modelcontextprotocol/clientInfo`; otherwise a per-process fallback. Keying
 on the name rather than name-and-version means upgrading a client does not
 silently drop its selection. A client that runs several concurrent sessions and
-wants each to hold its own target sets `io.sandboxd/clientId`.
+wants each to hold its own target sets `io.fleet/clientId`.
 
 A selection made under the per-process fallback is held in memory and never
 written to the registry. The fallback is `process:<pid>`, and a pid is reused:
@@ -86,7 +86,7 @@ opaque enough that a model cannot construct one for a sandbox it was never
 given.
 
 A reference carrying the `sbx_` prefix resolves as a handle first and only then
-as a name. `sandbox_add` refuses to register a name with that prefix, but it is
+as a name. `fleet_add` refuses to register a name with that prefix, but it is
 not the only way a name reaches the registry: an enrollment token that reserves
 no name lets the enrolling host choose its own. Matching names first would let
 such a host name itself after another sandbox's handle and receive every call
@@ -204,7 +204,7 @@ The order matters. Rejecting `..` in the requested path before resolution is the
 classic mistake: a symlink inside the jail pointing outside it walks straight
 through that check.
 
-`sandbox_edit` deliberately mirrors the exact-match, uniqueness-enforcing
+`fleet_edit` deliberately mirrors the exact-match, uniqueness-enforcing
 contract of the agent's built-in edit tool. Matching that contract is what makes
 the remote tool feel native, and the uniqueness requirement is what stops an
 ambiguous match from silently editing the wrong line.

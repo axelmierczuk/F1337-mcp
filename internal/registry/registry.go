@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/axelmierczuk/fleet-mcp/internal/legacypath"
 )
 
 // ErrNotFound is returned when a sandbox or selection does not exist.
@@ -50,36 +52,54 @@ type Sandbox struct {
 	AgentVersion string `json:"agent_version,omitempty" yaml:"agent_version,omitempty"`
 }
 
-// ConfigDir resolves the directory sandboxd persists its config under:
+// EnvConfigDir names the environment variable holding an explicit config
+// directory.
+const EnvConfigDir = "FLEET_CONFIG_DIR"
+
+// LegacyEnvConfigDir is what EnvConfigDir was called before the fleet rebrand.
+// It is still honoured when it is the only one set; see internal/legacypath.
+const LegacyEnvConfigDir = "SANDBOXD_CONFIG_DIR"
+
+// ConfigDir resolves the directory fleet persists its config under:
 //
-//  1. $SANDBOXD_CONFIG_DIR, if set.
-//  2. $XDG_CONFIG_HOME/sandboxd, if XDG_CONFIG_HOME is set (Unix).
-//  3. %APPDATA%\sandboxd (Windows).
-//  4. ~/.config/sandboxd (everywhere else).
+//  1. $FLEET_CONFIG_DIR, if set.
+//  2. $XDG_CONFIG_HOME/fleet, if XDG_CONFIG_HOME is set (Unix).
+//  3. %APPDATA%\fleet (Windows).
+//  4. ~/.config/fleet (everywhere else).
+//
+// Each of those was called "sandboxd" before the rebrand. A host that enrolled
+// under the old name keeps its registry and credentials there, so the
+// deprecated variable is honoured when it is the only one set, and the old
+// directory is used when it holds something and the new one does not.
+// internal/legacypath has the full rule and does the logging.
 func ConfigDir() (string, error) {
-	if dir := os.Getenv("SANDBOXD_CONFIG_DIR"); dir != "" {
+	if dir := legacypath.Env(EnvConfigDir, LegacyEnvConfigDir); dir != "" {
 		return dir, nil
 	}
 
 	if runtime.GOOS == "windows" {
 		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "sandboxd"), nil
+			return legacypath.Dir(filepath.Join(appData, "fleet"), filepath.Join(appData, "sandboxd")), nil
 		}
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("registry: resolve home directory: %w", err)
 		}
-		return filepath.Join(home, "AppData", "Roaming", "sandboxd"), nil
+		roaming := filepath.Join(home, "AppData", "Roaming")
+		return legacypath.Dir(filepath.Join(roaming, "fleet"), filepath.Join(roaming, "sandboxd")), nil
 	}
 
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "sandboxd"), nil
+		return legacypath.Dir(filepath.Join(xdg, "fleet"), filepath.Join(xdg, "sandboxd")), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("registry: resolve home directory: %w", err)
 	}
-	return filepath.Join(home, ".config", "sandboxd"), nil
+	return legacypath.Dir(
+		filepath.Join(home, ".config", "fleet"),
+		filepath.Join(home, ".config", "sandboxd"),
+	), nil
 }
 
 // DefaultPath returns the path to the registry file inside ConfigDir().

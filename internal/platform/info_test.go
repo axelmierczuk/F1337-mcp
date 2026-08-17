@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 func TestDescribe(t *testing.T) {
@@ -20,7 +20,7 @@ func TestDescribe(t *testing.T) {
 
 	// Both are best effort and documented as possibly empty, but on the three
 	// platforms the agent supports they are not, and a silent regression to
-	// empty would show up in sandbox_list as a nameless host.
+	// empty would show up in fleet_list as a nameless host.
 	require.NotEmpty(t, info.Hostname)
 	require.NotEmpty(t, info.KernelVersion)
 

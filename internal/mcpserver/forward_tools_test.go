@@ -23,8 +23,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // The agent under test runs in this process, so "the sandbox's loopback" is
@@ -40,7 +40,7 @@ func TestForward_ReachesARemoteHTTPServerOverLocalhost(t *testing.T) {
 	const body = "the response body from the sandbox"
 	remote := startHTTPServer(t, body)
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 	})
 	require.NotEmpty(t, out.LocalAddress)
@@ -65,7 +65,7 @@ func TestForward_ZeroLocalPortAllocatesAUsablePort(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "allocated")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"local_port":  0,
 	})
@@ -82,7 +82,7 @@ func TestForward_HonoursAnExplicitLocalPort(t *testing.T) {
 	remote := startHTTPServer(t, "explicit")
 	want := freePort(t)
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"local_port":  want,
 	})
@@ -96,7 +96,7 @@ func TestForward_CarriesManyConcurrentConnections(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "concurrent")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 	url := "http://" + out.LocalAddress + "/"
 
 	const n = 24
@@ -126,7 +126,7 @@ func TestForward_CarriesManyConcurrentConnections(t *testing.T) {
 
 	// The forward counts what went through it, so a later call can see it is
 	// carrying traffic rather than merely open.
-	after := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	after := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 	require.Len(t, after.Active, 1)
 	assert.GreaterOrEqual(t, after.Active[0].Connections, uint64(n))
 	assert.True(t, after.Existing, "a second call for the same port reuses the forward rather than opening another")
@@ -139,7 +139,7 @@ func TestForward_StreamsALargeTransferWithoutBufferingIt(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 
 	conn, err := net.DialTimeout("tcp", out.LocalAddress, 5*time.Second)
 	require.NoError(t, err)
@@ -187,7 +187,7 @@ func TestForward_HalfCloseInEachDirectionIsIndependent(t *testing.T) {
 	// travelled and that the read direction survived it.
 	remote := startReadThenReplyServer(t, "answered after EOF")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 
 	conn, err := net.DialTimeout("tcp", out.LocalAddress, 5*time.Second)
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestForward_RemoteCloseGivesTheLocalClientACleanEOF(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startGreetThenCloseServer(t, "goodbye")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 
 	conn, err := net.DialTimeout("tcp", out.LocalAddress, 5*time.Second)
 	require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestForward_ClientCanStillSendAfterTheRemoteHalfCloses(t *testing.T) {
 		bodies <- string(body)
 	})
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 
 	conn, err := net.DialTimeout("tcp", out.LocalAddress, 5*time.Second)
 	require.NoError(t, err)
@@ -282,14 +282,14 @@ func TestForward_SurvivesUnrelatedToolCalls(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "still here")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 	url := "http://" + out.LocalAddress + "/"
 	assert.Equal(t, "still here", httpGet(t, url))
 
 	// Several unrelated calls, including ones that start and stop processes.
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("unrelated", "silent"))
-	liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{})
-	liveOK[tools.ProcessLogsResult](f, "sandbox_process_logs", map[string]any{"process_id": started.Process.ProcessID})
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("unrelated", "silent"))
+	liveOK[tools.ProcessListResult](f, "fleet_process_list", map[string]any{})
+	liveOK[tools.ProcessLogsResult](f, "fleet_process_logs", map[string]any{"process_id": started.Process.ProcessID})
 	stop(t, f, started.Process.ProcessID)
 
 	assert.Equal(t, "still here", httpGet(t, url), "the forward must outlive the call that opened it")
@@ -299,7 +299,7 @@ func TestForward_StopClosesTheListenerAndDropsConnections(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 
 	// A connection in flight when the forward is torn down.
 	inFlight, err := net.DialTimeout("tcp", out.LocalAddress, 5*time.Second)
@@ -312,7 +312,7 @@ func TestForward_StopClosesTheListenerAndDropsConnections(t *testing.T) {
 	_, err = io.ReadFull(inFlight, echo)
 	require.NoError(t, err)
 
-	stopped := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	stopped := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"stop":        true,
 	})
@@ -340,7 +340,7 @@ func TestForward_TheStopCallItSuggestsActuallyStopsIt(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{forwardAllowedHosts: []string{"localhost"}})
 	remote := startHTTPServer(t, "named host")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"remote_host": "localhost",
 	})
@@ -349,11 +349,11 @@ func TestForward_TheStopCallItSuggestsActuallyStopsIt(t *testing.T) {
 		"a forward whose key carries a remote_host must say so in the call that stops it")
 
 	// The suggestion without it does not work, and is not what was suggested.
-	msg := f.liveFails("sandbox_forward", map[string]any{"remote_port": remote.port, "stop": true})
+	msg := f.liveFails("fleet_forward", map[string]any{"remote_port": remote.port, "stop": true})
 	assert.Contains(t, msg, "no forward is open")
 
 	// The suggestion as given does.
-	stopped := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	stopped := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"remote_host": "localhost",
 		"stop":        true,
@@ -370,10 +370,10 @@ func TestForward_RemovingTheSandboxClosesItsForwards(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "about to go")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 	require.Equal(t, "about to go", httpGet(t, "http://"+out.LocalAddress+"/"))
 
-	removed := liveOK[tools.RemoveResult](f, "sandbox_remove", map[string]any{"name": liveSandboxName})
+	removed := liveOK[tools.RemoveResult](f, "fleet_remove", map[string]any{"name": liveSandboxName})
 	assert.Contains(t, removed.ForwardsClosed, out.LocalAddress,
 		"the result must name the forwards it closed rather than leaving them to be discovered")
 	assert.Contains(t, removed.Note, "forward")
@@ -395,13 +395,13 @@ func TestForward_RemovingTheSandboxClosesItsForwards(t *testing.T) {
 // every connection it takes opens a stream on a channel that has just closed:
 // the accepts-and-then-drops symptom, produced in the middle of the code that
 // exists to prevent it, and reached by every connection that arrives while
-// sandbox_remove is running. The window is small, which is exactly why it would
+// fleet_remove is running. The window is small, which is exactly why it would
 // be found by a user and not by a test that only checks the end state.
 func TestForward_RemovingTheSandboxClosesForwardsBeforeTheChannel(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "ordering")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 	require.Equal(t, "ordering", httpGet(t, "http://"+out.LocalAddress+"/"))
 
 	// Asked at the moment the channel is dropped: is the port the forward was
@@ -416,7 +416,7 @@ func TestForward_RemovingTheSandboxClosesForwardsBeforeTheChannel(t *testing.T) 
 		listenerClosedFirst = true
 	}
 
-	liveOK[tools.RemoveResult](f, "sandbox_remove", map[string]any{"name": liveSandboxName})
+	liveOK[tools.RemoveResult](f, "fleet_remove", map[string]any{"name": liveSandboxName})
 	assert.True(t, listenerClosedFirst,
 		"the forward's listener was still accepting when its channel was dropped, so a connection arriving then would be accepted onto a dead channel")
 }
@@ -425,14 +425,14 @@ func TestForward_StopWithNoSuchForwardListsWhatIsOpen(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "open")
 
-	opened := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	opened := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 
-	msg := f.liveFails("sandbox_forward", map[string]any{"remote_port": 65000, "stop": true})
+	msg := f.liveFails("fleet_forward", map[string]any{"remote_port": 65000, "stop": true})
 	assert.Contains(t, msg, "65000")
 	assert.Contains(t, msg, opened.LocalAddress, "the error must name the forwards that are open")
 
 	empty := newLiveFixture(t, liveAgentOptions{})
-	msg = empty.liveFails("sandbox_forward", map[string]any{"remote_port": 65000, "stop": true})
+	msg = empty.liveFails("fleet_forward", map[string]any{"remote_port": 65000, "stop": true})
 	assert.Contains(t, msg, "none are open at all")
 }
 
@@ -444,7 +444,7 @@ func TestForward_ServerCloseReleasesEveryLocalListener(t *testing.T) {
 	remote := startHTTPServer(t, "released")
 	localPort := freePort(t)
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"local_port":  localPort,
 	})
@@ -472,7 +472,7 @@ func TestForward_LocalListenerIsNotReachableFromAnotherInterface(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "loopback only")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 	host, _, err := net.SplitHostPort(out.LocalAddress)
 	require.NoError(t, err)
 	assert.Equal(t, "127.0.0.1", host, "the listener must bind loopback, never 0.0.0.0")
@@ -492,14 +492,14 @@ func TestForward_ClosedRemotePortIsAClearErrorNotAHangingListener(t *testing.T) 
 	f := newLiveFixture(t, liveAgentOptions{})
 	closed := freePort(t) // reserved and released: nothing is listening there
 
-	msg := f.liveFails("sandbox_forward", map[string]any{"remote_port": closed})
+	msg := f.liveFails("fleet_forward", map[string]any{"remote_port": closed})
 	assert.Contains(t, msg, strconv.Itoa(closed))
 	assert.Contains(t, msg, "could not reach")
-	assert.Contains(t, msg, "sandbox_process_list",
+	assert.Contains(t, msg, "fleet_process_list",
 		"the error should say how to check what is actually listening")
 
 	// And no listener was left behind for the model to connect to.
-	after := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	after := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": startHTTPServer(t, "x").port,
 	})
 	for _, active := range after.Active {
@@ -515,7 +515,7 @@ func TestForward_NonLoopbackRemoteHostIsRefusedByDefault(t *testing.T) {
 
 	// TEST-NET-1, which is reserved and routes nowhere: the point is that the
 	// refusal happens before anything is dialed.
-	msg := f.liveFails("sandbox_forward", map[string]any{
+	msg := f.liveFails("fleet_forward", map[string]any{
 		"remote_port": 8080,
 		"remote_host": "192.0.2.1",
 	})
@@ -526,7 +526,7 @@ func TestForward_NonLoopbackRemoteHostIsRefusedByDefault(t *testing.T) {
 func TestForward_NonLoopbackRemoteHostIsPermittedWhenConfigured(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{forwardAllowedHosts: []string{"192.0.2.1"}})
 
-	msg := f.liveFails("sandbox_forward", map[string]any{
+	msg := f.liveFails("fleet_forward", map[string]any{
 		"remote_port": 8080,
 		"remote_host": "192.0.2.1",
 	})
@@ -543,7 +543,7 @@ func TestForward_LocalhostByNameResolvesToLoopbackAndIsAllowed(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "by name")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"remote_host": "localhost",
 	})
@@ -554,15 +554,15 @@ func TestForward_DisabledAgentSaysSo(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{forwardDisabled: true})
 	remote := startHTTPServer(t, "unreachable")
 
-	msg := f.liveFails("sandbox_forward", map[string]any{"remote_port": remote.port})
+	msg := f.liveFails("fleet_forward", map[string]any{"remote_port": remote.port})
 	assert.Contains(t, msg, "disabled")
 }
 
 func TestForward_RejectsAnOutOfRangePort(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
-	assert.Contains(t, f.liveFails("sandbox_forward", map[string]any{"remote_port": 0}), "1-65535")
-	assert.Contains(t, f.liveFails("sandbox_forward", map[string]any{"remote_port": 70000}), "1-65535")
-	assert.Contains(t, f.liveFails("sandbox_forward", map[string]any{
+	assert.Contains(t, f.liveFails("fleet_forward", map[string]any{"remote_port": 0}), "1-65535")
+	assert.Contains(t, f.liveFails("fleet_forward", map[string]any{"remote_port": 70000}), "1-65535")
+	assert.Contains(t, f.liveFails("fleet_forward", map[string]any{
 		"remote_port": 3000, "local_port": -1,
 	}), "0-65535")
 }
@@ -571,9 +571,9 @@ func TestForward_ReopeningOnADifferentLocalPortSaysWhatToDo(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "already")
 
-	first := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	first := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 
-	msg := f.liveFails("sandbox_forward", map[string]any{
+	msg := f.liveFails("fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"local_port":  freePort(t),
 	})
@@ -595,7 +595,7 @@ func TestForward_NonLoopbackForwardIsAudited(t *testing.T) {
 	const body = "audited response"
 	remote := startHTTPServer(t, body)
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"remote_host": "localhost",
 	})
@@ -641,7 +641,7 @@ func TestForward_NonLoopbackForwardIsAudited(t *testing.T) {
 func TestForward_RefusedNonLoopbackForwardIsAudited(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 
-	msg := f.liveFails("sandbox_forward", map[string]any{
+	msg := f.liveFails("fleet_forward", map[string]any{
 		"remote_port": 8080,
 		"remote_host": "192.0.2.1",
 	})
@@ -668,7 +668,7 @@ func TestForward_LoopbackForwardIsNotAudited(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "not audited")
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 	require.Equal(t, "not audited", httpGet(t, "http://"+out.LocalAddress+"/"))
 
 	// Given time to be wrong: the assertion is that nothing arrives, so it
@@ -715,7 +715,7 @@ func TestForward_NoGoroutineLeakAcrossManyConnections(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
 
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remote.port})
 
 	// One connection first, so gRPC's own long-lived goroutines are in the
 	// baseline rather than counted as a leak.
@@ -740,7 +740,7 @@ func TestForward_NoGoroutineLeakAcrossManyConnections(t *testing.T) {
 	}
 	wg.Wait()
 
-	stopped := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+	stopped := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{
 		"remote_port": remote.port,
 		"stop":        true,
 	})
@@ -780,10 +780,10 @@ func TestForward_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
 	// listening. That is the shape where carry ends before either pump starts.
 	departing, stopDeparting := startStoppableServer(t)
 
-	echoForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": echo.port})
-	crashForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": crashing.port})
-	parkedForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": parked.port})
-	departedForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": departing.port})
+	echoForward := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": echo.port})
+	crashForward := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": crashing.port})
+	parkedForward := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": parked.port})
+	departedForward := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": departing.port})
 	stopDeparting()
 
 	// One of each first, so gRPC's own long-lived goroutines and the pool's own
@@ -912,7 +912,7 @@ func waitForNoOpenConnections(t *testing.T, f *liveFixture, remotePorts ...int) 
 // right now. A repeated call for an open forward reuses it, so this is a
 // question rather than an action.
 func openConnections(f *liveFixture, remotePort int) int {
-	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remotePort})
+	out := liveOK[tools.ForwardResult](f, "fleet_forward", map[string]any{"remote_port": remotePort})
 	for _, line := range out.Active {
 		if line.RemotePort == remotePort {
 			return line.OpenNow

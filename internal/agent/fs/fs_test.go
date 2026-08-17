@@ -16,9 +16,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	agentfs "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
 )
 
 // tempRoot returns a temp directory with its symlinks resolved.
@@ -82,7 +82,7 @@ func tempSiblings(t *testing.T, dir string) []string {
 	require.NoError(t, err)
 	var out []string
 	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".sandboxd-") && strings.HasSuffix(entry.Name(), ".tmp") {
+		if strings.Contains(entry.Name(), ".fleet-") && strings.HasSuffix(entry.Name(), ".tmp") {
 			out = append(out, entry.Name())
 		}
 	}

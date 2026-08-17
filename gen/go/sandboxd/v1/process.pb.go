@@ -570,7 +570,7 @@ type ProcessStatus struct {
 	// Number of times the supervisor has restarted this process.
 	RestartCount  uint32        `protobuf:"varint,11,opt,name=restart_count,json=restartCount,proto3" json:"restart_count,omitempty"`
 	RestartPolicy RestartPolicy `protobuf:"varint,12,opt,name=restart_policy,json=restartPolicy,proto3,enum=sandboxd.v1.RestartPolicy" json:"restart_policy,omitempty"`
-	// Most recent output line, so sandbox_process_list is useful on its own
+	// Most recent output line, so fleet_process_list is useful on its own
 	// without a follow-up logs call for every process.
 	LastLogLine string `protobuf:"bytes,13,opt,name=last_log_line,json=lastLogLine,proto3" json:"last_log_line,omitempty"`
 	// Total bytes of output captured since the process last started.
@@ -1675,8 +1675,8 @@ const file_sandboxd_v1_process_proto_rawDesc = "" +
 	"\x0eGetProcessLogs\x12\".sandboxd.v1.GetProcessLogsRequest\x1a#.sandboxd.v1.GetProcessLogsResponse0\x01\x12V\n" +
 	"\rSignalProcess\x12!.sandboxd.v1.SignalProcessRequest\x1a\".sandboxd.v1.SignalProcessResponse\x12Y\n" +
 	"\x0eRestartProcess\x12\".sandboxd.v1.RestartProcessRequest\x1a#.sandboxd.v1.RestartProcessResponse\x12V\n" +
-	"\rRemoveProcess\x12!.sandboxd.v1.RemoveProcessRequest\x1a\".sandboxd.v1.RemoveProcessResponseB\xb0\x01\n" +
-	"\x0fcom.sandboxd.v1B\fProcessProtoP\x01ZBgithub.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
+	"\rRemoveProcess\x12!.sandboxd.v1.RemoveProcessRequest\x1a\".sandboxd.v1.RemoveProcessResponseB\xad\x01\n" +
+	"\x0fcom.sandboxd.v1B\fProcessProtoP\x01Z?github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1\xa2\x02\x03SXX\xaa\x02\vSandboxd.V1\xca\x02\vSandboxd\\V1\xe2\x02\x17Sandboxd\\V1\\GPBMetadata\xea\x02\fSandboxd::V1b\x06proto3"
 
 var (
 	file_sandboxd_v1_process_proto_rawDescOnce sync.Once

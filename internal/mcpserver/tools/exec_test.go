@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // TestRenderExec_TheTruncationNoteNamesTheCapThatBit.
@@ -58,7 +58,7 @@ func TestRenderExec_TheTruncationNoteNamesTheCapThatBit(t *testing.T) {
 //
 // The unary call timeout answers questions — a stat, a listing — and using it
 // for a call that carries a file makes the limits these tools advertise
-// unreachable: sandbox_transfer moves up to 256 MiB in one call, and 256 MiB
+// unreachable: fleet_transfer moves up to 256 MiB in one call, and 256 MiB
 // inside 15 seconds is 17 MB/s sustained. The failure that produced was not a
 // slow transfer but "transferred 40 of 200 files, then the call timed out".
 func TestStreamTimeout_ScalesWithThePayload(t *testing.T) {

@@ -29,9 +29,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // fakeStream records what a handler sent, standing in for the gRPC stream.
@@ -469,7 +469,7 @@ func TestExec_StalledOutputStreamDoesNotWedgeTheHandler(t *testing.T) {
 // would have carried its children down with it is already gone. Only the sweep
 // at the end of the call reaches what it left — `sh -c 'daemon &'` is the shape
 // — and exec is one-shot by contract, so docs/tools.md points anything
-// longer-lived at sandbox_process_start.
+// longer-lived at fleet_process_start.
 //
 // Round 1 raised the log level on a failing sweep. It did not check that the
 // sweep works, and nothing else did either: every other kill test runs a
@@ -927,18 +927,18 @@ func TestExec_AuditNeverRecordsEnvironmentValues(t *testing.T) {
 	// name reaches the command through the environment alone. A request that
 	// put the name in argv would prove nothing: argv is recorded on purpose.
 	req := helperReq("envdump")
-	req.Env = append(req.Env, "SANDBOXD_TEST_SECRET="+secret)
+	req.Env = append(req.Env, "FLEET_TEST_SECRET="+secret)
 
 	stream, err := h.run(t, req)
 	require.NoError(t, err)
-	require.Contains(t, stream.output(sandboxdv1.Stream_STREAM_STDOUT), "SANDBOXD_TEST_SECRET="+secret,
+	require.Contains(t, stream.output(sandboxdv1.Stream_STREAM_STDOUT), "FLEET_TEST_SECRET="+secret,
 		"the command really did receive the secret, so its absence from the log is not an accident of it never existing")
 
 	require.NoError(t, h.audit.Close())
 	raw, err := os.ReadFile(h.auditPath)
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), secret, "an audit log that captures secrets is a new place to steal them from")
-	require.NotContains(t, string(raw), "SANDBOXD_TEST_SECRET", "not even the name of an environment variable is recorded")
+	require.NotContains(t, string(raw), "FLEET_TEST_SECRET", "not even the name of an environment variable is recorded")
 
 	// The command's output carried the secret too, and that is also absent:
 	// there is no field for output in a record.

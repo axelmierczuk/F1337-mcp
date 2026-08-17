@@ -1,13 +1,13 @@
 # Running the agent as a service
 
-`sandboxd-agent service install` registers the daemon with the platform's
+`fleet-agent service install` registers the daemon with the platform's
 service manager so it starts at boot. It needs elevation, and it refuses
 early — before creating a user or a directory — when it does not have it.
 
 ```sh
-sudo sandboxd-agent service install          # systemd, launchd, or the Windows SCM
-sudo sandboxd-agent service start
-sandboxd-agent service status
+sudo fleet-agent service install          # systemd, launchd, or the Windows SCM
+sudo fleet-agent service start
+fleet-agent service status
 ```
 
 `install` bakes the config path into the service definition, so the daemon does
@@ -23,13 +23,24 @@ model.
 
 | Platform | Default account | Created by install? |
 | --- | --- | --- |
-| Linux | `sandboxd`, a system account | Yes, via `useradd` or `adduser` |
+| Linux | `fleet`, a system account (but see the pre-rebrand rule below) | Yes, via `useradd` or `adduser` |
 | macOS | The invoking user (`$SUDO_USER`) | No — pass `--user` for a different one |
 | Windows | `NT AUTHORITY\NetworkService` | n/a, it is a built-in identity |
 
 `--user` overrides the default everywhere. `--create-user=false` turns off
 account creation, so an install against a missing account fails with a message
 naming it rather than inventing one.
+
+**On a host installed before the fleet rebrand, the Linux default is `sandboxd`,
+not `fleet`.** That account already exists there and already owns the state and
+log directories, and the daemon is already running as it. Defaulting to the new
+name would create a second system account on every upgraded host and chown those
+directories away from the account using them, so `install` keeps the one that is
+there: it uses `fleet` unless `fleet` is absent and `sandboxd` is present. Once
+both exist — because you created `fleet` deliberately — `fleet` wins, and the
+leftover `sandboxd` account is yours to remove. `--user` overrides this like any
+other default. It is the same rule the config directories follow; see
+[quickstart.md](quickstart.md#upgrading-from-sandboxd).
 
 The defaults differ because the right answer differs. On Linux a system daemon
 conventionally gets a dedicated system account and `useradd` makes creating one
@@ -56,14 +67,14 @@ that decides the daemon will run as somebody else — so on Linux and macOS it
 hands that account the config, certificate, key, and CA bundle, and the
 directory holding them.
 
-The directory only changes hands when it is one `enroll` created (`/etc/sandboxd`,
-`/Library/Application Support/sandboxd`, or the per-user enrollment directory).
+The directory only changes hands when it is one `enroll` created (`/etc/fleet`,
+`/Library/Application Support/fleet`, or the per-user enrollment directory).
 Point `--config` somewhere else and `install` gives away the four files but
 leaves the directory alone, and says so: `--config /etc/agent.yaml` must not
-turn into `chown sandboxd /etc`. Make that directory traversable by the service
+turn into `chown fleet /etc`. Make that directory traversable by the service
 account yourself.
 
-On Windows nothing is chowned: access there is by ACL, and `%ProgramData%\sandboxd`
+On Windows nothing is chowned: access there is by ACL, and `%ProgramData%\fleet`
 already admits the built-in service identities.
 
 ## Hardening
@@ -113,7 +124,7 @@ The systemd unit sets `KillMode=process` and the launchd job sets
 systemd's default `KillMode=control-group` sends `SIGTERM` to every process in
 the unit's cgroup when the service stops — which is every background process
 the agent supervises. launchd does the equivalent to the job's process group.
-Without these, `systemctl restart sandboxd-agent` kills every dev server that
+Without these, `systemctl restart fleet-agent` kills every dev server that
 agent is running, and an agent upgrade does it across the entire fleet at once.
 
 Supervised processes belong to the host, not to the daemon that started them.
@@ -126,7 +137,7 @@ asked to perform.
 ## Uninstall keeps your identity
 
 ```sh
-sudo sandboxd-agent service uninstall
+sudo fleet-agent service uninstall
 ```
 
 removes the unit, job, or service registration and **leaves**:
@@ -143,6 +154,47 @@ rather than failing, and restarts the service if it was running. That is what
 lets an installer script be re-run safely and what lets you change `--user` or
 `--hardening` without uninstalling first.
 
+## A service installed before the fleet rebrand
+
+The service used to register as `sandboxd-agent`. It now registers as
+`fleet-agent`, and **the `service` subcommands only know the new name.** On a
+host where the old service is still installed, that means:
+
+- `fleet-agent service status` reports it as not installed, while the old
+  service is running perfectly well beside it.
+- `fleet-agent service uninstall` will not remove it.
+- `fleet-agent service install` registers a *second* service pointing at the
+  same config and state. Both would start at boot and fight over the same
+  supervised processes.
+
+`install`, `uninstall` and `status` each check for the old registration and say
+so before doing any of that — `install` before it creates, chowns or registers
+anything, so you can stop there having changed nothing. The check is a warning,
+not a refusal: removing a service is not something the agent should do to your
+host on its own.
+
+So remove the old one first, using the old name, with the platform's own tools:
+
+```sh
+# Linux
+sudo systemctl disable --now sandboxd-agent
+sudo rm /etc/systemd/system/sandboxd-agent.service && sudo systemctl daemon-reload
+
+# macOS
+sudo launchctl bootout system /Library/LaunchDaemons/sandboxd-agent.plist
+sudo rm /Library/LaunchDaemons/sandboxd-agent.plist
+
+# Windows, elevated
+sc.exe stop sandboxd-agent
+sc.exe delete sandboxd-agent
+```
+
+Then `sudo fleet-agent service install`. Your enrollment is untouched by any of
+this — the identity lives in the config directory, not in the service
+registration. See the migration steps in
+[quickstart.md](quickstart.md#upgrading-from-sandboxd), which also move the
+directories the unit points at.
+
 ## Manual verification
 
 CI cannot install services — it does not run as root, and a GitHub runner has
@@ -154,36 +206,36 @@ has to be checked by hand.
 ### Linux, systemd
 
 ```sh
-sudo sandboxd-agent service install
-sudo sandboxd-agent service start
-sandboxd-agent service status                 # installed, running, with a PID
-systemctl show -p KillMode --value sandboxd-agent.service   # must print: process
-journalctl -u sandboxd-agent -n 20            # structured slog output
+sudo fleet-agent service install
+sudo fleet-agent service start
+fleet-agent service status                 # installed, running, with a PID
+systemctl show -p KillMode --value fleet-agent.service   # must print: process
+journalctl -u fleet-agent -n 20            # structured slog output
 
 # Supervised processes survive a restart of the daemon:
 #   start a background process through the MCP server, note its PID,
-sudo systemctl restart sandboxd-agent
+sudo systemctl restart fleet-agent
 #   then confirm that PID is still alive.
 
 sudo systemctl reboot                          # comes back after a reboot
-sandboxd-agent service status
+fleet-agent service status
 
-sudo sandboxd-agent service install            # idempotent: reinstalls, no error
-sudo sandboxd-agent service uninstall
-ls /etc/sandboxd /var/lib/sandboxd             # credentials and state still there
+sudo fleet-agent service install            # idempotent: reinstalls, no error
+sudo fleet-agent service uninstall
+ls /etc/fleet /var/lib/fleet             # credentials and state still there
 ```
 
 ### macOS, launchd
 
 ```sh
-sudo sandboxd-agent service install --user "$(whoami)"
-sudo sandboxd-agent service start
-sandboxd-agent service status
-sudo launchctl list sandboxd-agent             # PID, and AbandonProcessGroup in the job
-tail -f /Library/Logs/sandboxd/sandboxd-agent.err.log
+sudo fleet-agent service install --user "$(whoami)"
+sudo fleet-agent service start
+fleet-agent service status
+sudo launchctl list fleet-agent             # PID, and AbandonProcessGroup in the job
+tail -f /Library/Logs/fleet/fleet-agent.err.log
 
 sudo shutdown -r now                           # survives a reboot
-sudo sandboxd-agent service uninstall
+sudo fleet-agent service uninstall
 ```
 
 ### Windows
@@ -191,13 +243,13 @@ sudo sandboxd-agent service uninstall
 From an elevated PowerShell:
 
 ```powershell
-sandboxd-agent service install
-sandboxd-agent service start
-sandboxd-agent service status
-Get-Service sandboxd-agent                     # Running, StartType Automatic
-sc.exe qfailure sandboxd-agent                 # restart action, 5s delay
-Get-EventLog -LogName Application -Source sandboxd-agent -Newest 20
+fleet-agent service install
+fleet-agent service start
+fleet-agent service status
+Get-Service fleet-agent                     # Running, StartType Automatic
+sc.exe qfailure fleet-agent                 # restart action, 5s delay
+Get-EventLog -LogName Application -Source fleet-agent -Newest 20
 
 Restart-Computer                               # survives a reboot
-sandboxd-agent service uninstall
+fleet-agent service uninstall
 ```

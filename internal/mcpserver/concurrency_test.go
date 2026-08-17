@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
 )
 
 // TestConcurrent_SelectionsDoNotInterfere drives the whole stack from several
@@ -32,11 +32,11 @@ func TestConcurrent_SelectionsDoNotInterfere(t *testing.T) {
 			id := fmt.Sprintf("client-%02d", i)
 			mine := fmt.Sprintf("box-%02d", i)
 			for range rounds {
-				f.ok("sandbox_select", map[string]any{"name": mine}, id)
+				f.ok("fleet_select", map[string]any{"name": mine}, id)
 				// The sticky default must still be this identity's own, no
 				// matter what the other seven did in between.
-				assert.Equal(t, mine, echoOf(t, f.ok("sandbox_info", map[string]any{}, id)))
-				f.ok("sandbox_list", map[string]any{}, id)
+				assert.Equal(t, mine, echoOf(t, f.ok("fleet_info", map[string]any{}, id)))
+				f.ok("fleet_list", map[string]any{}, id)
 			}
 		}(i)
 	}
@@ -66,7 +66,7 @@ func TestConcurrent_AddNeverRegistersANameTwice(t *testing.T) {
 			defer wg.Done()
 			for i := range 10 {
 				name := fmt.Sprintf("box-%02d", i)
-				res := f.call("sandbox_add", map[string]any{"name": name, "address": name + ".internal:8722"}, "")
+				res := f.call("fleet_add", map[string]any{"name": name, "address": name + ".internal:8722"}, "")
 				if !res.IsError {
 					added[w]++
 				}

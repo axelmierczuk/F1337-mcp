@@ -2,11 +2,11 @@
 
 ## What this is
 
-`sandboxd-agent` executes arbitrary commands and reads and writes arbitrary
+`fleet-agent` executes arbitrary commands and reads and writes arbitrary
 files on the host it runs on, at the request of a remote caller. **It is a
 remote code execution service.** That is the feature.
 
-**`sandboxd` does not sandbox.** The name describes what you point it at, not
+**`fleet` does not sandbox.** The name describes what you point it at, not
 what it provides. The agent applies a path jail, command policy, and resource
 caps, and those are worth having — but they are hardening, not isolation. A
 process that can run arbitrary code on a host has that host. Real isolation is
@@ -19,9 +19,9 @@ Do not install the agent on a machine you would not hand to the model outright.
 
 | Principal | Holds | Can do |
 | --- | --- | --- |
-| Control plane (`sandboxctl`) | CA signing key | Issue identities for the whole fleet |
-| MCP server (`sandboxd-mcp`) | Client cert | Full exec and filesystem access on every enrolled sandbox |
-| Agent (`sandboxd-agent`) | Leaf cert + key | Serve requests from authenticated clients |
+| Control plane (`fleetctl`) | CA signing key | Issue identities for the whole fleet |
+| MCP server (`fleet-mcp`) | Client cert | Full exec and filesystem access on every enrolled sandbox |
+| Agent (`fleet-agent`) | Leaf cert + key | Serve requests from authenticated clients |
 | Model | Nothing directly | Whatever the MCP server exposes as tools |
 
 The model is not a principal. It acts through the MCP server's identity, which
@@ -44,7 +44,7 @@ able to mint a credential.
 ```
 operator                control plane              new host
    │                          │                        │
-   ├─ sandboxctl enroll mint ─►                        │
+   ├─ fleetctl enroll mint ─►                        │
    ◄── token + CA fingerprint ┤                        │
    │                                                   │
    ├─────── token + fingerprint, out of band ─────────►│
@@ -63,7 +63,7 @@ operator                control plane              new host
   for any name in the fleet, and mTLS stops meaning anything.
 - **A registry label is not an identity.** A token minted without `--name` lets
   the enrolling host pick what the fleet registry calls it. That name is a
-  label: it is echoed back as `assigned_name` and printed by `sandboxctl list`,
+  label: it is echoed back as `assigned_name` and printed by `fleetctl list`,
   and it appears nowhere in the certificate.
 - Everything an enrolling host says about itself — its platform, its version,
   the addresses it names — is bounded in length and rejected if it contains
@@ -89,7 +89,7 @@ every file it writes is owned by it. **Running the agent as root means every
 sandbox command a model issues runs as root**, and the path jail is the only
 thing between it and the rest of the machine.
 
-So `service install` does not default to a superuser: a dedicated `sandboxd`
+So `service install` does not default to a superuser: a dedicated `fleet`
 system account on Linux, the invoking user on macOS, and `NT
 AUTHORITY\NetworkService` rather than `LocalSystem` on Windows. `--user root`
 is available, warns loudly, and is a decision rather than a default. See
@@ -124,7 +124,7 @@ So:
 | `false` | enforced on every `FileService` path | the resolved roots |
 
 The wire behaviour matters as much as the enforcement. `allowed_roots` is what
-`sandbox_info` and `sandbox_select` show the model to tell it where it may
+`fleet_info` and `fleet_select` show the model to tell it where it may
 write; reporting roots that constrain nothing is the model-facing version of
 the same lie.
 
@@ -144,7 +144,7 @@ two.
 
 An exec-disabled agent with no allowed roots has no jail either. It refuses to
 start that way unless explicitly forced, and reports the condition in
-`sandbox_info`. It also refuses to start on an allowed root that does not exist:
+`fleet_info`. It also refuses to start on an allowed root that does not exist:
 a missing path can be created later, as a symlink to anywhere, and a jail that
 had accepted it would then confine to whatever it pointed at.
 
@@ -206,7 +206,7 @@ cannot talk its way past.
 Everything else in this document is about what a caller can do **to** the host
 the agent runs on. This section is about what it can do **through** it.
 
-`sandbox_forward` is `ssh -L`: a local listener on the workstation, a socket on
+`fleet_forward` is `ssh -L`: a local listener on the workstation, a socket on
 the sandbox, and bytes in between. Forwarding to the sandbox's own loopback is
 a convenience — it reaches a port on a machine the caller already has full
 command execution on, and gives it nothing it did not already have. Forwarding

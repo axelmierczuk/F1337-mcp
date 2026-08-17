@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent/host"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent/host"
 )
 
 // hangEnv makes the test binary re-exec itself as a tool that never returns.
@@ -22,7 +22,7 @@ import (
 // A hanging binary is what the budget exists for, and there is no program
 // guaranteed to hang on Linux, macOS and Windows alike — so the test binary
 // plays the part itself. TestMain routes the re-exec.
-const hangEnv = "SANDBOXD_TEST_TOOLCHAIN_HANG"
+const hangEnv = "FLEET_TEST_TOOLCHAIN_HANG"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(hangEnv) {

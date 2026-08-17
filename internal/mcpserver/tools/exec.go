@@ -13,11 +13,11 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 )
 
-// Bounds sandbox_exec applies to its own side of the call.
+// Bounds fleet_exec applies to its own side of the call.
 const (
 	// DefaultExecOutputBytes is the combined stdout and stderr the tool asks
 	// for when the caller names no max_output_bytes.
@@ -68,20 +68,20 @@ const (
 	execCallGrace = 30 * time.Second
 )
 
-// registerExec adds sandbox_exec.
+// registerExec adds fleet_exec.
 func registerExec(r *Registrar) {
 	AddTargeted(r, &mcp.Tool{
-		Name:  "sandbox_exec",
+		Name:  "fleet_exec",
 		Title: "Run a command",
 		Description: "Run a command to completion on the selected sandbox and return its exit code, stdout and stderr. " +
 			"argv is passed to the OS directly and is not shell-parsed unless shell is set. " +
 			"A non-zero exit is a normal result carrying the output, not an error. " +
-			"The call is held open until the command exits, so use sandbox_process_start for anything meant to keep running: " +
+			"The call is held open until the command exits, so use fleet_process_start for anything meant to keep running: " +
 			"a dev server started here holds the stream until it times out.",
 	}, r.sandboxExec)
 }
 
-// ExecArgs are the arguments to sandbox_exec.
+// ExecArgs are the arguments to fleet_exec.
 type ExecArgs struct {
 	TargetArgs
 	// Argv is the executable and its arguments.
@@ -100,7 +100,7 @@ type ExecArgs struct {
 	Stdin string `json:"stdin,omitempty" jsonschema:"written to the command's stdin, which is then closed"`
 }
 
-// ExecResult is the sandbox_exec result.
+// ExecResult is the fleet_exec result.
 //
 // The exit code leads, before either output stream, because it is the one
 // field that decides what the rest of the result means — and a model reads the
@@ -139,7 +139,7 @@ func (r *Registrar) sandboxExec(ctx context.Context, _ *mcp.CallToolRequest, tar
 	}
 	if in.TimeoutSeconds > maxExecTimeoutSeconds {
 		return ExecResult{}, fmt.Errorf(
-			"timeout_seconds is %d, which is over the %d this tool will hold one call open for. Exec holds the RPC for the lifetime of the command; use sandbox_process_start for work meant to outlive a call",
+			"timeout_seconds is %d, which is over the %d this tool will hold one call open for. Exec holds the RPC for the lifetime of the command; use fleet_process_start for work meant to outlive a call",
 			in.TimeoutSeconds, maxExecTimeoutSeconds)
 	}
 	if in.MaxOutputBytes < 0 {
@@ -219,7 +219,7 @@ func (r *Registrar) sandboxExec(ctx context.Context, _ *mcp.CallToolRequest, tar
 		// was cut. Either way the command's fate is unknown, which is not
 		// something to report as an exit status.
 		return ExecResult{}, fmt.Errorf(
-			"sandbox %s closed the output stream without reporting a result, so whether the command finished is unknown. It may well have run; check with sandbox_exec before retrying anything that is not safe to repeat",
+			"sandbox %s closed the output stream without reporting a result, so whether the command finished is unknown. It may well have run; check with fleet_exec before retrying anything that is not safe to repeat",
 			target.Name())
 	}
 
@@ -258,7 +258,7 @@ func renderExecResult(result *sandboxdv1.ExecResult, in ExecArgs, timeout time.D
 		if in.TimeoutSeconds <= 0 {
 			limit = "the default timeout_seconds"
 		}
-		note.add("Timed out after %s (%s) and the process group was killed. Raise timeout_seconds, or use sandbox_process_start for work meant to outlive the call.",
+		note.add("Timed out after %s (%s) and the process group was killed. Raise timeout_seconds, or use fleet_process_start for work meant to outlive the call.",
 			timeout, limit)
 	case result.GetSignaled():
 		note.add("Terminated by %s rather than exiting, so exit_code is not meaningful.", signalName(result.GetSignal()))

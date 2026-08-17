@@ -4,11 +4,11 @@ import (
 	"context"
 	"time"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // HealthStatus is the most recent result of probing a sandbox's
-// HostService.Health, cached so sandbox_list can report status without a
+// HostService.Health, cached so fleet_list can report status without a
 // round trip per sandbox.
 type HealthStatus struct {
 	// Reachable is false when the probe itself failed (timeout, connection

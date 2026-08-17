@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
 )
 
 // ---------------------------------------------------- start and readiness
@@ -28,7 +28,7 @@ func TestProcessStart_TCPProbeReturnsOnlyOnceThePortIsLive(t *testing.T) {
 	args["ready_probe"] = map[string]any{"tcp_port": port, "timeout_seconds": 20}
 
 	before := time.Now()
-	out := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", args)
+	out := liveOK[tools.ProcessStartResult](f, "fleet_process_start", args)
 	elapsed := time.Since(before)
 
 	require.Empty(t, out.ReadyError, "the probe should have passed")
@@ -61,7 +61,7 @@ func TestProcessStart_AProbeIsWaitedOnWithoutAskingForIt(t *testing.T) {
 	args["ready_probe"] = map[string]any{"tcp_port": port, "timeout_seconds": 20}
 	// No wait_for_ready.
 
-	out := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", args)
+	out := liveOK[tools.ProcessStartResult](f, "fleet_process_start", args)
 	require.NotNil(t, out.Ready)
 	assert.True(t, *out.Ready)
 	assert.Equal(t, "ready", out.Process.State)
@@ -82,7 +82,7 @@ func TestProcessStart_ProbeTimeoutReturnsReadyErrorAndLogs(t *testing.T) {
 	}
 	args["wait_for_ready"] = true
 
-	out := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", args)
+	out := liveOK[tools.ProcessStartResult](f, "fleet_process_start", args)
 
 	require.NotEmpty(t, out.ReadyError, "a probe that cannot pass must report ready_error")
 	require.NotNil(t, out.Ready)
@@ -93,7 +93,7 @@ func TestProcessStart_ProbeTimeoutReturnsReadyErrorAndLogs(t *testing.T) {
 
 	// Still running, so the logs above are readable and stopping it is the
 	// caller's decision.
-	list := liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{})
+	list := liveOK[tools.ProcessListResult](f, "fleet_process_list", map[string]any{})
 	found := findProcess(t, list, out.Process.ProcessID)
 	assert.NotEqual(t, "exited", found.State)
 	assert.NotEqual(t, "crashed", found.State)
@@ -110,7 +110,7 @@ func TestProcessStart_ProbeSchemaRejectsAmbiguityWithAUsableMessage(t *testing.T
 	t.Run("no condition", func(t *testing.T) {
 		args := f.startHelper("no-condition", "silent")
 		args["ready_probe"] = map[string]any{"timeout_seconds": 5}
-		msg := f.liveFails("sandbox_process_start", args)
+		msg := f.liveFails("fleet_process_start", args)
 		assert.Contains(t, msg, "exactly one")
 		assert.Contains(t, msg, "tcp_port")
 	})
@@ -118,7 +118,7 @@ func TestProcessStart_ProbeSchemaRejectsAmbiguityWithAUsableMessage(t *testing.T
 	t.Run("two conditions", func(t *testing.T) {
 		args := f.startHelper("two-conditions", "silent")
 		args["ready_probe"] = map[string]any{"tcp_port": 3000, "log_pattern": "ready"}
-		msg := f.liveFails("sandbox_process_start", args)
+		msg := f.liveFails("fleet_process_start", args)
 		assert.Contains(t, msg, "exactly one")
 		assert.Contains(t, msg, "log_pattern")
 		assert.Contains(t, msg, "tcp_port")
@@ -130,7 +130,7 @@ func TestProcessStart_ProbeSchemaRejectsAmbiguityWithAUsableMessage(t *testing.T
 func TestProcessStart_WithoutAProbeSaysWhatStartedDoesNotMean(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 
-	out := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("bare", "silent"))
+	out := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("bare", "silent"))
 	assert.Nil(t, out.Ready, "with no probe, readiness has no answer rather than a false one")
 	assert.Contains(t, out.Note, "ready_probe")
 
@@ -146,12 +146,12 @@ func TestProcessList_StaysCompactAtTwentyProcesses(t *testing.T) {
 
 	ids := make([]string, 0, 20)
 	for i := range 20 {
-		out := liveOK[tools.ProcessStartResult](f, "sandbox_process_start",
+		out := liveOK[tools.ProcessStartResult](f, "fleet_process_start",
 			f.startHelper(fmt.Sprintf("svc-%02d", i), "chatter", "3", "5", "a moderately long log line from a dev server"))
 		ids = append(ids, out.Process.ProcessID)
 	}
 
-	res := f.call("sandbox_process_list", map[string]any{})
+	res := f.call("fleet_process_list", map[string]any{})
 	require.False(t, res.IsError, resultText(res))
 	out := structured[tools.ProcessListResult](t, res)
 	require.Len(t, out.Processes, 20)
@@ -190,11 +190,11 @@ func TestProcessList_ReportsStatePidUptimeRestartsPortsAndLastLine(t *testing.T)
 
 	args := f.startHelper("with-port", "listen", "0", strconv.Itoa(port))
 	args["ready_probe"] = map[string]any{"tcp_port": port, "timeout_seconds": 20}
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", args)
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", args)
 
 	var row tools.ProcessLine
 	eventually(t, 15*time.Second, "the listing to report the listening port", func() bool {
-		out := liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{})
+		out := liveOK[tools.ProcessListResult](f, "fleet_process_list", map[string]any{})
 		row = findProcess(t, out, started.Process.ProcessID)
 		return len(row.ListeningPorts) > 0
 	})
@@ -211,23 +211,23 @@ func TestProcessList_ReportsStatePidUptimeRestartsPortsAndLastLine(t *testing.T)
 func TestProcessList_FiltersByStateAndName(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 
-	alive := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("keeper", "silent"))
-	gone := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("goner", "exit", "0", "0"))
+	alive := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("keeper", "silent"))
+	gone := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("goner", "exit", "0", "0"))
 
 	eventually(t, 15*time.Second, "the short-lived process to exit", func() bool {
-		out := liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{})
+		out := liveOK[tools.ProcessListResult](f, "fleet_process_list", map[string]any{})
 		return findProcess(t, out, gone.Process.ProcessID).State == "exited"
 	})
 
-	byState := liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{"states": []any{"exited"}})
+	byState := liveOK[tools.ProcessListResult](f, "fleet_process_list", map[string]any{"states": []any{"exited"}})
 	require.Len(t, byState.Processes, 1)
 	assert.Equal(t, "goner", byState.Processes[0].Name)
 
-	byName := liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{"name_pattern": "^keep"})
+	byName := liveOK[tools.ProcessListResult](f, "fleet_process_list", map[string]any{"name_pattern": "^keep"})
 	require.Len(t, byName.Processes, 1)
 	assert.Equal(t, "keeper", byName.Processes[0].Name)
 
-	none := liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{"name_pattern": "^nothing$"})
+	none := liveOK[tools.ProcessListResult](f, "fleet_process_list", map[string]any{"name_pattern": "^nothing$"})
 	assert.Empty(t, none.Processes)
 	assert.Contains(t, none.Hint, "filter")
 
@@ -242,10 +242,10 @@ func TestProcessList_FiltersByStateAndName(t *testing.T) {
 func TestProcessLogs_FollowReturnsOnASilentProcess(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{maxFollowDuration: 2 * time.Second})
 
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("mute", "silent"))
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("mute", "silent"))
 
 	before := time.Now()
-	out := liveOK[tools.ProcessLogsResult](f, "sandbox_process_logs", map[string]any{
+	out := liveOK[tools.ProcessLogsResult](f, "fleet_process_logs", map[string]any{
 		"process_id":     started.Process.ProcessID,
 		"follow":         true,
 		"follow_seconds": 2,
@@ -264,10 +264,10 @@ func TestProcessLogs_FollowReturnsOnASilentProcess(t *testing.T) {
 func TestProcessLogs_FollowIsClampedToTheAgentMaximum(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{maxFollowDuration: time.Second})
 
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("mute-2", "silent"))
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("mute-2", "silent"))
 
 	before := time.Now()
-	out := liveOK[tools.ProcessLogsResult](f, "sandbox_process_logs", map[string]any{
+	out := liveOK[tools.ProcessLogsResult](f, "fleet_process_logs", map[string]any{
 		"process_id":     started.Process.ProcessID,
 		"follow":         true,
 		"follow_seconds": 45,
@@ -288,7 +288,7 @@ func TestProcessLogs_DroppedLinesAreMarkedInline(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{ringBufferLines: 20, maxLogBytes: 4096})
 
 	const lines = 8000
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start",
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start",
 		f.startHelper("firehose", "spew", strconv.Itoa(lines)))
 
 	// Wait for the process to have written everything, then assert once.
@@ -304,11 +304,11 @@ func TestProcessLogs_DroppedLinesAreMarkedInline(t *testing.T) {
 	// must have lost some, on every platform.
 	last := fmt.Sprintf("spew %d ", lines-1)
 	eventually(t, 90*time.Second, "the process to finish writing its output", func() bool {
-		list := liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{})
+		list := liveOK[tools.ProcessListResult](f, "fleet_process_list", map[string]any{})
 		return strings.Contains(findProcess(t, list, started.Process.ProcessID).LastLogLine, last)
 	})
 
-	out := liveOK[tools.ProcessLogsResult](f, "sandbox_process_logs", map[string]any{
+	out := liveOK[tools.ProcessLogsResult](f, "fleet_process_logs", map[string]any{
 		"process_id": started.Process.ProcessID,
 		"tail_lines": 4000,
 	})
@@ -323,12 +323,12 @@ func TestProcessLogs_DroppedLinesAreMarkedInline(t *testing.T) {
 func TestProcessLogs_SeparatesStdoutFromStderr(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start",
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start",
 		f.startHelper("two-streams", "stderr", "a warning"))
 
 	var both tools.ProcessLogsResult
 	eventually(t, 20*time.Second, "both streams to appear", func() bool {
-		both = liveOK[tools.ProcessLogsResult](f, "sandbox_process_logs", map[string]any{
+		both = liveOK[tools.ProcessLogsResult](f, "fleet_process_logs", map[string]any{
 			"process_id": started.Process.ProcessID,
 		})
 		return strings.Contains(both.Logs, "on stdout") && strings.Contains(both.Logs, "a warning")
@@ -336,7 +336,7 @@ func TestProcessLogs_SeparatesStdoutFromStderr(t *testing.T) {
 	assert.Contains(t, both.Logs, "E| a warning", "stderr must be distinguishable from stdout")
 	assert.NotContains(t, both.Logs, "E| on stdout")
 
-	onlyErr := liveOK[tools.ProcessLogsResult](f, "sandbox_process_logs", map[string]any{
+	onlyErr := liveOK[tools.ProcessLogsResult](f, "fleet_process_logs", map[string]any{
 		"process_id": started.Process.ProcessID,
 		"stream":     "stderr",
 	})
@@ -348,9 +348,9 @@ func TestProcessLogs_SeparatesStdoutFromStderr(t *testing.T) {
 
 func TestProcessLogs_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("real-one", "silent"))
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("real-one", "silent"))
 
-	msg := f.liveFails("sandbox_process_logs", map[string]any{"process_id": "not-a-real-id"})
+	msg := f.liveFails("fleet_process_logs", map[string]any{"process_id": "not-a-real-id"})
 	assert.Contains(t, msg, "not-a-real-id")
 	assert.Contains(t, msg, started.Process.ProcessID)
 	assert.Contains(t, msg, "real-one")
@@ -365,20 +365,20 @@ func TestProcessLogs_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 // probe's two float arguments were fixed for.
 func TestProcessTools_RefuseANegativeSecondsArgument(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("bounded", "silent"))
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("bounded", "silent"))
 
 	for _, tc := range []struct {
 		tool     string
 		args     map[string]any
 		argument string
 	}{
-		{"sandbox_process_logs", map[string]any{
+		{"fleet_process_logs", map[string]any{
 			"process_id": started.Process.ProcessID, "follow": true, "follow_seconds": -5,
 		}, "follow_seconds"},
-		{"sandbox_process_restart", map[string]any{
+		{"fleet_process_restart", map[string]any{
 			"process_id": started.Process.ProcessID, "ready_timeout_seconds": -1,
 		}, "ready_timeout_seconds"},
-		{"sandbox_process_signal", map[string]any{
+		{"fleet_process_signal", map[string]any{
 			"process_id": started.Process.ProcessID, "graceful_stop": true, "grace_seconds": -1,
 		}, "grace_seconds"},
 	} {
@@ -398,8 +398,8 @@ func TestProcessSignal_GracefulStopReportsEscalationToKill(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{gracePeriod: time.Second})
 
 	t.Run("a process that exits on TERM does not escalate", func(t *testing.T) {
-		started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("polite", "silent"))
-		out := liveOK[tools.ProcessSignalResult](f, "sandbox_process_signal", map[string]any{
+		started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("polite", "silent"))
+		out := liveOK[tools.ProcessSignalResult](f, "fleet_process_signal", map[string]any{
 			"process_id":      started.Process.ProcessID,
 			"graceful_stop":   true,
 			"grace_seconds":   5,
@@ -421,10 +421,10 @@ func TestProcessSignal_GracefulStopReportsEscalationToKill(t *testing.T) {
 		// delivered to a process that still dies on it.
 		args := f.startHelper("stubborn", "deaf")
 		args["ready_probe"] = map[string]any{"log_pattern": "ignoring SIGTERM", "timeout_seconds": 30}
-		started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", args)
+		started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", args)
 		require.Empty(t, started.ReadyError, "the child must have installed its signal handler before it is signalled")
 
-		out := liveOK[tools.ProcessSignalResult](f, "sandbox_process_signal", map[string]any{
+		out := liveOK[tools.ProcessSignalResult](f, "fleet_process_signal", map[string]any{
 			"process_id":      started.Process.ProcessID,
 			"graceful_stop":   true,
 			"grace_seconds":   1,
@@ -439,10 +439,10 @@ func TestProcessSignal_GracefulStopReportsEscalationToKill(t *testing.T) {
 func TestProcessSignal_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 
-	one := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("alpha", "silent"))
-	two := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("beta", "silent"))
+	one := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("alpha", "silent"))
+	two := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("beta", "silent"))
 
-	msg := f.liveFails("sandbox_process_signal", map[string]any{
+	msg := f.liveFails("fleet_process_signal", map[string]any{
 		"process_id": "web-dev-typo",
 		"signal":     "TERM",
 	})
@@ -460,14 +460,14 @@ func TestProcessSignal_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 // empty set, because "no processes" and "wrong id" need different fixes.
 func TestProcessSignal_UnknownProcessIDWithAnEmptyAgentSaysSo(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
-	msg := f.liveFails("sandbox_process_signal", map[string]any{"process_id": "nothing", "signal": "TERM"})
+	msg := f.liveFails("fleet_process_signal", map[string]any{"process_id": "nothing", "signal": "TERM"})
 	assert.Contains(t, msg, "no processes at all")
-	assert.Contains(t, msg, "sandbox_process_start")
+	assert.Contains(t, msg, "fleet_process_start")
 }
 
 func TestProcessSignal_RejectsAnUnknownSignalName(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
-	msg := f.liveFails("sandbox_process_signal", map[string]any{"process_id": "x", "signal": "SIGBANANA"})
+	msg := f.liveFails("fleet_process_signal", map[string]any{"process_id": "x", "signal": "SIGBANANA"})
 	assert.Contains(t, msg, "TERM")
 }
 
@@ -481,11 +481,11 @@ func TestProcessRestart_PreservesTheProcessIDAndReportsTheNewState(t *testing.T)
 
 	args := f.startHelper("restarter", "listen", "0", strconv.Itoa(port))
 	args["ready_probe"] = map[string]any{"tcp_port": port, "timeout_seconds": 20}
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", args)
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", args)
 	require.Equal(t, "ready", started.Process.State)
 	firstPID := started.Process.PID
 
-	out := liveOK[tools.ProcessRestartResult](f, "sandbox_process_restart", map[string]any{
+	out := liveOK[tools.ProcessRestartResult](f, "fleet_process_restart", map[string]any{
 		"process_id":    started.Process.ProcessID,
 		"grace_seconds": 5,
 	})
@@ -511,9 +511,9 @@ func TestProcessRestart_PreservesTheProcessIDAndReportsTheNewState(t *testing.T)
 
 func TestProcessRestart_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("only", "silent"))
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("only", "silent"))
 
-	msg := f.liveFails("sandbox_process_restart", map[string]any{"process_id": "wrong"})
+	msg := f.liveFails("fleet_process_restart", map[string]any{"process_id": "wrong"})
 	assert.Contains(t, msg, started.Process.ProcessID)
 
 	stop(t, f, started.Process.ProcessID)
@@ -527,16 +527,16 @@ func TestProcessRestart_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 func TestProcessTools_EchoTheResolvedSandbox(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 
-	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("echoed", "silent"))
+	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("echoed", "silent"))
 
 	for _, tc := range []struct {
 		tool string
 		args map[string]any
 	}{
-		{"sandbox_process_list", map[string]any{"sandbox": liveSandboxName}},
-		{"sandbox_process_logs", map[string]any{"sandbox": liveSandboxName, "process_id": started.Process.ProcessID}},
-		{"sandbox_process_restart", map[string]any{"sandbox": liveSandboxName, "process_id": started.Process.ProcessID}},
-		{"sandbox_process_signal", map[string]any{
+		{"fleet_process_list", map[string]any{"sandbox": liveSandboxName}},
+		{"fleet_process_logs", map[string]any{"sandbox": liveSandboxName, "process_id": started.Process.ProcessID}},
+		{"fleet_process_restart", map[string]any{"sandbox": liveSandboxName, "process_id": started.Process.ProcessID}},
+		{"fleet_process_signal", map[string]any{
 			"sandbox": liveSandboxName, "process_id": started.Process.ProcessID,
 			"graceful_stop": true, "disable_restart": true,
 		}},
@@ -557,14 +557,14 @@ func TestProcessTools_AreFiveDistinctRegisteredTools(t *testing.T) {
 		registered[reg.Name] = reg.Targeted
 	}
 	for _, name := range []string{
-		"sandbox_process_start", "sandbox_process_list", "sandbox_process_logs",
-		"sandbox_process_signal", "sandbox_process_restart",
+		"fleet_process_start", "fleet_process_list", "fleet_process_logs",
+		"fleet_process_signal", "fleet_process_restart",
 	} {
 		targeted, ok := registered[name]
 		assert.Truef(t, ok, "%s must be registered", name)
 		assert.Truef(t, targeted, "%s must resolve a sandbox before running", name)
 	}
-	assert.NotContains(t, registered, "sandbox_process", "there is no action-dispatched process tool")
+	assert.NotContains(t, registered, "fleet_process", "there is no action-dispatched process tool")
 }
 
 // The schema a model actually sees has to carry the probe fields flat and
@@ -579,7 +579,7 @@ func TestProcessStart_ProbeSchemaIsFlatAndDescribed(t *testing.T) {
 	var schema map[string]any
 	var description string
 	for _, tool := range listed.Tools {
-		if tool.Name != "sandbox_process_start" {
+		if tool.Name != "fleet_process_start" {
 			continue
 		}
 		description = tool.Description
@@ -587,7 +587,7 @@ func TestProcessStart_ProbeSchemaIsFlatAndDescribed(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, json.Unmarshal(raw, &schema))
 	}
-	require.NotNil(t, schema, "sandbox_process_start must be listed")
+	require.NotNil(t, schema, "fleet_process_start must be listed")
 
 	assert.Contains(t, description, "ready_probe",
 		"the description must recommend a probe, in the place a model reads before calling")
@@ -624,7 +624,7 @@ func findProcess(t *testing.T, list tools.ProcessListResult, id string) tools.Pr
 // child on the machine that ran it.
 func stop(t *testing.T, f *liveFixture, id string) {
 	t.Helper()
-	res := f.call("sandbox_process_signal", map[string]any{
+	res := f.call("fleet_process_signal", map[string]any{
 		"process_id": id, "signal": "KILL", "disable_restart": true,
 	})
 	if res.IsError {

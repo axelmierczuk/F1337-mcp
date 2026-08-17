@@ -1,8 +1,8 @@
-# sandboxd-agent configuration.
+# fleet-agent configuration.
 #
-# Written to /etc/sandboxd/agent.yaml (Linux), /Library/Application
-# Support/sandboxd/agent.yaml (macOS), or %ProgramData%\sandboxd\agent.yaml
-# (Windows) by `sandboxd-agent enroll`.
+# Written to /etc/fleet/agent.yaml (Linux), /Library/Application
+# Support/fleet/agent.yaml (macOS), or %ProgramData%\fleet\agent.yaml
+# (Windows) by `fleet-agent enroll`.
 
 # The name this host enrolled under, written by `enroll` from the name the
 # control plane assigned. Every audit record below is stamped with it, and a
@@ -16,11 +16,16 @@ listen: "0.0.0.0:8722"
 # Identity issued during enrollment. The private key is generated on this host
 # and never leaves it.
 tls:
-  certificate: "/etc/sandboxd/agent.crt"
-  private_key: "/etc/sandboxd/agent.key"
-  ca_bundle: "/etc/sandboxd/ca.crt"
+  certificate: "/etc/fleet/agent.crt"
+  private_key: "/etc/fleet/agent.key"
+  ca_bundle: "/etc/fleet/ca.crt"
   # Client certificates must be issued by the CA above and carry this
   # organisational unit. mTLS is mandatory; there is no plaintext mode.
+  #
+  # This one name still reads "sandboxd" after the fleet rebrand, and that is
+  # deliberate: it is stamped into every certificate the CA has already issued
+  # and is checked at every handshake. Renaming it would need every member of
+  # the fleet re-enrolled on the same day. Leave it unless you are doing that.
   require_client_ou: "sandboxd-control"
 
 # Filesystem confinement. Every path in every FileService call is resolved and
@@ -37,13 +42,13 @@ tls:
 # is given --no-jail.
 allowed_roots:
   - "/home/build/workspace"
-  - "/tmp/sandboxd"
+  - "/tmp/fleet"
 
 exec:
   # Running commands is what this product is for, so this defaults to true.
   # Setting it to false is what makes allowed_roots above a real boundary.
   enabled: true
-  # Default wall-clock limit for sandbox_exec. On expiry the agent SIGTERMs the
+  # Default wall-clock limit for fleet_exec. On expiry the agent SIGTERMs the
   # command's whole process group, then SIGKILLs it.
   default_timeout: "120s"
   # A request asking for longer than this is refused, with this value named,
@@ -83,7 +88,7 @@ process:
   # In-memory ring buffer retained for fast tailing.
   ring_buffer_lines: 2000
   default_grace_period: "10s"
-  # Hard ceiling on sandbox_process_logs follow, so a tool call cannot hang.
+  # Hard ceiling on fleet_process_logs follow, so a tool call cannot hang.
   max_follow_duration: "60s"
 
 forward:
@@ -125,7 +130,7 @@ audit:
   # build. It is a forensic record, not an enforcement mechanism: a caller who
   # can run commands on this host can also reach this file. Ship it off-host if
   # it needs to survive the host.
-  path: "/var/log/sandboxd/audit.jsonl"
+  path: "/var/log/fleet/audit.jsonl"
   enabled: true
   # With this set, an RPC whose audit record could not be written fails.
   # Without it, the failure is logged and the call proceeds. Choose the one
@@ -139,7 +144,7 @@ audit:
 
 # Supervised process records live here, so they survive a daemon restart — and
 # an uninstall, which deliberately leaves this directory alone.
-state_dir: "/var/lib/sandboxd"
+state_dir: "/var/lib/fleet"
 
 log:
   # debug, info, warn, or error.

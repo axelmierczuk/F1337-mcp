@@ -7,14 +7,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // jobName builds a job object name unique to this test binary. Job names are
 // global to the session, and two groups given the same name silently share one
 // job.
 func jobName(suffix string) string {
-	return "sandboxd-test-" + strconv.Itoa(os.Getpid()) + "-" + suffix
+	return "fleet-test-" + strconv.Itoa(os.Getpid()) + "-" + suffix
 }
 
 // TestGroupConfig_KillOnCloseWithANameIsRefused pins the one combination of

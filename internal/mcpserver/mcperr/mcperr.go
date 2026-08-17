@@ -24,7 +24,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 )
 
 // Call describes the call an error came out of, so the mapped message can
@@ -65,11 +65,11 @@ func (c Call) Map(err error) error {
 	// MapError classifies; the phrasing below is ours.
 	switch mapped := client.MapError(err); {
 	case errors.Is(mapped, client.ErrUnreachable):
-		return fmt.Errorf("sandbox %s is unreachable at %s: %s. Check the host is powered on and sandboxd-agent is running; sandbox_list shows current health",
+		return fmt.Errorf("sandbox %s is unreachable at %s: %s. Check the host is powered on and fleet-agent is running; fleet_list shows current health",
 			c.Sandbox, c.addressOrUnknown(), message(err))
 
 	case errors.Is(mapped, client.ErrCertificateRejected):
-		return fmt.Errorf("sandbox %s rejected this client's certificate: %s. The control certificate is missing, expired, or issued by a different fleet CA; re-issue it with sandboxctl",
+		return fmt.Errorf("sandbox %s rejected this client's certificate: %s. The control certificate is missing, expired, or issued by a different fleet CA; re-issue it with fleetctl",
 			c.Sandbox, message(err))
 
 	case errors.Is(mapped, client.ErrPermissionDenied):
@@ -139,7 +139,7 @@ func (c Call) limitSuffix() string {
 // around it and no "rpc error: code = … desc =" envelope left in it.
 //
 // [Call.Map] is for a failure the model has to act on, and phrases a whole
-// sentence naming the host and what to check. A sandbox_list detail column is
+// sentence naming the host and what to check. A fleet_list detail column is
 // the other case: the row it sits in already carries the name, the address and
 // the health, so repeating them there costs tokens on every fleet check and
 // tells the reader nothing new. Both go through this package so neither path

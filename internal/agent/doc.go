@@ -1,4 +1,4 @@
-// Package agent hosts the sandboxd-agent daemon: configuration, the mandatory
+// Package agent hosts the fleet-agent daemon: configuration, the mandatory
 // mTLS gRPC server, and the lifecycle every M1 service plugs into.
 //
 // # Registering a service
@@ -22,7 +22,7 @@
 // The daemon constructs every registered factory once, in name order, before
 // it starts listening, and fails to start if any of them returns an error. The
 // only wiring a new service package needs outside itself is one blank import
-// in internal/cli/sandboxdagent/services.go.
+// in internal/cli/fleetagent/services.go.
 //
 // # What a service gets
 //

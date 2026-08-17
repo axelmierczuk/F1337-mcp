@@ -5,7 +5,7 @@ package sandboxd.v1;
 import "google/protobuf/timestamp.proto";
 import "sandboxd/v1/common.proto";
 
-option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
 
 // HostService reports identity, capability, and liveness for a sandbox host.
 // It is the first service the MCP server calls after dialing an agent.
@@ -16,7 +16,7 @@ service HostService {
   rpc GetHostInfo(GetHostInfoRequest) returns (GetHostInfoResponse);
 
   // Health is a cheap liveness and readiness probe used to populate sandbox
-  // status in sandbox_list without paying for full host introspection.
+  // status in fleet_list without paying for full host introspection.
   rpc Health(HealthRequest) returns (HealthResponse);
 }
 
@@ -30,7 +30,7 @@ message GetHostInfoResponse {
   Platform platform = 1;
   Resources resources = 2;
   repeated Toolchain toolchains = 3;
-  // Semantic version of the sandboxd-agent binary serving this request.
+  // Semantic version of the fleet-agent binary serving this request.
   string agent_version = 4;
   // Absolute paths the agent will allow filesystem operations under. Empty
   // means the agent is running without a path jail, which it warns about.

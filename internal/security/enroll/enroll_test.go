@@ -22,9 +22,9 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/enroll"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
 )
 
 func newTestCA(t *testing.T) *ca.CA {
@@ -37,7 +37,7 @@ func newTestCA(t *testing.T) *ca.CA {
 
 // startControlPlane serves an enroll.Service over an in-memory bufconn
 // listener, presenting a CA-signed leaf as its server identity — exactly as
-// sandboxctl serve does, keeping the CA private key out of the process that
+// fleetctl serve does, keeping the CA private key out of the process that
 // terminates TLS for unauthenticated callers.
 func startControlPlane(t *testing.T, svc *enroll.Service, caObj *ca.CA) *bufconn.Listener {
 	t.Helper()

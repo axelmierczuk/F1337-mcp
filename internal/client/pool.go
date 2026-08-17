@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
 // entry is one pooled channel and its background health state.
@@ -27,7 +27,7 @@ type entry struct {
 	cancel context.CancelFunc
 }
 
-// Pool dials sandboxd-agent instances over mTLS gRPC, keeping one long-lived
+// Pool dials fleet-agent instances over mTLS gRPC, keeping one long-lived
 // channel per sandbox name and a periodically refreshed health cache
 // alongside it.
 //

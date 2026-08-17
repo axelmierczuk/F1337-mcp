@@ -5,10 +5,10 @@ package sandboxd.v1;
 import "google/protobuf/timestamp.proto";
 import "sandboxd/v1/common.proto";
 
-option go_package = "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1;sandboxdv1";
+option go_package = "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1;sandboxdv1";
 
-// EnrollmentService is served by the control plane (sandboxctl serve), not by
-// sandboxd-agent. It is the one endpoint an unenrolled host may talk to.
+// EnrollmentService is served by the control plane (fleetctl serve), not by
+// fleet-agent. It is the one endpoint an unenrolled host may talk to.
 //
 // This is the only RPC path that is not mutually authenticated, because the
 // calling agent has no certificate yet. It is server-authenticated TLS plus a
@@ -25,7 +25,7 @@ service EnrollmentService {
 }
 
 message EnrollRequest {
-  // Single-use token minted by "sandboxctl enroll mint".
+  // Single-use token minted by "fleetctl enroll mint".
   string token = 1;
   // PKCS#10 certificate signing request in DER form.
   bytes csr_der = 2;

@@ -6,9 +6,9 @@ import (
 	"os"
 	"sync"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/client"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
 )
 
 // credentialPaths locates the mTLS material the control plane presents to
@@ -25,7 +25,7 @@ type credentialPaths struct {
 // constructed, and on a fresh workstation neither does. Building it eagerly
 // would mean the MCP server refuses to start on exactly the machine where the
 // user most needs it to start and tell them why. Building it lazily means
-// sandbox_list and sandbox_add keep working, and the first call that actually
+// fleet_list and fleet_add keep working, and the first call that actually
 // has to reach an agent fails with a message naming the missing file.
 //
 // Construction failures are not cached: certificates appear while a server is
@@ -61,15 +61,15 @@ func (l *lazyPool) get() (*client.Pool, error) {
 		return nil, fmt.Errorf("the MCP server is shutting down")
 	}
 
-	caCert, err := readCredential(l.paths.caCert, "fleet CA certificate", "sandboxctl ca init")
+	caCert, err := readCredential(l.paths.caCert, "fleet CA certificate", "fleetctl ca init")
 	if err != nil {
 		return nil, err
 	}
-	cert, err := readCredential(l.paths.cert, "control certificate", "sandboxctl ca sign --profile control")
+	cert, err := readCredential(l.paths.cert, "control certificate", "fleetctl ca sign --profile control")
 	if err != nil {
 		return nil, err
 	}
-	key, err := readCredential(l.paths.key, "control private key", "sandboxctl ca sign --profile control")
+	key, err := readCredential(l.paths.key, "control private key", "fleetctl ca sign --profile control")
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (l *lazyPool) Forward(name, address string) (sandboxdv1.ForwardServiceClien
 }
 
 // Health reports cached health, and false when nothing has been dialed —
-// including when the pool has never been built. sandbox_list without refresh
+// including when the pool has never been built. fleet_list without refresh
 // must not be the thing that forces a certificate to exist.
 func (l *lazyPool) Health(name string) (client.HealthStatus, bool) {
 	l.mu.Lock()

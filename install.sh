@@ -1,7 +1,7 @@
 #!/bin/sh
-# sandboxd-agent installer.
+# fleet-agent installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
 #     | sh -s -- --token <enrollment-token> --control <control-host:9443> \
 #         --ca-fingerprint <sha256-of-the-fleet-CA> --root /path/to/workspace
 #
@@ -16,7 +16,7 @@
 
 set -eu
 
-REPO="axelmierczuk/sandboxd-mcp"
+REPO="axelmierczuk/fleet-mcp"
 BASE_URL="https://github.com/${REPO}/releases"
 API_URL="https://api.github.com/repos/${REPO}/releases"
 
@@ -40,12 +40,12 @@ usage() {
 Usage: install.sh [options]
 
 Options:
-  --token <token>          Enrollment token from `sandboxctl enroll mint`.
+  --token <token>          Enrollment token from `fleetctl enroll mint`.
                            When set, the host enrolls after installation, and
                            --control and --ca-fingerprint become required.
   --control <host:port>    Control-plane enrollment endpoint.
   --ca-fingerprint <hex>   SHA-256 fingerprint of the control-plane CA to pin,
-                           from `sandboxctl ca fingerprint`. Required with
+                           from `fleetctl ca fingerprint`. Required with
                            --token: enrollment refuses to run unpinned.
   --listen <addr:port>     Address the agent serves gRPC on (default 0.0.0.0:8722).
   --name <name>            Sandbox name to request. Only for a token that
@@ -91,11 +91,11 @@ if [ -n "$TOKEN" ]; then
   if [ -z "$CA_FINGERPRINT" ]; then
     die "--token requires --ca-fingerprint <hex>
 
-\`sandboxd-agent enroll\` refuses to run unpinned. Without the fingerprint,
+\`fleet-agent enroll\` refuses to run unpinned. Without the fingerprint,
 anything that can answer on the network collects the token, and the token is
 the only thing between an attacker and a fleet identity.
 
-Get it from the control host with: sandboxctl ca fingerprint"
+Get it from the control host with: fleetctl ca fingerprint"
   fi
 fi
 
@@ -187,11 +187,11 @@ if [ "$INSTALL_SERVICE" = "auto" ]; then
   if [ "$(id -u)" -eq 0 ]; then INSTALL_SERVICE="yes"; else INSTALL_SERVICE="no"; fi
 fi
 
-ARCHIVE="sandboxd-agent_${OS}_${ARCH}.tar.gz"
+ARCHIVE="fleet-agent_${OS}_${ARCH}.tar.gz"
 ARCHIVE_URL="${BASE_URL}/download/${VERSION}/${ARCHIVE}"
 CHECKSUM_URL="${BASE_URL}/download/${VERSION}/checksums.txt"
 
-log "sandboxd-agent ${VERSION} for ${OS}/${ARCH}"
+log "fleet-agent ${VERSION} for ${OS}/${ARCH}"
 
 TMPDIR_="$(mktemp -d)"
 cleanup() { rm -rf "$TMPDIR_"; }
@@ -226,14 +226,14 @@ fi
 log "extracting"
 tar -xzf "${TMPDIR_}/${ARCHIVE}" -C "$TMPDIR_" \
   || die "could not extract ${ARCHIVE}"
-[ -f "${TMPDIR_}/sandboxd-agent" ] || die "archive did not contain sandboxd-agent"
+[ -f "${TMPDIR_}/fleet-agent" ] || die "archive did not contain fleet-agent"
 
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "${TMPDIR_}/sandboxd-agent" "${INSTALL_DIR}/sandboxd-agent" 2>/dev/null \
-  || { cp "${TMPDIR_}/sandboxd-agent" "${INSTALL_DIR}/sandboxd-agent" && chmod 0755 "${INSTALL_DIR}/sandboxd-agent"; } \
+install -m 0755 "${TMPDIR_}/fleet-agent" "${INSTALL_DIR}/fleet-agent" 2>/dev/null \
+  || { cp "${TMPDIR_}/fleet-agent" "${INSTALL_DIR}/fleet-agent" && chmod 0755 "${INSTALL_DIR}/fleet-agent"; } \
   || die "could not install to ${INSTALL_DIR} (try sudo, or --install-dir)"
 
-log "installed ${INSTALL_DIR}/sandboxd-agent"
+log "installed ${INSTALL_DIR}/fleet-agent"
 
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
@@ -263,29 +263,29 @@ if [ -n "$TOKEN" ]; then
   warn "make --root a real jail."
 
   log "enrolling with ${CONTROL}"
-  "${INSTALL_DIR}/sandboxd-agent" "$@" || die "enrollment failed"
+  "${INSTALL_DIR}/fleet-agent" "$@" || die "enrollment failed"
 
   if [ "$INSTALL_SERVICE" = "yes" ]; then
     log "registering system service"
-    "${INSTALL_DIR}/sandboxd-agent" service install \
-      || warn "service registration failed; run 'sandboxd-agent service install' manually"
-    "${INSTALL_DIR}/sandboxd-agent" service start \
-      || warn "service did not start; check 'sandboxd-agent service status'"
+    "${INSTALL_DIR}/fleet-agent" service install \
+      || warn "service registration failed; run 'fleet-agent service install' manually"
+    "${INSTALL_DIR}/fleet-agent" service start \
+      || warn "service did not start; check 'fleet-agent service status'"
   fi
 
-  log "done. This host should now appear in sandbox_list."
+  log "done. This host should now appear in fleet_list."
 else
   cat >&2 <<EOF
 
   Installed, but not enrolled. To join a fleet:
 
-    ${INSTALL_DIR}/sandboxd-agent enroll \\
+    ${INSTALL_DIR}/fleet-agent enroll \\
       --token <enrollment-token> \\
       --control <control-host:9443> \\
       --ca-fingerprint <sha256-of-the-fleet-CA> \\
       --root /path/to/workspace
 
-  Mint a token on the control host with: sandboxctl enroll mint
-  Read its CA fingerprint with:          sandboxctl ca fingerprint
+  Mint a token on the control host with: fleetctl enroll mint
+  Read its CA fingerprint with:          fleetctl ca fingerprint
 EOF
 fi

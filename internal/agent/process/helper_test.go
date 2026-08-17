@@ -21,9 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // The tests supervise the test binary itself.
@@ -36,7 +36,7 @@ import (
 // binary means the same test runs everywhere, against a child whose behaviour
 // the test controls exactly.
 
-const helperEnv = "SANDBOXD_PROCESS_TEST_HELPER"
+const helperEnv = "FLEET_PROCESS_TEST_HELPER"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(helperEnv) != "" {

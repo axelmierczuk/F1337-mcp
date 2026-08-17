@@ -13,11 +13,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent/host"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent/host"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
 )
 
 func newService(t *testing.T, roots ...string) (*host.Service, agent.Deps) {
@@ -85,7 +85,7 @@ func TestGetHostInfo_Resources(t *testing.T) {
 // Everything else in the response — the platform, the roots, the principal, the
 // version — is still true, and the figures that could not be read are zero,
 // which is what the proto documents them as. Failing the RPC instead would take
-// sandbox_info down over a dead mount.
+// fleet_info down over a dead mount.
 func TestGetHostInfo_CapacityFailureStillAnswers(t *testing.T) {
 	root := t.TempDir()
 	svc, deps := newService(t, root)
@@ -126,7 +126,7 @@ func TestGetHostInfo_AllowedRoots(t *testing.T) {
 // down.
 //
 // This is the exec-enabled shape: roots in the config, no jail in force. The
-// field is what sandbox_info and sandbox_select show the model to tell it where
+// field is what fleet_info and fleet_select show the model to tell it where
 // it may write, so echoing back roots that constrain nothing would be the
 // model-facing version of exactly the false confidence this design removed.
 func TestGetHostInfo_ReportsTheJailNotTheConfig(t *testing.T) {

@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent/host"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent/host"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // What internal/platform measures is its own business and its own tests. What
@@ -52,7 +52,7 @@ func hungFilesystem(t *testing.T) *atomic.Int32 {
 // and both block in the kernel on an unresponsive mount, uninterruptibly, with
 // no context to cancel and no deadline to set.
 //
-// Unbounded, an NFS server that stopped answering turns every sandbox_info into
+// Unbounded, an NFS server that stopped answering turns every fleet_info into
 // an RPC that never returns and an OS thread that is never released.
 func TestProbeResources_HungFilesystemDoesNotHangTheCall(t *testing.T) {
 	started := hungFilesystem(t)

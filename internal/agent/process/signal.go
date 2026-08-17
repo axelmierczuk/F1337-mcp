@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // errAlreadyExited is what a caller gets for signalling a process that is no
@@ -31,7 +31,7 @@ var errAlreadyExited = errors.New("the process has already exited")
 func (s *Supervisor) signalRecord(r *record, sig platform.Signal, group bool) error {
 	r.mu.Lock()
 	pid, startID, existing, state := r.pid, r.startID, r.group, r.state
-	jobName := jobObjectName(r.id)
+	jobName := r.jobName
 	r.mu.Unlock()
 
 	if state == sandboxdv1.ProcessState_PROCESS_STATE_ORPHANED {

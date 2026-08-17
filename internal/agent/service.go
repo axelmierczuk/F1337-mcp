@@ -10,8 +10,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/jail"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // Deps is everything the daemon hands a service implementation. It is passed
@@ -139,7 +139,7 @@ var services struct {
 	entries map[string]Factory
 }
 
-// Register makes a service part of every sandboxd-agent daemon that imports
+// Register makes a service part of every fleet-agent daemon that imports
 // its package. Call it from an init function:
 //
 //	func init() {

@@ -21,9 +21,9 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent/exec"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent/exec"
 )
 
 // The command these tests run is this test binary, re-executed in a mode
@@ -31,7 +31,7 @@ import (
 // certain to exist on Linux, macOS and Windows alike, and it behaves the same
 // on all three — where `echo` is a shell builtin on one of them and a file on
 // the others.
-const e2eHelperEnv = "SANDBOXD_EXEC_E2E"
+const e2eHelperEnv = "FLEET_EXEC_E2E"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(e2eHelperEnv) {
@@ -71,7 +71,7 @@ func TestExecService_EndToEnd(t *testing.T) {
 
 	stream, err := client.Exec(ctx, &sandboxdv1.ExecRequest{
 		Argv: []string{selfPath(t), "hello"},
-		Env:  []string{"SANDBOXD_EXEC_E2E=echo"},
+		Env:  []string{"FLEET_EXEC_E2E=echo"},
 	})
 	require.NoError(t, err)
 
@@ -109,7 +109,7 @@ func TestExecService_EndToEnd(t *testing.T) {
 		Outcome   string `json:"outcome"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(lines[0]), &rec))
-	assert.Equal(t, "sandboxd-mcp", rec.Principal,
+	assert.Equal(t, "fleet-mcp", rec.Principal,
 		"the principal is the client certificate's common name, taken from the verified chain")
 	assert.Equal(t, "sandboxd.v1.ExecService/Exec", rec.RPC)
 	assert.Equal(t, "ok", rec.Outcome)

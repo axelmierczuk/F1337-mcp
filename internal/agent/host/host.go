@@ -6,13 +6,13 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
-// init registers HostService with every sandboxd-agent daemon that links this
-// package. See internal/cli/sandboxdagent/services.go for the import that does.
+// init registers HostService with every fleet-agent daemon that links this
+// package. See internal/cli/fleetagent/services.go for the import that does.
 func init() {
 	agent.Register("host", New)
 }
@@ -74,7 +74,7 @@ func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRe
 	if err != nil {
 		// Reported, not fatal: the figures that could be read are still worth
 		// having, and the ones that could not are zero on the wire, which is
-		// what the proto documents them as. Said out loud because "sandbox_info
+		// what the proto documents them as. Said out loud because "fleet_info
 		// reports no free disk" is otherwise an unexplainable answer.
 		s.deps.Log.Warn("could not read host capacity", "disk_path", s.diskPath, "error", err)
 	}
@@ -103,7 +103,7 @@ func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRe
 		},
 		AgentVersion: s.deps.Version,
 		// The jail's roots, never the config's. This field is what
-		// sandbox_info and sandbox_select show the model to tell it where it
+		// fleet_info and fleet_select show the model to tell it where it
 		// may write, so on an agent whose jail is off it must be empty — the
 		// proto's documented "no path jail" — rather than repeating roots that
 		// constrain nothing. Returning the configured list there would be the

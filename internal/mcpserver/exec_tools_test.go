@@ -13,10 +13,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // execResult mirrors tools.ExecResult for decoding a tool result.
@@ -43,7 +43,7 @@ func (f *agentFixture) exec(t *testing.T, mode string, args map[string]any) exec
 	for k, v := range args {
 		call[k] = v
 	}
-	return structured[execResult](t, f.ok("sandbox_exec", call))
+	return structured[execResult](t, f.ok("fleet_exec", call))
 }
 
 // TestExec_SuccessReturnsExitZeroAndItsOutput.
@@ -94,7 +94,7 @@ func TestExec_TimeoutNamesTheLimitThatWasHit(t *testing.T) {
 	assert.True(t, out.TimedOut)
 	assert.Contains(t, out.Note, "1s", "the note must name the limit that was hit")
 	assert.Contains(t, out.Note, "timeout_seconds", "and the argument that raises it")
-	assert.Contains(t, out.Note, "sandbox_process_start", "and where long-running work belongs")
+	assert.Contains(t, out.Note, "fleet_process_start", "and where long-running work belongs")
 }
 
 // TestExec_TruncatedOutputIsMarkedWithWhatWasDropped. The whole point of the
@@ -141,7 +141,7 @@ func TestExec_CancellingTheToolCallKillsTheRemoteProcess(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = f.session.CallTool(ctx, &mcp.CallToolParams{Name: "sandbox_exec", Arguments: map[string]any{
+		_, _ = f.session.CallTool(ctx, &mcp.CallToolParams{Name: "fleet_exec", Arguments: map[string]any{
 			"argv": selfArgv(pidFile, "120"),
 			"env":  helperEnvFor("mark"),
 		}})
@@ -181,7 +181,7 @@ func requireProcessGone(t *testing.T, pid int) {
 func TestExec_MissingBinaryIsAToolErrorNamingIt(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 
-	text := f.fails("sandbox_exec", map[string]any{"argv": []any{"definitely-not-a-real-binary-xyz"}})
+	text := f.fails("fleet_exec", map[string]any{"argv": []any{"definitely-not-a-real-binary-xyz"}})
 
 	assert.Contains(t, text, "definitely-not-a-real-binary-xyz")
 	assert.Contains(t, text, "build-box", "and the sandbox it was refused on")
@@ -193,7 +193,7 @@ func TestExec_MissingBinaryIsAToolErrorNamingIt(t *testing.T) {
 func TestExec_PolicyDenialIsAToolError(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{caps: policy.Caps{MaxTimeout: 2 * time.Second}})
 
-	text := f.fails("sandbox_exec", map[string]any{
+	text := f.fails("fleet_exec", map[string]any{
 		"argv": selfArgv(), "env": helperEnvFor("quiet"), "timeout_seconds": 600,
 	})
 
@@ -204,7 +204,7 @@ func TestExec_PolicyDenialIsAToolError(t *testing.T) {
 // TestExec_ArgvIsRequired: an empty argv never reaches the agent.
 func TestExec_ArgvIsRequired(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
-	text := f.fails("sandbox_exec", map[string]any{"argv": []any{}})
+	text := f.fails("fleet_exec", map[string]any{"argv": []any{}})
 	assert.Contains(t, text, "argv")
 }
 
@@ -219,12 +219,12 @@ func TestExec_AnAbsurdTimeoutIsRefusedRatherThanWrappedAround(t *testing.T) {
 
 	// 2^33 seconds: past the point where twice it, in nanoseconds, leaves the
 	// range of a time.Duration.
-	text := f.fails("sandbox_exec", map[string]any{
+	text := f.fails("fleet_exec", map[string]any{
 		"argv": []any{"true"}, "timeout_seconds": 1 << 33,
 	})
 
 	assert.Contains(t, text, "timeout_seconds")
-	assert.Contains(t, text, "sandbox_process_start", "and where work that long belongs")
+	assert.Contains(t, text, "fleet_process_start", "and where work that long belongs")
 	assert.NotContains(t, text, "timed out", "it is a refusal, not a call that ran and expired")
 }
 
@@ -308,7 +308,7 @@ func TestExec_MegabytesOfOutputDoNotBlowUpTheServer(t *testing.T) {
 	sampler := newHeapSampler(128)
 	f.clients.execOverride = floodExec{total: streamed, sampler: sampler}
 
-	out := structured[execResult](t, f.ok("sandbox_exec", map[string]any{
+	out := structured[execResult](t, f.ok("fleet_exec", map[string]any{
 		"argv": []any{"whatever"}, "max_output_bytes": 64 * 1024,
 	}))
 
@@ -318,5 +318,5 @@ func TestExec_MegabytesOfOutputDoNotBlowUpTheServer(t *testing.T) {
 	assert.LessOrEqual(t, len(out.Stdout), 64*1024+floodChunk)
 	require.Greater(t, sampler.ticks, 512, "the flood has to arrive as many chunks, not one")
 
-	assertHeapBounded(t, sampler, streamed, "sandbox_exec output accumulation")
+	assertHeapBounded(t, sampler, streamed, "fleet_exec output accumulation")
 }

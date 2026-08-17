@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/selection"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
 func newFleet(t *testing.T, names ...string) *registry.Registry {
@@ -27,7 +27,7 @@ func newFleet(t *testing.T, names ...string) *registry.Registry {
 
 // request builds a tools/call request carrying the given _meta.
 func request(meta mcp.Meta) *mcp.CallToolRequest {
-	return &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "sandbox_info", Meta: meta}}
+	return &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "fleet_info", Meta: meta}}
 }
 
 // TestHandle_IsOpaqueStableAndDistinct. Stability is what lets a handle
@@ -146,7 +146,7 @@ func TestResolve_NeverPicksTheOnlySandbox(t *testing.T) {
 	_, err := resolver.ResolveFor("meta:alice", "")
 	var noTarget *selection.NoTargetError
 	require.ErrorAs(t, err, &noTarget)
-	assert.Contains(t, err.Error(), "sandbox_select")
+	assert.Contains(t, err.Error(), "fleet_select")
 	assert.Contains(t, err.Error(), "build-box")
 }
 
@@ -168,7 +168,7 @@ func TestResolve_UnknownReferenceListsWhatExists(t *testing.T) {
 
 // TestResolve_ANameShapedLikeAHandleCannotShadowIt.
 //
-// sandbox_add refuses a name starting with sbx_, but it is not the only way a
+// fleet_add refuses a name starting with sbx_, but it is not the only way a
 // name enters the registry: an enrollment token that reserves no name lets the
 // enrolling host choose its own, checked only for length and printable ASCII.
 // A host that names itself after another sandbox's handle would then collect
@@ -218,18 +218,18 @@ func TestResolve_StaleSelectionIsItsOwnError(t *testing.T) {
 }
 
 // TestErrors_ReadUsefullyOnAnEmptyFleet: with nothing registered, "call
-// sandbox_select" is advice the model cannot follow.
+// fleet_select" is advice the model cannot follow.
 func TestErrors_ReadUsefullyOnAnEmptyFleet(t *testing.T) {
 	noTarget := (&selection.NoTargetError{}).Error()
 	assert.Contains(t, noTarget, "none are registered")
-	assert.Contains(t, noTarget, "sandbox_add")
+	assert.Contains(t, noTarget, "fleet_add")
 	assert.NotContains(t, noTarget, "Registered: \n")
 
 	unknown := (&selection.UnknownSandboxError{Ref: "build-box"}).Error()
 	assert.Contains(t, unknown, "no sandboxes are registered")
 
 	stale := (&selection.StaleSelectionError{Name: "gpu-01"}).Error()
-	assert.Contains(t, stale, "sandbox_add")
+	assert.Contains(t, stale, "fleet_add")
 }
 
 // TestSelection_IsPerIdentityAndPersisted covers the two properties the
@@ -328,7 +328,7 @@ func TestSelection_UnderTheProcessFallbackDoesNotOutliveTheProcess(t *testing.T)
 // Not writing the fallback's selection stops one from being created. It does
 // not remove the ones already on disk: every registry.yaml written by a build
 // from before that fix still carries `process:<pid>` keys, and one of those
-// pids will eventually be handed to a new sandboxd-mcp. Resolution must read
+// pids will eventually be handed to a new fleet-mcp. Resolution must read
 // the fallback identity from memory only, so an inherited key is inert rather
 // than merely unlikely.
 func TestSelection_APersistedProcessKeyIsNeverInherited(t *testing.T) {
@@ -358,7 +358,7 @@ func TestSelection_APersistedProcessKeyIsNeverInherited(t *testing.T) {
 	assert.Empty(t, name)
 }
 
-// TestClearSelectionsFor_ReachesTheInMemoryOne. sandbox_remove has to clear
+// TestClearSelectionsFor_ReachesTheInMemoryOne. fleet_remove has to clear
 // every selection pointing at the sandbox, and the unidentified client's is
 // the one the registry file cannot see.
 func TestClearSelectionsFor_ReachesTheInMemoryOne(t *testing.T) {

@@ -13,8 +13,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
-	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
 )
 
 // Round 2's findings. Each of these fails with its fix reverted.
@@ -56,7 +56,7 @@ func TestTransfer_APulledEntryCannotLeaveTheDestinationThroughASymlinkInsideTheW
 	require.NoError(t, os.MkdirAll(sibling, 0o750))
 	require.NoError(t, os.Symlink(sibling, filepath.Join(destination, "logs")))
 
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": remote, "destination": destination, "recursive": true,
 	}))
 
@@ -103,7 +103,7 @@ func TestTransfer_ASingleFilePullOverTheByteCapIsRefusedNamingIt(t *testing.T) {
 	f.clients.filesOverride = &hugeStatFiles{FileServiceClient: f.backend.files, size: 4 << 30}
 
 	destination := filepath.Join(local, "huge.bin")
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "pull", "source": f.path("huge.bin"), "destination": destination,
 	})
 
@@ -127,7 +127,7 @@ func TestTransfer_ASingleFilePushOverTheByteCapIsRefusedNamingIt(t *testing.T) {
 	require.NoError(t, handle.Close())
 
 	destination := f.path("huge.bin")
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "push", "source": source, "destination": destination,
 	})
 
@@ -174,7 +174,7 @@ func TestTransfer_APulledTreeWhoseDeclaredSizesWrapIsStillRefused(t *testing.T) 
 	f.clients.filesOverride = &wrappingListFiles{FileServiceClient: f.backend.files, root: remote}
 
 	destination := filepath.Join(local, "pulled")
-	text := f.fails("sandbox_transfer", map[string]any{
+	text := f.fails("fleet_transfer", map[string]any{
 		"direction": "pull", "source": remote, "destination": destination, "recursive": true,
 	})
 
@@ -222,7 +222,7 @@ func TestTransfer_TheSkipListIsBoundedWhileItsCountStaysExact(t *testing.T) {
 	remote := f.path("results")
 	f.clients.filesOverride = &manySymlinksFiles{FileServiceClient: f.backend.files, root: remote, count: links}
 
-	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+	out := structured[transferResult](t, f.ok("fleet_transfer", map[string]any{
 		"direction": "pull", "source": remote, "destination": filepath.Join(local, "pulled"), "recursive": true,
 	}))
 

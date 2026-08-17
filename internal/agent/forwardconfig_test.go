@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
 )
 
 // The forward section's defaults are a security decision, not a convenience:

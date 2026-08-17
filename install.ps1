@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs sandboxd-agent on a Windows host.
+    Installs fleet-agent on a Windows host.
 
 .DESCRIPTION
     Downloads the release binary for this platform, verifies its SHA-256
@@ -14,10 +14,10 @@
     fingerprint.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.ps1 | iex
 
 .EXAMPLE
-    $s = irm https://raw.githubusercontent.com/axelmierczuk/sandboxd-mcp/main/install.ps1
+    $s = irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.ps1
     & ([scriptblock]::Create($s)) -Token abc123 -Control control.local:9443 `
         -CaFingerprint 9f86d0...  -Root C:\workspace
 #>
@@ -25,7 +25,7 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
     Justification = 'Installer progress must be visible when this script is piped into iex; the information stream is not shown by default there.')]
 param(
-    # Enrollment token from `sandboxctl enroll mint`. When set, the host
+    # Enrollment token from `fleetctl enroll mint`. When set, the host
     # enrolls after installation, and -Control and -CaFingerprint are required.
     [string] $Token,
 
@@ -33,7 +33,7 @@ param(
     [string] $Control,
 
     # SHA-256 fingerprint of the control-plane CA to pin, from
-    # `sandboxctl ca fingerprint`. Required with -Token: enrollment refuses to
+    # `fleetctl ca fingerprint`. Required with -Token: enrollment refuses to
     # run unpinned.
     [string] $CaFingerprint,
 
@@ -66,7 +66,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Repo    = 'axelmierczuk/sandboxd-mcp'
+$Repo    = 'axelmierczuk/fleet-mcp'
 $BaseUrl = "https://github.com/$Repo/releases"
 $ApiUrl  = "https://api.github.com/repos/$Repo/releases"
 
@@ -106,11 +106,11 @@ if ($Token) {
         throw @'
 -Token requires -CaFingerprint <hex>.
 
-`sandboxd-agent enroll` refuses to run unpinned. Without the fingerprint,
+`fleet-agent enroll` refuses to run unpinned. Without the fingerprint,
 anything that can answer on the network collects the token, and the token is
 the only thing between an attacker and a fleet identity.
 
-Get it from the control host with: sandboxctl ca fingerprint
+Get it from the control host with: fleetctl ca fingerprint
 '@
     }
 }
@@ -121,9 +121,9 @@ $elevated  = Test-Elevated
 
 if (-not $InstallDir) {
     $InstallDir = if ($elevated) {
-        Join-Path $env:ProgramFiles 'sandboxd'
+        Join-Path $env:ProgramFiles 'fleet'
     } else {
-        Join-Path $env:LOCALAPPDATA 'Programs\sandboxd'
+        Join-Path $env:LOCALAPPDATA 'Programs\fleet'
     }
 }
 
@@ -134,13 +134,13 @@ if ($Service -eq 'yes' -and -not $elevated) {
     throw 'Registering a Windows service requires an elevated PowerShell session.'
 }
 
-$archive      = "sandboxd-agent_windows_$arch.zip"
+$archive      = "fleet-agent_windows_$arch.zip"
 $archiveUrl   = "$BaseUrl/download/$resolved/$archive"
 $checksumUrl  = "$BaseUrl/download/$resolved/checksums.txt"
 
-Write-Step "sandboxd-agent $resolved for windows/$arch"
+Write-Step "fleet-agent $resolved for windows/$arch"
 
-$work = Join-Path ([IO.Path]::GetTempPath()) ("sandboxd-" + [Guid]::NewGuid().ToString('n'))
+$work = Join-Path ([IO.Path]::GetTempPath()) ("fleet-" + [Guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 
 try {
@@ -177,17 +177,17 @@ This means the download was corrupted or tampered with. Not installing.
     Write-Step 'extracting'
     Expand-Archive -Path $archivePath -DestinationPath $work -Force
 
-    $binary = Join-Path $work 'sandboxd-agent.exe'
-    if (-not (Test-Path $binary)) { throw 'Archive did not contain sandboxd-agent.exe.' }
+    $binary = Join-Path $work 'fleet-agent.exe'
+    if (-not (Test-Path $binary)) { throw 'Archive did not contain fleet-agent.exe.' }
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    $target = Join-Path $InstallDir 'sandboxd-agent.exe'
+    $target = Join-Path $InstallDir 'fleet-agent.exe'
     Copy-Item -Path $binary -Destination $target -Force
 
     Write-Step "installed $target"
 
     # Put the install directory on PATH for the appropriate scope, so the
-    # operator can run `sandboxd-agent` without qualifying it.
+    # operator can run `fleet-agent` without qualifying it.
     $scope    = if ($elevated) { 'Machine' } else { 'User' }
     $current  = [Environment]::GetEnvironmentVariable('Path', $scope)
     if ($current -notlike "*$InstallDir*") {
@@ -219,16 +219,16 @@ This means the download was corrupted or tampered with. Not installing.
             Write-Step 'registering Windows service'
             & $target service install
             if ($LASTEXITCODE -ne 0) {
-                Write-Warn "Service registration failed; run 'sandboxd-agent service install' manually."
+                Write-Warn "Service registration failed; run 'fleet-agent service install' manually."
             } else {
                 & $target service start
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Warn "Service did not start; check 'sandboxd-agent service status'."
+                    Write-Warn "Service did not start; check 'fleet-agent service status'."
                 }
             }
         }
 
-        Write-Step 'done. This host should now appear in sandbox_list.'
+        Write-Step 'done. This host should now appear in fleet_list.'
     } else {
         Write-Host @"
 
@@ -240,8 +240,8 @@ This means the download was corrupted or tampered with. Not installing.
       --ca-fingerprint <sha256-of-the-fleet-CA> ``
       --root C:\path\to\workspace
 
-  Mint a token on the control host with: sandboxctl enroll mint
-  Read its CA fingerprint with:          sandboxctl ca fingerprint
+  Mint a token on the control host with: fleetctl enroll mint
+  Read its CA fingerprint with:          fleetctl ca fingerprint
 "@
     }
 } finally {
