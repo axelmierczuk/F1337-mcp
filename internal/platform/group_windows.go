@@ -43,12 +43,71 @@ var (
 // package closes it. It is documented rather than papered over, and Kill
 // terminates the leader as well as the job so a partial assignment still kills
 // what the agent definitely owns.
+//
+// # Why the leader is a handle and not a pid
+//
+// A pid names a process only for as long as the process object behind it
+// exists, and Windows frees that object when the last handle to it closes —
+// os/exec closes its own in Wait. Pids then come back out of a free list rather
+// than in increasing order, so the number a group recorded at Adopt can be
+// answering for something else by the time the group is asked to kill
+// something. Terminating it would be a TerminateProcess against an uninvolved
+// process, with the exit code these job objects use: 1.
+//
+// So the group opens a handle to the leader at the one moment the pid is
+// unambiguous — Adopt, while os/exec still holds a handle of its own — and
+// works from that handle afterwards. Holding it also makes the hazard
+// unreachable rather than narrow: Windows will not reissue a pid while any
+// handle to its process object is open, so g.pid stays correct for as long as
+// the group exists, which is what lets Signal keep passing it to
+// GenerateConsoleCtrlEvent.
 type ProcessGroup struct {
-	mu       sync.Mutex
-	job      windows.Handle
-	pid      uint32
-	isolated bool
-	closed   bool
+	mu  sync.Mutex
+	job windows.Handle
+	pid uint32
+	// leader is the handle opened when the group took the process on, and the
+	// only thing that may be terminated. Zero when the group never managed to
+	// open one, in which case leaderErr says why and is reported instead of
+	// acting on the pid.
+	leader    windows.Handle
+	leaderErr error
+	isolated  bool
+	closed    bool
+}
+
+// Access rights for the leader handle.
+//
+// PROCESS_SET_QUOTA is what AssignProcessToJobObject needs and is asked for
+// only on the path that assigns. The re-adoption path opens the same rights the
+// old resolve-at-kill-time code did, so a process it could reach before is one
+// it can still reach.
+const (
+	adoptAccess  = windows.PROCESS_SET_QUOTA | windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION
+	leaderAccess = windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION
+)
+
+// openLeader resolves a pid to the handle the group will hold from then on.
+//
+// This is the only OpenProcess on a pid in this file's kill path, and it runs
+// once, while the caller still has a reason to believe the pid is what it
+// thinks it is. Its errors are shaped the way the kill path reports them, so a
+// failure recorded here reads the same at kill time as it used to when the
+// resolution happened there.
+func openLeader(pid uint32, access uint32) (windows.Handle, error) {
+	h, err := windows.OpenProcess(access, false, pid)
+	if err != nil {
+		// Only the errors that actually mean "no such process" may be reported
+		// as one. An OpenProcess that fails because this agent may not touch
+		// the process — the re-adoption path asks about pids it no longer owns
+		// — says the process is there and alive, and reporting that as
+		// ErrProcessNotFound tells the supervisor to stop trying and mark a
+		// running process dead. See processGone.
+		if processGone(err) {
+			return 0, fmt.Errorf("platform: pid %d: %w", pid, ErrProcessNotFound)
+		}
+		return 0, fmt.Errorf("platform: opening pid %d: %w", pid, err)
+	}
+	return h, nil
 }
 
 func newProcessGroup(cfg GroupConfig) (*ProcessGroup, error) {
@@ -98,15 +157,34 @@ func openProcessGroup(pid int, name string) (*ProcessGroup, error) {
 		return nil, err
 	}
 
+	// Validated before anything is opened, so no failure past this point has a
+	// handle to give back.
+	var namePtr *uint16
+	if name != "" {
+		var err error
+		namePtr, err = windows.UTF16PtrFromString(name)
+		if err != nil {
+			return nil, fmt.Errorf("platform: invalid job object name %q: %w", name, err)
+		}
+	}
+
 	g := &ProcessGroup{pid: uint32(pid)} //nolint:gosec // pid is positive, checked above
-	if name == "" {
+
+	// Pin it now, for the reason Adopt does: StatProcess has just established
+	// that this pid is a live process, and a handle is what keeps that true
+	// afterwards. A failure is remembered rather than returned, because what
+	// this call owes its caller is a decision about the job — the leader's own
+	// error is the one Signal has always reported, at the moment it is asked.
+	if h, err := openLeader(g.pid, leaderAccess); err != nil {
+		g.leaderErr = err
+	} else {
+		g.leader = h
+	}
+
+	if namePtr == nil {
 		return g, nil
 	}
 
-	namePtr, err := windows.UTF16PtrFromString(name)
-	if err != nil {
-		return nil, fmt.Errorf("platform: invalid job object name %q: %w", name, err)
-	}
 	// LazyProc.Call is an ordinary Go function, so converting namePtr inside
 	// its argument list does not pin the string the way the same conversion
 	// would in a direct syscall.Syscall call. Nothing reads namePtr after this
@@ -127,27 +205,31 @@ func openProcessGroup(pid int, name string) (*ProcessGroup, error) {
 	}
 
 	g.job = windows.Handle(handle)
-	g.isolated = processInJob(g.job, g.pid)
+	g.isolated = processInJob(g.job, g.leader)
 	if !g.isolated {
 		// Reopening a job by name that this process is not in means the name
-		// was reused by something else. Do not keep the handle.
+		// was reused by something else. Do not keep the handle. A group that
+		// could not open its leader at all lands here too, and for the same
+		// reason: it cannot tell whether this job is the right one, and using a
+		// job object it cannot vouch for is the mistake this branch exists to
+		// avoid.
 		_ = windows.CloseHandle(g.job)
 		g.job = 0
 	}
 	return g, nil
 }
 
-func processInJob(job windows.Handle, pid uint32) bool {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-	if err != nil {
+// processInJob asks about the process the group pinned, not about whoever holds
+// its pid now — which is the whole reason the handle is kept.
+func processInJob(job, process windows.Handle) bool {
+	if process == 0 {
 		return false
 	}
-	defer func() { _ = windows.CloseHandle(h) }()
 
 	// result is written by the kernel, so it must still be where it was when
 	// its address was taken. See the KeepAlive note in openProcessGroup.
 	var result int32
-	r, _, _ := procIsProcessInJb.Call(uintptr(h), uintptr(job), uintptr(unsafe.Pointer(&result))) //nolint:gosec // G103: LazyProc.Call takes ...uintptr; the PBOOL out-parameter has no other form
+	r, _, _ := procIsProcessInJb.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&result))) //nolint:gosec // G103: LazyProc.Call takes ...uintptr; the PBOOL out-parameter has no other form
 	runtime.KeepAlive(&result)
 	return r != 0 && result != 0
 }
@@ -176,8 +258,10 @@ func (g *ProcessGroup) ConfigurePTYCommand(cmd *pty.Cmd) {
 	g.Configure(cmd.SysProcAttr)
 }
 
-// Adopt assigns the started child to the job object. See the type comment for
-// the race this cannot close.
+// Adopt takes the started child on: it opens the handle the group will hold for
+// the rest of its life, and assigns the child to the job object. See the type
+// comment for the assignment race this cannot close, and for why the handle is
+// opened here rather than at the moment it is used.
 //
 // When it returns an error the group still knows the child's pid but has not
 // assigned it, so Signal and Kill fall back to the leader alone and report the
@@ -198,19 +282,32 @@ func (g *ProcessGroup) Adopt(p *os.Process) error {
 	}
 
 	g.pid = uint32(p.Pid) //nolint:gosec // pid is positive, checked above
+	if g.leader != 0 {
+		// A second Adopt replaces the first. Nothing in this repository does
+		// that, but leaving the old handle open would reserve a pid nothing is
+		// going to release.
+		_ = windows.CloseHandle(g.leader)
+		g.leader, g.leaderErr = 0, nil
+	}
+
+	// The one moment the pid is unambiguous: p is the process os/exec just
+	// started and has not waited on, so its own handle is still holding the
+	// process object — and the pid — against reuse. Every later call works from
+	// the handle taken here.
+	h, err := openLeader(g.pid, adoptAccess)
+	if err != nil {
+		g.leaderErr = err
+		return fmt.Errorf("platform: adopting pid %d: %w", p.Pid, err)
+	}
+	g.leader = h
+
 	if g.job == 0 {
 		return nil
 	}
-
-	h, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
-		false, g.pid)
-	if err != nil {
-		return fmt.Errorf("platform: opening pid %d to assign it to a job: %w", p.Pid, err)
-	}
-	defer func() { _ = windows.CloseHandle(h) }()
-
 	if err := windows.AssignProcessToJobObject(g.job, h); err != nil {
+		// The handle is kept: assignment failing is exactly the degraded case
+		// where the leader is all there is to act on, and acting on it by
+		// handle is the point.
 		return fmt.Errorf("platform: assigning pid %d to job object: %w", p.Pid, err)
 	}
 	g.isolated = true
@@ -264,14 +361,15 @@ func (g *ProcessGroup) GroupID() int { return 0 }
 // infer it from this error.
 //
 // The lock is held across the whole call rather than only across the field
-// read. g.job is a kernel handle, and copying it out before releasing the lock
-// leaves a window in which Close can release it: the value then names nothing,
-// or — because Windows reissues handle values as soon as they are free — names
-// whatever object the process opened next. Terminating an unrelated job object
-// because a Kill and a deferred Close overlapped is a worse outcome than
-// either failing or blocking, and `defer g.Close()` beside a Kill from a
-// timeout goroutine is the ordinary way to use this type. The Unix
-// implementation needs no equivalent because it holds no OS resource.
+// read. g.job and g.leader are kernel handles, and copying either out before
+// releasing the lock leaves a window in which Close can release it: the value
+// then names nothing, or — because Windows reissues handle values as soon as
+// they are free — names whatever object the process opened next. Terminating an
+// unrelated job object or an unrelated process because a Kill and a deferred
+// Close overlapped is a worse outcome than either failing or blocking, and
+// `defer g.Close()` beside a Kill from a timeout goroutine is the ordinary way
+// to use this type. The Unix implementation needs no equivalent because it
+// holds no OS resource.
 func (g *ProcessGroup) Signal(sig Signal) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -285,12 +383,21 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 
 	switch sig {
 	case SignalInt:
+		// A console process group is named by a pid and there is no handle form
+		// of this call, so this one is only as good as g.pid. It is good enough
+		// because the group holds a handle to the leader: Windows will not
+		// reissue that pid while the handle is open, so the number still names
+		// the process this group adopted. A group that never opened one has
+		// nothing to reserve its pid, so refuse rather than aim at a number.
+		if g.leader == 0 {
+			return g.leaderReason()
+		}
 		if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, g.pid); err != nil {
 			return fmt.Errorf("platform: sending CTRL_BREAK_EVENT to pid %d: %w", g.pid, err)
 		}
 		return nil
 	case SignalTerm, SignalKill:
-		return terminate(g.job, g.pid, g.isolated)
+		return terminate(g.job, g.leaderRef(), g.isolated)
 	case SignalUnspecified, SignalHup, SignalUSR1, SignalUSR2:
 		return fmt.Errorf("%w: %s", ErrSignalUnsupported, sig)
 	default:
@@ -301,6 +408,33 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 // stillActive is STILL_ACTIVE, the exit code GetExitCodeProcess reports for a
 // process that has not exited.
 const stillActive = 259
+
+// leaderRef is how the group names the process it took on: the handle it opened
+// while the pid was still unambiguous, plus the pid itself for messages.
+//
+// The pid is never resolved back to a process. That is the difference between
+// this type and the uint32 it replaced.
+type leaderRef struct {
+	handle windows.Handle
+	pid    uint32
+	// err is why handle is zero — the group never opened one, or the open
+	// failed. It is reported instead of falling back to the pid.
+	err error
+}
+
+// leaderRef snapshots the leader under the lock the caller already holds.
+func (g *ProcessGroup) leaderRef() leaderRef {
+	return leaderRef{handle: g.leader, pid: g.pid, err: g.leaderErr}
+}
+
+// leaderReason is the error for an operation that needed a leader handle the
+// group does not have.
+func (g *ProcessGroup) leaderReason() error {
+	if g.leaderErr != nil {
+		return g.leaderErr
+	}
+	return ErrNoProcess
+}
 
 // terminate kills the job, then the leader.
 //
@@ -325,22 +459,22 @@ const stillActive = 259
 //     supervisor stops trying. The Unix implementation has never had this
 //     problem, because a group it could not create is a group it signals by
 //     pid, and kill(2)'s answer is passed straight back.
-func terminate(job windows.Handle, pid uint32, assigned bool) error {
+func terminate(job windows.Handle, leader leaderRef, assigned bool) error {
 	if job == 0 {
-		return terminateProcess(pid)
+		return terminateLeader(leader)
 	}
 
 	if err := windows.TerminateJobObject(job, 1); err != nil {
 		// The job did not go down. The leader is then the only thing left to
 		// try, and its error is the one worth reporting.
 		jobErr := fmt.Errorf("platform: terminating job object: %w", err)
-		if leaderErr := terminateProcess(pid); leaderErr != nil {
+		if leaderErr := terminateLeader(leader); leaderErr != nil {
 			return errors.Join(jobErr, leaderErr)
 		}
 		return jobErr
 	}
 
-	leaderErr := terminateProcess(pid)
+	leaderErr := terminateLeader(leader)
 	if !assigned {
 		return leaderErr
 	}
@@ -349,34 +483,46 @@ func terminate(job windows.Handle, pid uint32, assigned bool) error {
 	return nil
 }
 
-// terminateProcess kills a single process, treating "it already exited" as
-// success rather than as the access-denied error Windows reports for it.
-func terminateProcess(pid uint32) error {
-	h, err := windows.OpenProcess(
-		windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-	if err != nil {
-		// Only the errors that actually mean "no such process" may be reported
-		// as one. An OpenProcess that fails because this agent may not touch
-		// the process — the re-adoption path asks about pids it no longer owns
-		// — says the process is there and alive, and reporting that as
-		// ErrProcessNotFound tells the supervisor to stop trying and mark a
-		// running process dead. See processGone.
-		if processGone(err) {
-			return fmt.Errorf("platform: pid %d: %w", pid, ErrProcessNotFound)
+// terminateLeader kills the process the group took on, through the handle it
+// has held since it took it on.
+//
+// There is no OpenProcess here, and its absence is the fix. Resolving the pid
+// at this moment asks the kernel who holds that number now — a different
+// question, with a different answer, once Wait has released the leader and
+// Windows has handed the number to something else off the free list. The wrong
+// answer is a TerminateProcess against an uninvolved process, which on Windows
+// leaves it dead with exit code 1 and no output of its own to say what
+// happened. A handle names one process for its whole lifetime and cannot be
+// wrong about which.
+//
+// A leader that has already exited reports ErrProcessNotFound rather than
+// success. Every caller reads that as "already gone", which it is. The reading
+// it replaces — that this call killed it — is the one a supervisor must not be
+// given for a process it may still need to stop, and it was only ever the
+// answer here because a pid that some other handle kept alive looked different
+// from one that nothing did.
+func terminateLeader(l leaderRef) error {
+	if l.handle == 0 {
+		// No handle means the group never pinned this pid, so the pid is not
+		// evidence of anything. Say why instead of terminating whatever holds
+		// it now.
+		if l.err != nil {
+			return l.err
 		}
-		return fmt.Errorf("platform: opening pid %d to terminate it: %w", pid, err)
+		return ErrNoProcess
 	}
-	defer func() { _ = windows.CloseHandle(h) }()
 
-	if processExited(h) {
-		return nil
+	if processExited(l.handle) {
+		return fmt.Errorf("platform: pid %d: %w", l.pid, ErrProcessNotFound)
 	}
-	if err := windows.TerminateProcess(h, 1); err != nil {
-		// It can exit on its own between the check and the call.
-		if processExited(h) {
+	if err := windows.TerminateProcess(l.handle, 1); err != nil {
+		// It can exit on its own between the check and the call. TerminateProcess
+		// against a process that has already exited fails with
+		// ERROR_ACCESS_DENIED, and that is not this call failing.
+		if processExited(l.handle) {
 			return nil
 		}
-		return fmt.Errorf("platform: terminating pid %d: %w", pid, err)
+		return fmt.Errorf("platform: terminating pid %d: %w", l.pid, err)
 	}
 	return nil
 }
@@ -398,9 +544,15 @@ func processExited(h windows.Handle) bool {
 // Kill terminates the whole tree immediately.
 func (g *ProcessGroup) Kill() error { return g.Signal(SignalKill) }
 
-// Close releases the job handle. When the group was created with
-// GroupConfig.KillOnClose, this is what kills the tree — the last handle
-// closing is the trigger.
+// Close releases the job handle and the leader handle. When the group was
+// created with GroupConfig.KillOnClose, closing the job is what kills the tree
+// — the last handle closing is the trigger.
+//
+// The leader handle goes first, and only its own reference goes with it: the
+// process stays in the job, so a KillOnClose group still takes the tree down on
+// the next line. What is given up is the pid reservation, which is exactly
+// right — a closed group cannot be asked to signal anything, so it has no
+// business holding a pid out of circulation.
 func (g *ProcessGroup) Close() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -408,13 +560,20 @@ func (g *ProcessGroup) Close() error {
 		return nil
 	}
 	g.closed = true
-	if g.job == 0 {
-		return nil
+
+	var errs []error
+	if g.leader != 0 {
+		if err := windows.CloseHandle(g.leader); err != nil {
+			errs = append(errs, fmt.Errorf("platform: closing leader handle: %w", err))
+		}
+		g.leader = 0
 	}
-	job := g.job
-	g.job = 0
-	if err := windows.CloseHandle(job); err != nil {
-		return fmt.Errorf("platform: closing job object: %w", err)
+	if g.job != 0 {
+		job := g.job
+		g.job = 0
+		if err := windows.CloseHandle(job); err != nil {
+			errs = append(errs, fmt.Errorf("platform: closing job object: %w", err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }

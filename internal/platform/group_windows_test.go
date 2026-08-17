@@ -86,11 +86,13 @@ func readWindowsPIDs(t *testing.T, path string) (first, second int) {
 
 // requireGoneWithin waits for a pid to stop existing.
 //
-// Only valid for a process this test holds no handle to. Windows keeps the
-// process object, and with it the pid, until every handle closes, so a
-// process the test itself started through os/exec keeps existing until Wait
-// runs no matter how thoroughly it has been terminated. For those, wait on
-// the channel from sleeperWithExit first.
+// Only valid for a process nothing in this test still holds a handle to.
+// Windows keeps the process object, and with it the pid, until every handle
+// closes, so a process the test itself started through os/exec keeps existing
+// until Wait runs no matter how thoroughly it has been terminated. For those,
+// wait on the channel from sleeperWithExit first — and if a ProcessGroup
+// adopted it, close the group too, because a group holds a handle to its leader
+// for exactly this reason.
 func requireGoneWithin(t *testing.T, pid int, within time.Duration) {
 	t.Helper()
 
@@ -179,6 +181,15 @@ func TestJobObject_ReopenWithUnknownNameDegrades(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatalf("pid %d did not exit after Kill", pid)
 	}
+
+	// os/exec's handle was not the last one. This group holds the other, and
+	// holds it on purpose: a group that can still be asked to signal its leader
+	// must keep that leader's pid out of circulation, or the next Signal names
+	// whatever the kernel handed the number to. Closing the group is what gives
+	// the pid back, and nothing before that does.
+	require.True(t, platform.ProcessExists(pid),
+		"an open group reserves its leader's pid, so pid %d cannot yet be reissued", pid)
+	require.NoError(t, reopened.Close())
 	requireGoneWithin(t, pid, 30*time.Second)
 }
 
@@ -255,6 +266,61 @@ func TestJobObject_UnassignedLeaderIsNotReportedAsKilled(t *testing.T) {
 	require.ErrorIs(t, group.Kill(), platform.ErrProcessNotFound,
 		"an empty job proves nothing about a process that was never assigned to it, "+
 			"so the leader's own answer is the caller's")
+}
+
+// TestJobObject_AdoptedLeaderKeepsItsPid covers the leader's lifetime, which
+// is the half of this type that a pid cannot express.
+//
+// A pid is a name only for as long as the process object behind it exists, and
+// Windows frees that object when the last handle to it closes — os/exec closes
+// its own in Wait, and hands pids back out from a free list rather than in
+// increasing order. A group that had kept only the number would be holding a
+// name the kernel is free to give to the next process created, and its next
+// Signal or Kill would resolve that name to whatever answers to it now and
+// terminate it, with the exit code these job objects use: 1.
+//
+// That is not a hypothetical. A process terminated that way writes nothing and
+// exits 1, and `go test -race ./...` on windows-latest reported exactly that
+// for internal/registry — `exit status 1` with no failing test named and no
+// output at all — while internal/agent/exec was killing timed-out command
+// groups in a sibling test binary. Nothing inside internal/registry can produce
+// that signature: an assertion prints `--- FAIL`, a panic prints a stack and
+// exits 2, a deadlock prints the tests it was running. Silent exit 1 is
+// somebody else's TerminateProcess.
+//
+// Holding a handle from Adopt is what makes it impossible rather than
+// unlikely: Windows will not reissue a pid while any handle to its process
+// object is open. So this asserts the invariant instead of trying to lose the
+// race, which cannot be forced — the same reason
+// TestOpen_ParsesUnderTheCrossProcessLock asserts the lock rather than the
+// sharing violation it prevents.
+func TestJobObject_AdoptedLeaderKeepsItsPid(t *testing.T) {
+	t.Parallel()
+
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+	defer group.Close()
+
+	cmd := exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+	group.ConfigureCommand(cmd)
+	require.NoError(t, cmd.Start())
+	require.NoError(t, group.Adopt(cmd.Process))
+
+	pid := group.PID()
+	info, err := platform.StatProcess(pid)
+	require.NoError(t, err)
+
+	// Killed through os/exec rather than through the group, so what is under
+	// test is the state the group is left in and not the path that got it
+	// there. Wait then reaps the process and releases the only other handle to
+	// it, which is the moment an unfixed group's pid becomes reusable.
+	require.NoError(t, cmd.Process.Kill())
+	_ = cmd.Wait()
+
+	require.True(t, platform.SameProcess(pid, info.StartID),
+		"the group can still be asked to signal pid %d, so Windows must not be free to "+
+			"hand that pid to another process; a group that resolves its leader by pid at "+
+			"kill time terminates whatever holds it by then", pid)
 }
 
 // TestJobObject_KillRacingClose covers the job handle's lifetime.
