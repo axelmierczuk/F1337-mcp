@@ -106,12 +106,39 @@ forward:
   #
   #   allowed_hosts: ["db.internal", "10.0.4.7"]
   #
+  # An entry is a hostname, an address, or a CIDR block:
+  #
+  #   allowed_hosts: ["db.internal", "10.0.4.7", "10.9.0.0/16"]
+  #
+  # A hostname is matched literally and dialed by name — you listed a name
+  # because the name is what routes. An address or block is matched against
+  # whatever the target resolves to, and every address it resolves to has to
+  # pass, so a name answering with one permitted and one unpermitted address is
+  # refused rather than allowed on whichever came back first.
+  #
   # Every connection to a host that is not this machine's loopback is written
   # to the audit log below — successful, refused, or failed — with the host
   # asked for, the address dialed, and how many bytes went each way. Never the
   # bytes themselves. Loopback forwards are not recorded: they reach a port on
   # a machine the caller already has exec on.
   allowed_hosts: []
+  # SOCKS5 proxying: the `ssh -D` equivalent, used by `fleetctl socks` and the
+  # fleet_socks tool. Off by default, and separate from allowed_hosts above
+  # because they are different grants.
+  #
+  # A forward reaches a host and port the caller named up front. A proxy reaches
+  # whatever a client asks for, connection by connection, which makes this agent
+  # a general-purpose route into its network rather than a route to one service
+  # on it. So an agent with allowed_hosts set still forwards to exactly those
+  # hosts and serves no proxy at all until this is turned on.
+  #
+  # With this on and allowed_hosts empty, a proxied connection may reach ANY
+  # host this machine can. That is a reasonable choice for a throwaway lab box
+  # and a poor one anywhere else — the agent warns about it at every start, and
+  # the fleet_socks tool refuses to open a proxy on those terms at all, because
+  # "any host" is a decision an operator makes for themselves rather than one a
+  # model inherits.
+  socks_enabled: false
   # Concurrent forwarded connections this agent will carry.
   max_connections: 64
   # How long to wait for the sandbox-side port to accept.

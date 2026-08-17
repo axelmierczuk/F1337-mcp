@@ -112,6 +112,20 @@ func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRe
 		AllowedRoots:           s.deps.Jail.Roots(),
 		StartedAt:              timestamppb.New(s.deps.StartedAt),
 		AuthenticatedPrincipal: principal,
+		// The configured policy, reported for the same reason allowed_roots is:
+		// a caller has to be able to find out what a host permits before it
+		// depends on it. `fleetctl socks` and fleet_socks both read this to
+		// refuse before opening a local listener, rather than opening one that
+		// hands back an address and then refuses every connection through it.
+		//
+		// Unlike allowed_roots this is the config's own words rather than a
+		// narrowed view of them, because there is nothing to narrow: unlike the
+		// jail, every field here is in force exactly as written.
+		ForwardPolicy: &sandboxdv1.ForwardPolicy{
+			Enabled:      s.deps.Config.Forward.IsEnabled(),
+			SocksEnabled: s.deps.Config.Forward.SocksEnabled,
+			AllowedHosts: s.deps.Config.Forward.AllowedHosts,
+		},
 	}
 	if req.GetIncludeToolchains() {
 		resp.Toolchains = s.prober.Probe(ctx)
