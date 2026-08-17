@@ -30,17 +30,39 @@ func statProcess(pid int) (ProcessInfo, error) {
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
-	var creation, exit, kernel, user windows.Filetime
-	if err := windows.GetProcessTimes(h, &creation, &exit, &kernel, &user); err != nil {
+	creation, err := creationTime(h)
+	if err != nil {
 		return ProcessInfo{}, fmt.Errorf("platform: GetProcessTimes for pid %d: %w", pid, err)
 	}
 
-	raw := uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime)
 	return ProcessInfo{
 		PID:       pid,
 		StartTime: time.Unix(0, creation.Nanoseconds()),
-		StartID:   fmt.Sprintf("windows:%d", raw),
+		StartID:   startIDFrom(creation),
 	}, nil
+}
+
+// creationTime reads a process's creation FILETIME through a handle already
+// open on it.
+//
+// Taking a handle rather than a pid is the point: a handle names one process
+// for its whole lifetime, so this cannot be answered by whatever holds the
+// number now. PROCESS_QUERY_LIMITED_INFORMATION is enough, which is why both
+// leaderAccess and adoptAccess can ask it.
+func creationTime(h windows.Handle) (windows.Filetime, error) {
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &creation, &exit, &kernel, &user); err != nil {
+		return windows.Filetime{}, err
+	}
+	return creation, nil
+}
+
+// startIDFrom encodes a creation FILETIME as the opaque StartID that
+// [SameProcess] compares. It is the one place the encoding is written, so a
+// value produced from a handle and one produced from a pid are comparable.
+func startIDFrom(creation windows.Filetime) string {
+	raw := uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime)
+	return fmt.Sprintf("windows:%d", raw)
 }
 
 // processGone reports whether an OpenProcess failure means the pid names no
