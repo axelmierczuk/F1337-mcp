@@ -242,12 +242,44 @@ func (s *Service) MovePath(ctx context.Context, req *sandboxdv1.MovePathRequest)
 		return &sandboxdv1.MovePathResponse{Source: source, Destination: destination}, nil
 	}
 	if !isCrossDevice(err) {
-		return nil, fileError(source, err)
+		return nil, renameError(source, destination, err)
 	}
 	if err := s.moveAcrossDevices(ctx, source, destination, sourceInfo); err != nil {
 		return nil, err
 	}
 	return &sandboxdv1.MovePathResponse{Source: source, Destination: destination}, nil
+}
+
+// renameError explains a rename that failed, naming the endpoint the failure is
+// actually about.
+//
+// A rename takes two paths and fails for reasons belonging to either, so
+// attributing every failure to the source produces sentences that are not true:
+// a destination whose parent directory does not exist made rename return ENOENT,
+// which was reported as "<source> does not exist" about a file sitting right
+// there. A caller — and a model is the caller here — reasonably concludes the
+// source is gone and acts on that.
+//
+// The source was Lstat'd successfully a few lines earlier, so any "does not
+// exist" from the rename itself is about the destination's parent. Everything
+// else names both paths and lets the underlying error say which is at fault.
+func renameError(source, destination string, err error) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return status.Errorf(codes.NotFound,
+			"%s cannot be moved to %s because the destination's parent directory does not exist; create it first, or choose a destination under one that exists",
+			source, destination)
+	case errors.Is(err, fs.ErrPermission):
+		return status.Errorf(codes.PermissionDenied,
+			"moving %s to %s: permission denied", source, destination)
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return status.FromContextError(err).Err()
+	}
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return status.Errorf(codes.Internal, "moving %s to %s: %s: %v", source, destination, pe.Op, pe.Err)
+	}
+	return status.Errorf(codes.Internal, "moving %s to %s: %v", source, destination, err)
 }
 
 // moveAcrossDevices handles the rename that could not happen, because rename
@@ -268,17 +300,8 @@ func (s *Service) MovePath(ctx context.Context, req *sandboxdv1.MovePathRequest)
 func (s *Service) moveAcrossDevices(ctx context.Context, source, destination string, info fs.FileInfo) error {
 	switch {
 	case info.Mode()&fs.ModeSymlink != 0:
-		target, err := os.Readlink(source)
-		if err != nil {
-			return fileError(source, err)
-		}
-		// Replacing the destination is the caller's already-checked overwrite;
-		// removing it first is what makes os.Symlink able to create the name.
-		if err := os.Remove(destination); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fileError(destination, err)
-		}
-		if err := os.Symlink(target, destination); err != nil {
-			return fileError(destination, err)
+		if err := s.copySymlink(ctx, source, destination); err != nil {
+			return err
 		}
 
 	case info.Mode().IsRegular():
@@ -301,6 +324,51 @@ func (s *Service) moveAcrossDevices(ctx context.Context, source, destination str
 		return status.Errorf(codes.Internal,
 			"%s was copied to %s but the original could not be removed, so both now exist: %v",
 			source, destination, err)
+	}
+	return nil
+}
+
+// copySymlink recreates a symlink at the destination, committing by rename for
+// the same reason copyFile does.
+//
+// os.Symlink cannot create a name that is taken, so an overwrite has to clear
+// the destination first — and doing that in place means a failure between the
+// two leaves the caller with neither the old destination nor a new one, from a
+// move whose whole contract is that a failure costs nothing. Building the link
+// under a sibling name and renaming it over closes that window: rename replaces
+// a symlink in one step, which is the same guarantee the file path gets from the
+// atomic writer.
+//
+// It honours cancellation for the same reason copyFile does: a request the
+// caller has abandoned must not commit, and this branch is the one that replaces
+// a destination the caller may still want.
+func (s *Service) copySymlink(ctx context.Context, source, destination string) error {
+	target, err := os.Readlink(source)
+	if err != nil {
+		return fileError(source, err)
+	}
+
+	dir, base := filepath.Dir(destination), filepath.Base(destination)
+	if len(base) > 64 {
+		base = base[:64]
+	}
+	tmpPath := filepath.Join(dir, "."+base+".sandboxd-"+randomSuffix()+".tmp")
+	if err := os.Symlink(target, tmpPath); err != nil {
+		return fileError(destination, err)
+	}
+	if err := ctxErr(ctx); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	// os.Rename rather than the renamePath seam, for the reason given there: this
+	// rename is within one directory and can never be cross-device, and routing
+	// it through the seam would make an injected cross-device failure break the
+	// fallback that exists to handle one.
+	if err := os.Rename(tmpPath, destination); err != nil {
+		// The temp link is this function's to clean up; leaving it beside the
+		// destination is the stray file the sibling scheme exists to avoid.
+		_ = os.Remove(tmpPath)
+		return renameError(source, destination, err)
 	}
 	return nil
 }

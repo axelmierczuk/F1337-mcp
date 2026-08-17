@@ -76,7 +76,7 @@ func (p *pattern) match(rel string) bool {
 		}
 		parts = append(parts, seg)
 	}
-	return matchSegments(p.patternSegments(), parts)
+	return newMatcher(p.patternSegments(), parts).match(0, 0)
 }
 
 // patternSegments returns the segments, case-folded when the platform demands
@@ -92,28 +92,62 @@ func (p *pattern) patternSegments() []string {
 	return folded
 }
 
-// matchSegments matches pattern segments against path segments, with "**"
-// consuming any number of them — including none, so "**/*.go" matches a .go
-// file at the root as well as a nested one.
-func matchSegments(pat, name []string) bool {
+// matcher matches pattern segments against path segments, with "**" consuming
+// any number of them — including none, so "**/*.go" matches a .go file at the
+// root as well as a nested one.
+//
+// It memoises, and that is not an optimisation. Each "**" branches over every
+// remaining path segment, so the plain recursion costs O(depth ^ number of "**")
+// — a pattern the caller writes and a tree depth the caller controls. Something
+// like "**/*/**/*/**/*/**/*/**/*/**/*" over a thirty-deep tree is tens of
+// millions of calls per file, on a request with no deadline and nothing to
+// interrupt it. The state here is only the pair of positions, so remembering
+// answers makes it O(patternSegments × pathSegments²) and leaves what it matches
+// exactly as it was.
+type matcher struct {
+	pat, name []string
+	// seen[i*(len(name)+1)+j] is the answer for match(i, j): 0 unknown, 1 true,
+	// 2 false.
+	seen []uint8
+}
+
+func newMatcher(pat, name []string) *matcher {
+	return &matcher{pat: pat, name: name, seen: make([]uint8, (len(pat)+1)*(len(name)+1))}
+}
+
+// match reports whether pat[i:] matches name[j:].
+func (m *matcher) match(i, j int) bool {
+	key := i*(len(m.name)+1) + j
+	if answer := m.seen[key]; answer != 0 {
+		return answer == 1
+	}
+	result := m.compute(i, j)
+	m.seen[key] = 2
+	if result {
+		m.seen[key] = 1
+	}
+	return result
+}
+
+func (m *matcher) compute(i, j int) bool {
 	switch {
-	case len(pat) == 0:
-		return len(name) == 0
-	case pat[0] == "**":
-		for i := 0; i <= len(name); i++ {
-			if matchSegments(pat[1:], name[i:]) {
+	case i == len(m.pat):
+		return j == len(m.name)
+	case m.pat[i] == "**":
+		for k := j; k <= len(m.name); k++ {
+			if m.match(i+1, k) {
 				return true
 			}
 		}
 		return false
-	case len(name) == 0:
+	case j == len(m.name):
 		return false
 	}
-	ok, err := path.Match(pat[0], name[0])
+	ok, err := path.Match(m.pat[i], m.name[j])
 	if err != nil || !ok {
 		return false
 	}
-	return matchSegments(pat[1:], name[1:])
+	return m.match(i+1, j+1)
 }
 
 // prefixCanMatch reports whether any path under a directory could still match.

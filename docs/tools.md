@@ -243,7 +243,15 @@ With `replace_all` false, the edit **fails unless `old_string` matches exactly
 once**. This mirrors the contract of the agent's built-in edit tool, which is
 what makes the remote version feel native — and the uniqueness requirement is
 what stops an ambiguous match from quietly editing the wrong line. Returns a
-unified diff, trimmed to a few lines of context around each change.
+unified diff, trimmed to a few lines of context around each change, and a line
+too long to print is trimmed around the change rather than shown whole — the
+diff is bounded so that editing a minified file returns something a model can
+read rather than the file twice.
+
+The **result** is bounded too, not only the file. `replace_all` with a
+`new_string` longer than `old_string` multiplies, so an edit whose output would
+exceed the agent's edit ceiling is refused before anything is written; rewrite
+the file with `sandbox_write`, which streams.
 
 Line endings are preserved. A `new_string` whose endings disagree with the
 file's is refused rather than mixed in, and an `old_string` that fails to match
@@ -269,6 +277,10 @@ Results are files, sorted by modification time, newest first. `.git`,
 `sandbox_glob`: `*.go` matches at any depth. `max_matches` stops the walk rather
 than truncating a finished search, so the summary's `files_searched` reports how
 little of the tree was read.
+
+A matched line that is not valid UTF-8 comes back with the offending bytes shown
+as U+FFFD rather than failing the search: the binary check reads only the head of
+a file, so a log with one stray byte in the middle of it is still a text file.
 
 Executed on the agent, so searching a large tree does not stream the tree across
 the network first.

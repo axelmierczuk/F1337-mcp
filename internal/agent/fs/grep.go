@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -161,7 +162,13 @@ func (g *grepSearch) scan(path string, file *os.File) error {
 		// matches render as lines rather than as lines with a control character
 		// on the end. Nothing is written back, so the file's endings are
 		// untouched.
-		line := strings.TrimSuffix(scanner.Text(), "\r")
+		//
+		// The line is also made valid UTF-8, because GrepMatch.line is a proto3
+		// string and marshalling one that is not fails the whole stream. The
+		// binary sniff only looks at the first 8 KiB, so an ordinary log with one
+		// stray byte a megabyte in passes it and then breaks the search — an
+		// error about encoding, for a search that had already found its match.
+		line := toValidUTF8(strings.TrimSuffix(scanner.Text(), "\r"))
 
 		for _, m := range pending {
 			if len(m.GetAfterContext()) < g.contextLines {
@@ -235,6 +242,21 @@ func (g *grepSearch) flushAll(pending []*sandboxdv1.GrepMatch) error {
 		}
 	}
 	return nil
+}
+
+// toValidUTF8 replaces invalid byte sequences with U+FFFD, which is what a
+// terminal shows for them and what keeps a line usable rather than unsendable.
+//
+// Substituting rather than skipping the file is deliberate: a file whose head is
+// text is a text file, the match and its line number are real, and dropping the
+// whole file over a byte the caller cannot see would be a silent hole in the
+// results. A file that is binary from the start never reaches here — the sniff
+// already skipped it.
+func toValidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "�")
 }
 
 func (g *grepSearch) send(m *sandboxdv1.GrepMatch) error {

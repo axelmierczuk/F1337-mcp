@@ -35,13 +35,23 @@
 // this exists to prevent. An interrupted transfer removes the temp file and
 // leaves the original untouched.
 //
-// Committing by rename is also why a write resolves its last component, which
-// is the exact opposite of what the path-management RPCs do above. A rename
-// over a symlink replaces the link with a regular file, so a write that did not
-// follow the link would unlink it, write a new file where it stood, and leave
-// the file the caller meant to change untouched. A confined jail resolves
-// everything already; the unconfined one does not, and it is the default. See
-// Service.writeTarget.
+// Committing by rename is also why a write resolves every symlink on the path
+// it commits to, which is the exact opposite of what the path-management RPCs do
+// above. A rename over a symlink replaces the link with a regular file, so a
+// write that did not follow the link would unlink it, write a new file where it
+// stood, and leave the file the caller meant to change untouched. Resolving the
+// parents matters for a second reason: two spellings of one file have to take
+// one path lock, or two concurrent edits lose each other. A confined jail
+// resolves everything already; the unconfined one does not, and it is the
+// default. See Service.writeTarget.
+//
+// # What a response may not contain
+//
+// Every string a response carries is a proto3 string, and marshalling one that
+// is not valid UTF-8 fails the call rather than the field. Two places produce
+// bytes this service did not choose: a grep line, where the binary check has
+// only seen the head of the file, and a diff, where a line is sliced to fit.
+// Both are made valid before they are sent.
 //
 // # Files this package will not open
 //

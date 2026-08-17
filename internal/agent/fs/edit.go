@@ -83,6 +83,9 @@ func (s *Service) EditFile(ctx context.Context, req *sandboxdv1.EditFileRequest)
 	if err := checkNewLineEndings(resolved, content, newStr); err != nil {
 		return nil, err
 	}
+	if err := s.checkResultSize(resolved, len(content), count, oldStr, newStr, req.GetReplaceAll()); err != nil {
+		return nil, err
+	}
 
 	updated, occs := replaceOccurrences(content, oldStr, newStr, req.GetReplaceAll())
 	if err := ctxErr(ctx); err != nil {
@@ -97,6 +100,36 @@ func (s *Service) EditFile(ctx context.Context, req *sandboxdv1.EditFileRequest)
 		Replacements: uint32(len(occs)), //nolint:gosec // one occurrence per match in a file bounded by MaxEditBytes
 		Diff:         unifiedDiff(resolved, []byte(content), []byte(updated), occs),
 	}, nil
+}
+
+// checkResultSize refuses an edit whose result would be larger than the file
+// this service is willing to hold.
+//
+// MaxEditBytes bounded what an edit reads and nothing bounded what it produced.
+// replace_all multiplies: old_string is allowed to be one byte and new_string is
+// bounded only by the gRPC message size, so a 1 MiB file of "a" replaced by a
+// 64-byte string is 64 MiB — held in memory, written to disk, and then sent back
+// inside a diff. At the 16 MiB ceiling with a kilobyte replacement it is 16 GiB,
+// which is one small request away from taking the agent down.
+//
+// The ceiling that bounds the input has to bound the output, and it is the same
+// number for the same reason: past it, an exact-match replacement is not the
+// tool for the job.
+func (s *Service) checkResultSize(path string, contentLen, count int, oldStr, newStr string, all bool) error {
+	replacing := int64(1)
+	if all {
+		replacing = int64(count)
+	}
+	// Every term is bounded by MaxEditBytes or by the gRPC message cap, so this
+	// cannot overflow: the file is at most 2^24 bytes and new_string at most
+	// 2^25, which puts the product below 2^50.
+	grown := int64(contentLen) + replacing*(int64(len(newStr))-int64(len(oldStr)))
+	if grown <= s.limits.MaxEditBytes {
+		return nil
+	}
+	return status.Errorf(codes.InvalidArgument,
+		"replacing %d occurrence(s) of a %d-byte string with a %d-byte one would make %s %d bytes, over the %d-byte limit for an edit; narrow old_string, or rewrite the file with WriteFile, which streams instead of holding the result",
+		replacing, len(oldStr), len(newStr), path, grown, s.limits.MaxEditBytes)
 }
 
 // loadForEdit reads the whole file and returns it with the mode to preserve.

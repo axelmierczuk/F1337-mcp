@@ -273,11 +273,17 @@ func (s *Service) resolveSelf(path, verb string) (string, error) {
 // A dangling link is left as the caller wrote it. There is nothing to write
 // through, and creating the file the link points at is a decision this does not
 // make on the caller's behalf.
+//
+// The whole path is resolved, not only its last component, and the difference
+// shows up in the same place: two spellings of one file. A confined jail returns
+// a path with every symlink on it already followed, so "dir/f" and "link/f" are
+// the same string by the time a handler sees them and take the same path lock.
+// Unconfined they are two strings, so two concurrent edits to the one file take
+// two different locks and the second silently discards the first — the lost
+// update the locks exist to prevent, reached by naming a parent directory
+// through a link instead of the file itself.
 func (s *Service) writeTarget(resolved string) (string, error) {
-	target, ok := symlinkTarget(resolved)
-	if !ok {
-		return resolved, nil
-	}
+	target := resolveExisting(resolved)
 	if !s.jail.ContainsResolved(target) {
 		// This is the check that following the link requires, not a formality.
 		// A rename does not follow a symlink in its final component, so before
@@ -292,22 +298,32 @@ func (s *Service) writeTarget(resolved string) (string, error) {
 	return target, nil
 }
 
-// symlinkTarget returns what a symlink resolves to.
+// resolveExisting returns path with every symlink on it followed, as far as the
+// filesystem can follow them.
 //
-// It reports false for a path that is not a symlink, and for one whose target
-// cannot be reached — a dangling link included, since there is nothing there to
-// operate on. Neither is an error to report: both mean "use the path you were
-// given", which is what every caller does with it.
-func symlinkTarget(path string) (string, bool) {
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&fs.ModeSymlink == 0 {
-		return "", false
+// A path that resolves whole is returned resolved. A path whose last component
+// does not resolve — it does not exist yet, or it is a dangling link — keeps that
+// component exactly as written and takes the resolved form of its parent, which
+// is what lets a write create a file, and what leaves a dangling link where it
+// stands rather than creating whatever it pointed at.
+//
+// Nothing here is a containment decision, and it returns no error: a path that
+// cannot be resolved at all is returned unchanged, and the syscall that follows
+// reports what is wrong with it better than a guess here would. The caller
+// re-checks containment on the result; see Service.writeTarget.
+func resolveExisting(path string) string {
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		return target
 	}
-	target, err := filepath.EvalSymlinks(path)
+	parent := filepath.Dir(path)
+	if parent == path {
+		return path
+	}
+	resolvedParent, err := filepath.EvalSymlinks(parent)
 	if err != nil {
-		return "", false
+		return path
 	}
-	return target, true
+	return filepath.Join(resolvedParent, filepath.Base(path))
 }
 
 // isIrregular reports whether path is something other than a regular file or a

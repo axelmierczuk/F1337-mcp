@@ -37,9 +37,14 @@ func (s *Service) ReadFile(req *sandboxdv1.ReadFileRequest, stream grpc.ServerSt
 	if err := refuseIrregular(resolved); err != nil {
 		return err
 	}
-	file, err := s.jail.OpenFile(req.GetPath(), os.O_RDONLY, 0)
+	// The resolved path, not the one the request carried. The jail documents that
+	// its result is the only path a caller may hand to a syscall, and this is the
+	// one place in the package that re-derived it from the input instead — which
+	// also meant the irregular-file check above and the open below were made
+	// about two different expressions.
+	file, err := s.jail.OpenFile(resolved, os.O_RDONLY, 0)
 	if err != nil {
-		return s.pathError(req.GetPath(), err)
+		return s.pathError(resolved, err)
 	}
 	defer func() { _ = file.Close() }()
 
