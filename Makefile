@@ -123,9 +123,16 @@ test:
 #
 # No Docker, no root, no network beyond loopback. The one scenario that wants a
 # container is opt-in; see test-integration-docker and test/e2e/README.md.
+#
+# Race-enabled like `test`, and for the same reason. The product runs in its own
+# processes here so the detector cannot see inside it, but the harness is
+# concurrent code too — one scenario keeps two dozen calls in flight against a
+# single session — and a suite written to catch races the unit tests cannot
+# should not be the one package in this repository that races unwatched. It
+# costs about three seconds.
 .PHONY: test-integration
 test-integration:
-	go test -tags integration -count=1 -timeout 20m ./test/...
+	go test -tags integration -race -count=1 -timeout 20m ./test/...
 
 ## test-integration-docker: also run the containerised tree-kill scenario
 #

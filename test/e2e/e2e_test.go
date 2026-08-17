@@ -88,6 +88,15 @@ func runMain(m *testing.M) (int, error) {
 	if bins, err = buildBinaries(dir); err != nil {
 		return 0, err
 	}
+	if runtime.GOOS == "windows" {
+		// Said out loud, once, because `go test` reports a package whose every
+		// test skipped as "ok" — and an "ok" that ran nothing is the exact
+		// shape of the failures this suite was written to catch. The skips
+		// themselves are only visible under -v.
+		fmt.Fprintf(os.Stderr,
+			"e2e: every scenario in this package skips on %s; this run proves nothing about a Windows agent. See test/e2e/README.md.\n",
+			runtime.GOOS)
+	}
 	return m.Run(), nil
 }
 

@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,18 +38,28 @@ type session struct {
 	cwd string
 }
 
-// connect starts fleet-mcp and completes the MCP handshake.
+// connect starts fleet-mcp against this fleet's config directory and completes
+// the MCP handshake.
 func (f *fleet) connect(t *testing.T) *session {
 	t.Helper()
+	return f.connectAt(t, f.ctlDir, "workstation")
+}
 
-	cwd := filepath.Join(f.root, "workstation")
+// connectAt is connect against a config directory of the caller's choosing, so
+// a scenario can drive a server that holds different credentials from the one
+// this fleet set up for itself. cwdName keeps each server's working directory
+// distinct, because a pull writes into it.
+func (f *fleet) connectAt(t *testing.T, configDir, cwdName string) *session {
+	t.Helper()
+
+	cwd := filepath.Join(f.root, cwdName)
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatalf("create workstation directory: %v", err)
 	}
 
 	errs := &syncBuffer{}
-	cmd := exec.Command(bins.mcp, "serve", "--config-dir", f.ctlDir, "--log-level", "debug")
-	cmd.Env = f.ctlEnv()
+	cmd := exec.Command(bins.mcp, "serve", "--config-dir", configDir, "--log-level", "debug")
+	cmd.Env = f.configEnv(configDir)
 	cmd.Dir = cwd
 	cmd.Stderr = errs
 
@@ -91,6 +102,17 @@ type callOptions struct {
 func (s *session) call(name string, args map[string]any, opts callOptions) *mcp.CallToolResult {
 	s.t.Helper()
 
+	res, err := s.tryCall(name, args, opts)
+	if err != nil {
+		s.t.Fatalf("%s failed at the protocol level: %v\nfleet-mcp stderr:\n%s", name, err, s.errs.String())
+	}
+	return res
+}
+
+// tryCall is call for a caller that must not fail the test from where it
+// stands — the concurrent scenario, whose calls run on goroutines of their own.
+// See decodeStructured.
+func (s *session) tryCall(name string, args map[string]any, opts callOptions) (*mcp.CallToolResult, error) {
 	timeout := opts.timeout
 	if timeout == 0 {
 		timeout = time.Minute
@@ -102,11 +124,7 @@ func (s *session) call(name string, args map[string]any, opts callOptions) *mcp.
 	if opts.identity != "" {
 		params.Meta = mcp.Meta{selection.MetaKeyClientID: opts.identity}
 	}
-	res, err := s.client.CallTool(ctx, params)
-	if err != nil {
-		s.t.Fatalf("%s failed at the protocol level: %v\nfleet-mcp stderr:\n%s", name, err, s.errs.String())
-	}
-	return res
+	return s.client.CallTool(ctx, params)
 }
 
 // ok calls a tool and fails the test if the tool reported an error.
@@ -173,18 +191,34 @@ func resultText(res *mcp.CallToolResult) string {
 func structured[T any](t *testing.T, res *mcp.CallToolResult) T {
 	t.Helper()
 
+	out, err := decodeStructured[T](res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// decodeStructured is structured for a caller that is not the test's own
+// goroutine.
+//
+// t.Fatalf from a goroutine other than the one running the test does not do
+// what it looks like it does — it stops that goroutine and leaves the test to
+// carry on — so the concurrent scenario collects failures and reports them from
+// the test goroutine instead. Keeping both spellings over one decoder means the
+// two cannot disagree about what a result is.
+func decodeStructured[T any](res *mcp.CallToolResult) (T, error) {
+	var out T
 	if res.StructuredContent == nil {
-		t.Fatalf("tool result carries no structured content: %s", resultText(res))
+		return out, fmt.Errorf("tool result carries no structured content: %s", resultText(res))
 	}
 	raw, err := json.Marshal(res.StructuredContent)
 	if err != nil {
-		t.Fatalf("re-encode structured content: %v", err)
+		return out, fmt.Errorf("re-encode structured content: %w", err)
 	}
-	var out T
 	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("decode structured content into %T: %v\n%s", out, err, raw)
+		return out, fmt.Errorf("decode structured content into %T: %w\n%s", out, err, raw)
 	}
-	return out
+	return out, nil
 }
 
 // echoOf reads the sandbox echo every tool result carries.

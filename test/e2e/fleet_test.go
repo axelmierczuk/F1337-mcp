@@ -93,9 +93,13 @@ func newFleet(t *testing.T) *fleet {
 // ctlEnv is the environment every fleetctl and fleet-mcp invocation runs with.
 // FLEET_CONFIG_DIR is what keeps the CA, the token store, the registry and the
 // control leaf in one directory across all three binaries.
-func (f *fleet) ctlEnv() []string {
+func (f *fleet) ctlEnv() []string { return f.configEnv(f.ctlDir) }
+
+// configEnv is ctlEnv pointed at some other config directory — an operator's
+// second workstation, or one that is missing a credential on purpose.
+func (f *fleet) configEnv(dir string) []string {
 	return envWith(
-		envEntry("FLEET_CONFIG_DIR", f.ctlDir),
+		envEntry("FLEET_CONFIG_DIR", dir),
 		envEntry("PATH", os.Getenv("PATH")),
 		envEntry("HOME", f.root),
 		envEntry("TMPDIR", os.TempDir()),
@@ -112,6 +116,12 @@ func (f *fleet) ctlEnv() []string {
 // PR body; the CSR is built here rather than shelling out to openssl so the
 // suite has no dependency the product does not, but the signing itself goes
 // through the real command so that half of the path is genuinely covered.
+//
+// The workaround is pinned by TestNoShippedCommandIssuesTheControlLeaf, which
+// fails when the gap closes. When it does — PR #54 gives `ca sign --profile
+// control` a mode that generates the keypair — delete that test and replace the
+// CSR building below with the shipped command, so this suite walks the path an
+// operator walks rather than one it built for itself.
 func (f *fleet) issueControlLeaf() {
 	f.t.Helper()
 
@@ -315,7 +325,14 @@ func (f *fleet) restart(a *agent) {
 // stateDir is where the supervisor persists its process records.
 func (a *agent) stateDir() string { return filepath.Join(a.dir, "state") }
 
-// logs is everything the daemon has written to stderr across every start.
+// logs is what the daemon *currently running* has written to stderr.
+//
+// Not the whole history across restarts, deliberately: an assertion that the
+// agent logged something is nearly always an assertion about the agent that is
+// answering now, and one that could match a line the previous run wrote would
+// pass whether or not this one did anything. The output of the runs before it
+// is not lost — each spawn registers a cleanup that prints its own streams when
+// the scenario fails.
 func (a *agent) logs() string { return a.proc.stderr() }
 
 // writeFile writes a file at 0600, failing the test rather than returning an

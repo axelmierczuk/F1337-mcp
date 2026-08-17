@@ -14,9 +14,13 @@ make test-integration-docker   # the one scenario that does
 Or directly:
 
 ```sh
-go test -tags integration -count=1 ./test/...
+go test -tags integration -race -count=1 ./test/...
 go test -tags integration -count=1 -v -run TestTwoSandboxesTargeting ./test/e2e/
 ```
+
+`make test-integration` passes `-race`: the product runs in its own processes,
+so the detector never sees inside it, but the harness is concurrent code too and
+should not be the one package here that races unwatched.
 
 The suite is behind `//go:build integration`, so `go test ./...` never picks it
 up. `make vet` and `make lint` do build it, under all three GOOSes — a tag that
@@ -57,6 +61,7 @@ Everything except one scenario.
 | `TestEnrollmentRefusesWhatTheTokenDoesNotAuthorize` | A host cannot enroll as a name or an address its token does not authorize, and a spent token cannot be replayed. |
 | `TestEnrollmentRequiresThePinnedFingerprint` | Enrollment refuses to proceed unpinned, and a wrong pin fails the handshake before the token is sent. |
 | `TestARefusedEnrollmentSpendsItsToken` | Records a defect, not a requirement. See the comment on the test. |
+| `TestNoShippedCommandIssuesTheControlLeaf` | Records a defect, not a requirement: no command produces the control certificate `fleet-mcp` presents, so a server built by the documented flow reaches no agent. Pins the workaround this suite uses. See the comment on the test. |
 | `TestConcurrentCallsKeepTheirTargets` | Two dozen calls in flight across both sandboxes each run where they were aimed. |
 | `TestListReportsAnUnreachableSandboxWithoutWaitingForIt` | A dead sandbox is reported dead in the same listing that still reports its neighbour live. |
 | `TestFileSearchToolsWalkTheSandbox` | `fleet_ls`, `fleet_glob` and `fleet_grep` — the last of which is a server stream — over a real tree. |
@@ -80,12 +85,20 @@ The outer test runs `docker run` with the repository and the module cache
 mounted, and re-enters this same suite inside the container to run the inner
 half. Nothing here needs a published image or a Dockerfile.
 
+It asserts on the inner run's `--- PASS: <scenario>` line, not on the word
+`PASS`: `go test` prints a bare `PASS` and exits zero both for a run that
+skipped everything and for a `-run` pattern that matched nothing, so the
+cheaper check would report success for a container that ran no scenario at all.
+
 ## What is not covered
 
 - **Windows sandboxes.** Every scenario skips on Windows: the workloads are
   POSIX (`sh -c`, `cat`, a process tree killed by group). The Windows-specific
   behaviour — job objects, `TerminateJobObject`, path handling — has unit tests
-  and runs on the CI matrix, but no scenario here drives a Windows agent.
+  and runs on the CI matrix, but no scenario here drives a Windows agent. A run
+  on Windows says so on stderr before it starts, because `go test` reports a
+  package whose every test skipped as `ok` and an `ok` that ran nothing is worth
+  more noise than that.
 - **Two machines.** Both agents run on this machine, on different ports, with
   different `HOME` directories. That is what makes "it ran *there*" assertable
   at all: `fleet_exec` with no `working_dir` runs in the agent account's home

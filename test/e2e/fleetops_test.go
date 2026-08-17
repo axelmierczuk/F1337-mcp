@@ -41,17 +41,30 @@ func TestConcurrentCallsKeepTheirTargets(t *testing.T) {
 	for i := range rounds {
 		for j, target := range []*agent{alpha, beta} {
 			wg.Add(1)
+			// Nothing in here fails the test directly. t.Fatalf from a
+			// goroutine that is not the test's own stops that goroutine and
+			// leaves the test running, so a failure reported that way arrives
+			// as a confusing second failure somewhere else; each call records
+			// what it saw and the loop below does the failing.
 			go func(slot int, a *agent) {
 				defer wg.Done()
-				res := s.call("fleet_exec", map[string]any{
+				res, err := s.tryCall("fleet_exec", map[string]any{
 					"argv":    []string{"cat", markerFile},
 					"sandbox": a.name,
 				}, callOptions{})
+				if err != nil {
+					results[slot] = outcome{want: a.name, ran: "protocol failure: " + err.Error()}
+					return
+				}
 				if res.IsError {
 					results[slot] = outcome{want: a.name, ran: "error: " + resultText(res)}
 					return
 				}
-				out := structured[execResult](t, res)
+				out, err := decodeStructured[execResult](res)
+				if err != nil {
+					results[slot] = outcome{want: a.name, ran: "undecodable result: " + err.Error()}
+					return
+				}
 				results[slot] = outcome{
 					want:   a.name,
 					ran:    strings.TrimSpace(out.Stdout),
