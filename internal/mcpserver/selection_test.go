@@ -186,7 +186,13 @@ var echoFixtures = map[string]struct {
 	"sandbox_remove": {args: map[string]any{"name": "gpu-01"}, echoes: "gpu-01"},
 	"sandbox_info":   {args: map[string]any{"sandbox": "build-box"}, echoes: "build-box", targeted: true},
 
-	"sandbox_exec": {args: map[string]any{"sandbox": "build-box", "argv": []any{"echo", "hi"}}, echoes: "build-box", targeted: true},
+	"sandbox_exec":  {args: map[string]any{"sandbox": "build-box", "argv": []any{"echo", "hi"}}, echoes: "build-box", targeted: true},
+	"sandbox_read":  {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go"}, echoes: "build-box", targeted: true},
+	"sandbox_write": {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go", "content": "package main\n"}, echoes: "build-box", targeted: true},
+	"sandbox_edit":  {args: map[string]any{"sandbox": "build-box", "path": "/srv/app/main.go", "old_string": "old", "new_string": "new"}, echoes: "build-box", targeted: true},
+	"sandbox_ls":    {args: map[string]any{"sandbox": "build-box", "path": "/srv/app"}, echoes: "build-box", targeted: true},
+	"sandbox_glob":  {args: map[string]any{"sandbox": "build-box", "pattern": "**/*.go"}, echoes: "build-box", targeted: true},
+	"sandbox_grep":  {args: map[string]any{"sandbox": "build-box", "pattern": "func main"}, echoes: "build-box", targeted: true},
 }
 
 // TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox is the walk the

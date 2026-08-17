@@ -228,11 +228,12 @@ Stop and start again from the same spec, optionally waiting for readiness.
 | --- | --- | --- |
 | `path` | string | **Required.** |
 | `offset` | int | Starting line, 1-based. |
-| `limit` | int | Maximum lines. |
-| `raw` | bool | Return bytes rather than text. Required for binaries. |
+| `limit` | int | Maximum lines. Defaults to 2000, and the result says so whenever the file continues past the window. |
+| `raw` | bool | Return the bytes, base64-encoded, rather than text. Required for binaries. |
 
-Returns line-numbered content plus metadata. Binary files are detected and
-reported rather than mangled into text.
+Returns line-numbered content plus metadata, in the shape of the built-in Read:
+the line number right-aligned in six columns, a tab, then the line. Binary
+files are detected and reported rather than mangled into text.
 
 `total_lines` is exact only when `total_lines_exact` is set. Counting lines
 means reading every byte, so the agent stops at a size bound rather than reading
@@ -240,7 +241,10 @@ a gigabyte to answer a windowed read; past that bound the number reports how far
 the count got. Do not render "line 40 of N" without checking the flag.
 
 Line endings are never rewritten. A CRLF file reads back with its CRLF intact,
-on every platform.
+on every platform. The numbered rendering drops the carriage return, since a
+stray one mid-result is noise a model will either ignore or copy into its next
+argument, and the result says the file uses CRLF instead — which is what an
+exact-match `sandbox_edit` afterwards has to account for.
 
 ### `sandbox_write`
 | Argument | Type | Notes |
@@ -281,14 +285,19 @@ file's is refused rather than mixed in, and an `old_string` that fails to match
 only because of them says so.
 
 ### `sandbox_ls`
-`path`, `recursive`, `include_hidden`, `limit`.
+`path`, `recursive`, `include_hidden`, `limit` (default 500).
+
+Directories come back as a list of names and files as name, size and age, in
+that order — two short lists rather than one table of mostly-empty columns.
+Names are relative to the directory listed, which is named once.
 
 ### `sandbox_glob`
-`pattern` (e.g. `**/*.go`), `root`, `limit`, `respect_gitignore`,
+`pattern` (e.g. `**/*.go`), `root`, `limit` (default 300), `respect_gitignore`,
 `include_default_ignored`.
 
 The pattern is anchored at `root`: `*.go` does not recurse and `**/*.go` does.
-Results are files, sorted by modification time, newest first. `.git`,
+Results are files, sorted by modification time, newest first, and given as
+absolute paths so they can be passed straight to `sandbox_read`. `.git`,
 `node_modules`, `vendor` and `target` are skipped unless
 `include_default_ignored` is set.
 
@@ -296,10 +305,15 @@ Results are files, sorted by modification time, newest first. `.git`,
 `pattern` (RE2), `root`, `include_glob`, `case_insensitive`, `context_lines`,
 `max_matches`, `files_only`, `respect_gitignore`, `include_default_ignored`.
 
+Matches are rendered one per line in grep's own shape — `path:line: text` for a
+match, `path-line- text` for a context line, which is the only thing telling
+the two apart once they are in a flat list.
+
 `include_glob` uses gitignore semantics rather than the anchored ones of
-`sandbox_glob`: `*.go` matches at any depth. `max_matches` stops the walk rather
-than truncating a finished search, so the summary's `files_searched` reports how
-little of the tree was read.
+`sandbox_glob`: `*.go` matches at any depth. `max_matches` defaults to 100 and
+stops the walk rather than truncating a finished search, so the summary's
+`files_searched` reports how little of the tree was read, and the truncation
+note says so rather than letting "truncated" be read as "that is all of them".
 
 A matched line that is not valid UTF-8 comes back with the offending bytes shown
 as U+FFFD rather than failing the search: the binary check reads only the head of
