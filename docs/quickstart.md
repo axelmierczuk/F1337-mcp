@@ -184,6 +184,14 @@ sudo fleet-agent service install
 sudo fleet-agent service start
 ```
 
+On Linux the new unit will say `User=sandboxd`, and that is deliberate: the
+`sandboxd` system account still exists, still owns the directories you just
+moved, and `mv` did not change that. `install` keeps it rather than creating a
+second system account and chowning your state away from the one using it. If you
+would rather run under a `fleet` account, create it and pass `--user fleet` —
+`install` chowns the state and log directories to whatever account you name. See
+[service.md → The service account](service.md#the-service-account).
+
 **Do not create the new directory before you are ready to move.** An empty
 `~/.config/fleet` next to a populated `~/.config/sandboxd` is the one case worth
 avoiding — though even then the resolver treats an empty directory as absent and
