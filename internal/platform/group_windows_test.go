@@ -1,9 +1,10 @@
 package platform_test
 
 import (
+	"bufio"
+	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,23 +20,38 @@ import (
 // debugging a CI failure on a machine they do not have, so each one states
 // what it is proving rather than leaving it to the assertion.
 
-// startWindowsTree spawns PowerShell, which spawns a grandchild and reports
-// both pids. Terminating node.exe alone leaving its children running is the
+// treeReportBudget bounds how long the fixture waits for the leader to report
+// its tree.
+//
+// It is a fixture budget and not an assertion: when it expires, nothing under
+// test has run yet. It was 60 seconds against PowerShell and that was not
+// enough on a loaded runner. Against a re-exec of this binary the report
+// arrives in milliseconds, so 30 seconds is hundreds of times the real cost —
+// which is why it went down rather than up. Widening a budget that was already
+// being blown would have left the variance in place and only moved the point
+// at which it shows. See helper_windows_test.go.
+const treeReportBudget = 30 * time.Second
+
+// startWindowsTree starts a leader that spawns a grandchild and reports both
+// pids. Terminating node.exe alone and leaving its children running is the
 // exact failure the job object exists to prevent, so the test has to know a
 // grandchild's pid to be worth anything.
+//
+// The leader is another copy of this test binary rather than PowerShell, and
+// the grandchild is created only after Adopt has assigned the leader to the
+// job. Both are explained in helper_windows_test.go.
 func startWindowsTree(t *testing.T, cfg platform.GroupConfig) (group *platform.ProcessGroup, leader, grandchild int, reaped <-chan struct{}) {
 	t.Helper()
-
-	pidFile := filepath.Join(t.TempDir(), "pids.txt")
-	script := "$child = Start-Process -PassThru -WindowStyle Hidden -FilePath ping.exe " +
-		"-ArgumentList '-n','300','127.0.0.1'; " +
-		"Set-Content -LiteralPath '" + pidFile + "' -Value \"$PID $($child.Id)\"; " +
-		"Start-Sleep -Seconds 300"
 
 	group, err := platform.NewProcessGroup(cfg)
 	require.NoError(t, err)
 
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd := helperCommand(t, "tree")
+	goAhead, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	report, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+
 	group.ConfigureCommand(cmd)
 	require.NoError(t, cmd.Start())
 
@@ -45,8 +61,13 @@ func startWindowsTree(t *testing.T, cfg platform.GroupConfig) (group *platform.P
 		close(done)
 	}()
 	t.Cleanup(func() {
+		// Closing the go-ahead first releases a leader that never got one:
+		// its read returns EOF and it exits, rather than sitting in the job
+		// object waiting for a test that has already given up.
+		_ = goAhead.Close()
 		_ = group.Kill()
 		_ = group.Close()
+		_ = report.Close()
 		<-done
 	})
 
@@ -54,7 +75,13 @@ func startWindowsTree(t *testing.T, cfg platform.GroupConfig) (group *platform.P
 	require.True(t, group.Isolated(), "the child must be inside the job object")
 	require.Equal(t, cmd.Process.Pid, group.PID())
 
-	leader, grandchild = readWindowsPIDs(t, pidFile)
+	// Only now. The grandchild has to be created after the assignment landed,
+	// or what the test measures is the assignment race rather than the job
+	// object. See treeMain.
+	_, err = io.WriteString(goAhead, "go\n")
+	require.NoError(t, err)
+
+	leader, grandchild = readWindowsTreePIDs(t, report, done)
 	require.Equal(t, cmd.Process.Pid, leader)
 	require.NotEqual(t, leader, grandchild)
 	require.True(t, platform.ProcessExists(grandchild), "the grandchild should be running")
@@ -62,26 +89,45 @@ func startWindowsTree(t *testing.T, cfg platform.GroupConfig) (group *platform.P
 	return group, leader, grandchild, done
 }
 
-func readWindowsPIDs(t *testing.T, path string) (first, second int) {
+// readWindowsTreePIDs reads the single line the leader writes.
+//
+// It watches the leader's exit as well as the clock. A leader that dies before
+// reporting — a helper that could not start its grandchild, a job object that
+// killed the tree early — then fails the test at once and says which of the two
+// happened, instead of costing the suite a whole budget and reporting only that
+// nothing was written. The leader sleeps after reporting, so its exit is always
+// a failure here and never a race with a line that did arrive.
+func readWindowsTreePIDs(t *testing.T, r io.Reader, leaderExited <-chan struct{}) (leader, grandchild int) {
 	t.Helper()
 
-	// PowerShell startup is slow and CI runners are slower.
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(path); err == nil {
-			fields := strings.Fields(string(data))
-			if len(fields) == 2 {
-				a, err1 := strconv.Atoi(fields[0])
-				b, err2 := strconv.Atoi(fields[1])
-				if err1 == nil && err2 == nil {
-					return a, b
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
+	type report struct {
+		line string
+		err  error
 	}
-	t.Fatalf("PowerShell never wrote its pids to %s", path)
-	return 0, 0
+	reports := make(chan report, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		reports <- report{line, err}
+	}()
+
+	var got report
+	select {
+	case got = <-reports:
+	case <-leaderExited:
+		t.Fatal("the leader exited before reporting its tree; it says why on this test's stderr")
+	case <-time.After(treeReportBudget):
+		t.Fatalf("the leader did not report its tree within %s", treeReportBudget)
+	}
+
+	require.NoError(t, got.err, "reading the leader's report")
+	fields := strings.Fields(got.line)
+	require.Len(t, fields, 2, "the leader must report exactly two pids, got %q", got.line)
+
+	leader, err := strconv.Atoi(fields[0])
+	require.NoError(t, err, "leader pid %q", fields[0])
+	grandchild, err = strconv.Atoi(fields[1])
+	require.NoError(t, err, "grandchild pid %q", fields[1])
+	return leader, grandchild
 }
 
 // requireGoneWithin waits for a pid to stop existing.
@@ -200,7 +246,7 @@ func TestSignal_UnsupportedOnWindows(t *testing.T) {
 	require.NoError(t, err)
 	defer group.Close()
 
-	cmd := exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+	cmd := exec.Command("ping.exe", "-n", "60", "127.0.0.1")
 	group.ConfigureCommand(cmd)
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
@@ -301,7 +347,7 @@ func TestJobObject_AdoptedLeaderKeepsItsPid(t *testing.T) {
 	require.NoError(t, err)
 	defer group.Close()
 
-	cmd := exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+	cmd := exec.Command("ping.exe", "-n", "60", "127.0.0.1")
 	group.ConfigureCommand(cmd)
 	require.NoError(t, cmd.Start())
 	require.NoError(t, group.Adopt(cmd.Process))
@@ -432,10 +478,19 @@ func TestJobObject_KillRacingClose(t *testing.T) {
 // sleeperInGroup starts a child inside group and returns its pid plus a
 // channel that closes once os/exec has waited on it. The wait matters on
 // Windows: the pid stays valid until the last handle to the process closes.
+//
+// ping.exe directly, not `cmd /c ping ... > NUL`. cmd.exe cannot replace its
+// own image the way a Unix shell does, so that form is two processes, and
+// killing the pid this returns kills only the outer one — the ping goes on
+// running for the rest of its minute, orphaned. TestJobObject_KillRacingClose
+// alone calls this forty times against a group it has usually already closed,
+// so the suite was leaving around fifty stray processes on the runner it then
+// went on to compete with. os/exec points a nil Stdout at NUL, which is what
+// the redirection was for.
 func sleeperInGroup(t *testing.T, group *platform.ProcessGroup) (pid int, exited <-chan struct{}) {
 	t.Helper()
 
-	cmd := exec.Command("cmd", "/c", "ping -n 60 127.0.0.1 > NUL")
+	cmd := exec.Command("ping.exe", "-n", "60", "127.0.0.1")
 	group.ConfigureCommand(cmd)
 	require.NoError(t, cmd.Start())
 
