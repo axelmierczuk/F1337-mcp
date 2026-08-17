@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="Three connected sandboxes" width="120">
+</p>
+
 # sandboxd
 
 **Let your coding agent choose which machine it runs on.**
