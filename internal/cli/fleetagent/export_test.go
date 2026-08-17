@@ -1,6 +1,25 @@
 package fleetagent
 
-import "github.com/axelmierczuk/fleet-mcp/internal/agent"
+import (
+	"log/slog"
+	"time"
+
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+)
+
+// EnrollRequestForTest is the message `enroll` sends about this host.
+//
+// Exported alongside ServerOptionsForTest so a test can compare what the two
+// paths say about the same host without an enrollment or a running daemon.
+func EnrollRequestForTest(token string, csrDER []byte, requestedName string, addresses []string) *sandboxdv1.EnrollRequest {
+	return enrollRequest(token, csrDER, requestedName, addresses)
+}
+
+// ServerOptionsForTest is what `serve` builds the daemon from.
+func ServerOptionsForTest(cfg *agent.Config, log *slog.Logger, drain time.Duration) agent.Options {
+	return serverOptions(cfg, log, drain)
+}
 
 // EnrollmentMaterialForTest is the set of files `service install` has to hand
 // to the account the daemon will run as.

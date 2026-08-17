@@ -47,8 +47,15 @@ CHECK_TAGS := integration
 # GOOS, with or without the tag above. The one file in it that exists purely for
 # Windows, pgid_other.go, was therefore compiled by nothing: the integration job
 # runs on Linux and macOS only, and that job is the only thing that builds these
-# helpers. Naming the package explicitly is what makes the per-GOOS loop below
-# mean what it says.
+# helpers. Naming the package explicitly is what makes the per-GOOS loops below
+# mean what they say.
+#
+# The exact path, not a wildcard: `./test/e2e/testdata/...` is skipped for the
+# same reason `./...` is, and golangci-lint expands its patterns with the same
+# go tool, so it reports "no go files to analyze" rather than the two findings
+# that are actually in there. Both checkers therefore have to name it, and
+# because naming anything at all replaces the implicit default, `./...` has to
+# be spelled out alongside it.
 CHECK_EXTRA_PKGS := ./test/e2e/testdata/helpers
 
 .DEFAULT_GOAL := help
@@ -165,11 +172,15 @@ test-integration-docker:
 # not compile on Windows. CI's own lint job runs on one runner and sees one
 # GOOS too; only its test matrix vets all three, and only after the push. The
 # extra passes cost seconds and close the gap before it.
+#
+# The package list is spelled out for the reason CHECK_EXTRA_PKGS gives: the
+# implicit `./...` a bare `golangci-lint run` uses cannot reach the e2e
+# helpers, so this target reported clean on a package it had never opened.
 .PHONY: lint
 lint:
 	@for os in $(CHECK_GOOSES); do \
 		echo "  golangci-lint GOOS=$$os"; \
-		GOOS=$$os CGO_ENABLED=0 $(TOOLS_DIR)/golangci-lint run || exit 1; \
+		GOOS=$$os CGO_ENABLED=0 $(TOOLS_DIR)/golangci-lint run ./... $(CHECK_EXTRA_PKGS) || exit 1; \
 	done
 
 ## fmt: format Go sources and proto definitions
