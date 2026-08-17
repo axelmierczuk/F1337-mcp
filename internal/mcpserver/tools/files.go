@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -119,6 +120,24 @@ func pathCall(target *selection.Target, path string) mcperr.Call {
 	call := target.Call()
 	call.Subject = "path " + path
 	return call
+}
+
+// clampCount renders a caller's count as the uint32 these requests carry,
+// substituting fallback for one that was not given.
+//
+// Clamped rather than converted, because the conversion silently wraps: a
+// limit of 2^32+3 became 3, and the result then reported the walk as cut short
+// and told the model to raise the limit — which is the argument that caused it.
+// A count above what the field can hold is a caller asking for everything, and
+// the agent clamps to its own maximum in any case.
+func clampCount(n int, fallback uint32) uint32 {
+	switch {
+	case n <= 0:
+		return fallback
+	case int64(n) > math.MaxUint32:
+		return math.MaxUint32
+	}
+	return uint32(n) //nolint:gosec // bounded by the case above
 }
 
 // ------------------------------------------------------------------ read
@@ -584,10 +603,7 @@ func (r *Registrar) sandboxLs(ctx context.Context, _ *mcp.CallToolRequest, targe
 		return LsResult{}, target.Call().Map(err)
 	}
 
-	limit := uint32(DefaultListEntries)
-	if in.Limit > 0 {
-		limit = uint32(in.Limit) //nolint:gosec // checked non-negative above
-	}
+	limit := clampCount(in.Limit, DefaultListEntries)
 
 	callCtx, cancel := context.WithTimeout(ctx, r.deps.callTimeout())
 	defer cancel()
@@ -680,10 +696,7 @@ func (r *Registrar) sandboxGlob(ctx context.Context, _ *mcp.CallToolRequest, tar
 		return GlobResult{}, target.Call().Map(err)
 	}
 
-	limit := uint32(DefaultGlobResults)
-	if in.Limit > 0 {
-		limit = uint32(in.Limit) //nolint:gosec // checked non-negative above
-	}
+	limit := clampCount(in.Limit, DefaultGlobResults)
 
 	callCtx, cancel := context.WithTimeout(ctx, r.deps.callTimeout())
 	defer cancel()
@@ -782,10 +795,7 @@ func (r *Registrar) sandboxGrep(ctx context.Context, _ *mcp.CallToolRequest, tar
 		return GrepResult{}, target.Call().Map(err)
 	}
 
-	maxMatches := uint32(DefaultGrepMatches)
-	if in.MaxMatches > 0 {
-		maxMatches = uint32(in.MaxMatches) //nolint:gosec // checked non-negative above
-	}
+	maxMatches := clampCount(in.MaxMatches, DefaultGrepMatches)
 
 	callCtx, cancel := context.WithTimeout(ctx, r.deps.callTimeout())
 	defer cancel()
@@ -795,7 +805,7 @@ func (r *Registrar) sandboxGrep(ctx context.Context, _ *mcp.CallToolRequest, tar
 		Root:                  in.Root,
 		IncludeGlob:           in.IncludeGlob,
 		CaseInsensitive:       in.CaseInsensitive,
-		ContextLines:          uint32(in.ContextLines), //nolint:gosec // checked non-negative above
+		ContextLines:          clampCount(in.ContextLines, 0),
 		MaxMatches:            maxMatches,
 		RespectGitignore:      in.RespectGitignore,
 		FilesOnly:             in.FilesOnly,

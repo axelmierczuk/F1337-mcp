@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -150,13 +151,44 @@ type transferEntry struct {
 // transferPlan is what a walk of the source produced: what to move, what was
 // deliberately left behind, and why.
 type transferPlan struct {
-	entries  []transferEntry
-	skips    []TransferSkip
+	entries []transferEntry
+	// skips holds up to maxSkipsReported entries; skipped counts them all.
+	skips   []TransferSkip
+	skipped int
+
 	excluded int
 	bytes    uint64
 	// dir reports whether the source was a directory, which decides how the
 	// destination is composed.
 	dir bool
+}
+
+// skip records an entry that was not transferred.
+//
+// The count is exact and the enumeration is bounded, which is what the result
+// already promises. Retaining every record was that promise made the expensive
+// way: only maxSkipsReported of them are ever rendered, and a walk over a
+// directory of device nodes or dangling links held one record per entry for a
+// list nobody reads.
+func (p *transferPlan) skip(path, reason string) {
+	p.skipped++
+	if len(p.skips) < maxSkipsReported {
+		p.skips = append(p.skips, TransferSkip{Path: path, Reason: reason})
+	}
+}
+
+// addBytes accumulates a size without wrapping.
+//
+// On a pull every size in the sum is a number the sandbox chose, and enough of
+// them add past 2^64 back round to nothing — which is a cap check that passes
+// on a tree whose declared size is larger than the machine, and then hands each
+// file the largest RPC deadline the allowance permits. Saturating keeps the
+// refusal.
+func addBytes(total, n uint64) uint64 {
+	if sum := total + n; sum >= total {
+		return sum
+	}
+	return math.MaxUint64
 }
 
 func (r *Registrar) sandboxTransfer(ctx context.Context, _ *mcp.CallToolRequest, target *selection.Target, in TransferArgs) (TransferResult, error) {
@@ -229,12 +261,8 @@ func renderTransfer(direction string, in TransferArgs, plan *transferPlan, moved
 		DurationMs:   time.Since(started).Milliseconds(),
 		Unchanged:    moved.unchanged,
 		Excluded:     plan.excluded,
-		SkippedCount: len(plan.skips),
-	}
-	if len(plan.skips) > maxSkipsReported {
-		out.Skipped = plan.skips[:maxSkipsReported]
-	} else {
-		out.Skipped = plan.skips
+		SkippedCount: plan.skipped,
+		Skipped:      plan.skips,
 	}
 
 	var note notes
@@ -249,8 +277,8 @@ func renderTransfer(direction string, in TransferArgs, plan *transferPlan, moved
 		note.add("%s skipped by an exclude pattern. The defaults cover .git, node_modules, vendor, target and similar build output.",
 			plural(plan.excluded, "entry was", "entries were"))
 	}
-	if len(plan.skips) > maxSkipsReported {
-		note.add("%d entries were skipped; the first %d are listed.", len(plan.skips), maxSkipsReported)
+	if plan.skipped > len(plan.skips) {
+		note.add("%d entries were skipped; the first %d are listed.", plan.skipped, len(plan.skips))
 	}
 	if plan.dir && sep != "/" && direction == directionPush {
 		note.add("The sandbox uses %q as its path separator; destination paths were composed with it.", sep)
@@ -302,6 +330,9 @@ func (r *Registrar) planPush(ctx context.Context, files sandboxdv1.FileServiceCl
 
 	plan := &transferPlan{dir: info.IsDir()}
 	if !info.IsDir() {
+		if err := checkFileCap(root, u64(info.Size())); err != nil {
+			return nil, err
+		}
 		destination, err := r.pushFileDestination(ctx, files, target, root, in.Destination, sep)
 		if err != nil {
 			return nil, err
@@ -331,11 +362,18 @@ func (r *Registrar) planPush(ctx context.Context, files sandboxdv1.FileServiceCl
 	}
 
 	walkErr := filepath.WalkDir(root, func(current string, entry fs.DirEntry, err error) error {
+		// The walk is the one part of a transfer with no RPC in it, so nothing
+		// else here notices a caller that has hung up. Without this, cancelling
+		// the tool call leaves a walk of a large tree running to the end before
+		// the handler discovers there is nobody left to answer.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			// A directory that cannot be read is reported rather than failing
 			// the transfer: one unreadable subtree in a repository should not
 			// stop the other nine hundred files from arriving.
-			plan.skips = append(plan.skips, TransferSkip{Path: relSlash(root, current), Reason: "could not be read: " + err.Error()})
+			plan.skip(relSlash(root, current), "could not be read: "+err.Error())
 			return nil //nolint:nilerr // recorded as a skip and reported; one unreadable subtree must not stop the rest of the tree
 		}
 		if current == root {
@@ -355,25 +393,25 @@ func (r *Registrar) planPush(ctx context.Context, files sandboxdv1.FileServiceCl
 
 		info, err := entry.Info()
 		if err != nil {
-			plan.skips = append(plan.skips, TransferSkip{Path: rel, Reason: "could not be stat'd: " + err.Error()})
+			plan.skip(rel, "could not be stat'd: "+err.Error())
 			return nil //nolint:nilerr // recorded as a skip and reported, for the same reason as above
 		}
 		if info.Mode()&fs.ModeSymlink != 0 {
 			resolved, reason := resolveLocalSymlink(root, current)
 			if reason != "" {
-				plan.skips = append(plan.skips, TransferSkip{Path: rel, Reason: reason})
+				plan.skip(rel, reason)
 				return nil
 			}
 			target, err := os.Stat(resolved)
 			if err != nil || !target.Mode().IsRegular() {
-				plan.skips = append(plan.skips, TransferSkip{Path: rel, Reason: "symlink does not point at a regular file"})
+				plan.skip(rel, "symlink does not point at a regular file")
 				return nil //nolint:nilerr // recorded as a skip and reported, for the same reason as above
 			}
 			info = target
 			current = resolved
 		}
 		if !info.Mode().IsRegular() {
-			plan.skips = append(plan.skips, TransferSkip{Path: rel, Reason: "not a regular file"})
+			plan.skip(rel, "not a regular file")
 			return nil
 		}
 
@@ -385,7 +423,7 @@ func (r *Registrar) planPush(ctx context.Context, files sandboxdv1.FileServiceCl
 			mode:        uint32(info.Mode().Perm()),
 			modified:    info.ModTime(),
 		})
-		plan.bytes += u64(info.Size())
+		plan.bytes = addBytes(plan.bytes, u64(info.Size()))
 		return checkCaps(len(plan.entries), plan.bytes)
 	})
 	if walkErr != nil {
@@ -573,6 +611,9 @@ func (r *Registrar) planPull(ctx context.Context, files sandboxdv1.FileServiceCl
 	plan := &transferPlan{dir: metadata.GetIsDir()}
 
 	if !metadata.GetIsDir() {
+		if err := checkFileCap(in.Source, metadata.GetSizeBytes()); err != nil {
+			return nil, err
+		}
 		if metadata.GetIsSymlink() {
 			// The same rule the recursive walk applies, for the same reason:
 			// ReadFile follows the link on the sandbox, so this would copy
@@ -641,15 +682,12 @@ func (r *Registrar) planPull(ctx context.Context, files sandboxdv1.FileServiceCl
 			// whether that target is inside the source tree means resolving a
 			// remote path from here, which is the "check before resolution"
 			// mistake the agent's own jail exists to avoid.
-			plan.skips = append(plan.skips, TransferSkip{
-				Path:   rel,
-				Reason: "symlink to " + entry.GetSymlinkTarget() + "; links are not followed out of the source tree",
-			})
+			plan.skip(rel, "symlink to "+entry.GetSymlinkTarget()+"; links are not followed out of the source tree")
 			continue
 		}
 		destination, skipReason := localEntryDestination(destinationRoot, rel, in.AllowOutsideWorkingDir)
 		if skipReason != "" {
-			plan.skips = append(plan.skips, TransferSkip{Path: rel, Reason: skipReason})
+			plan.skip(rel, skipReason)
 			continue
 		}
 		plan.entries = append(plan.entries, transferEntry{
@@ -660,7 +698,7 @@ func (r *Registrar) planPull(ctx context.Context, files sandboxdv1.FileServiceCl
 			mode:        entry.GetMode(),
 			modified:    modifiedTime(entry),
 		})
-		plan.bytes += entry.GetSizeBytes()
+		plan.bytes = addBytes(plan.bytes, entry.GetSizeBytes())
 	}
 	sort.Slice(plan.entries, func(i, j int) bool { return plan.entries[i].rel < plan.entries[j].rel })
 	return plan, checkCaps(len(plan.entries), plan.bytes)
@@ -859,13 +897,32 @@ func localFileDestination(destination, remoteSource string, allowOutside bool) (
 func localEntryDestination(root, rel string, allowOutside bool) (destination, skipReason string) {
 	candidate := filepath.Join(root, filepath.FromSlash(rel))
 	inside, err := filepath.Rel(root, candidate)
-	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
+	if err != nil || inside == "." || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
 		return "", fmt.Sprintf("the sandbox names it %q, which does not stay inside the destination directory", rel)
 	}
 	if _, err := localWriteTarget(candidate, allowOutside); err != nil {
 		return "", "it resolves outside this workstation's working directory, which a pull may not write to; a directory in the destination tree is a symlink pointing out of it"
 	}
+	// The two checks above are not the same check, and between them they leave a
+	// gap. The first is on the name as written, which is what catches a
+	// traversal spelled into it; the second is on the resolved path, but against
+	// the *working directory*. Neither asks whether the resolved path is still
+	// under the destination — so a subdirectory of the destination that is a
+	// symlink to a sibling was a way out of the directory the caller named,
+	// while staying inside the working directory and reporting the file as
+	// delivered to a path it never reached. Resolve, then check, against the
+	// boundary that was named.
+	if !resolvesUnder(root, candidate) {
+		return "", "it resolves outside the destination directory: a directory in the destination tree is a symlink pointing somewhere else"
+	}
 	return candidate, ""
+}
+
+// resolvesUnder reports whether candidate is still under root once both have
+// had their symlinks followed as far as each path exists.
+func resolvesUnder(root, candidate string) bool {
+	rel, err := filepath.Rel(resolveExistingLocal(root), resolveExistingLocal(candidate))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // localWriteTarget resolves a local write destination and refuses one outside
@@ -950,6 +1007,24 @@ func resolveLocalSymlink(root, link string) (resolved, skipReason string) {
 }
 
 // ---------------------------------------------------------------- shared
+
+// checkFileCap refuses one file that is over the byte cap on its own.
+//
+// The two tree walks check this limit as they accumulate, and a single-file
+// transfer has no walk — so it was the one shape of transfer the documented cap
+// did not apply to at all. What that produced was not a larger transfer but a
+// worse failure at each end: a 300 MiB push went through silently, and a pull
+// over the cap streamed the whole 256 MiB the agent would give it before being
+// refused as "truncated" — the ten-minute transfer this limit exists to turn
+// into a one-second refusal. It also left the size the sandbox reports free to
+// set the RPC deadline, with nothing above it but the hour-long ceiling.
+func checkFileCap(name string, size uint64) error {
+	if size <= MaxTransferBytes {
+		return nil
+	}
+	return fmt.Errorf("%s is %s, over the %s limit for one transfer; move it in pieces, or compress it first",
+		name, humanBytes(size), humanBytes(MaxTransferBytes))
+}
 
 // checkCaps refuses a transfer that is too large, naming the limit that would
 // stop it.

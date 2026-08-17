@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -494,11 +495,22 @@ func TestLs_TruncationIsReported(t *testing.T) {
 // ------------------------------------------------------------------ glob
 
 // TestGlob_ReturnsMatchesNewestFirst.
+//
+// The ordering is the agent's — it walks and then sorts by modification time —
+// and this tool passes the list through. Asserted rather than assumed because
+// pass-through is exactly what a later change re-sorting or de-duplicating on
+// this side would break, and #24 asks for "newest first" by name. The times are
+// set explicitly: files written a millisecond apart share a timestamp on a
+// filesystem with one-second granularity, which is most of them.
 func TestGlob_ReturnsMatchesNewestFirst(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("a", "one.go"), "package a\n")
 	writeRemote(t, f.path("b", "two.go"), "package b\n")
 	writeRemote(t, f.path("b", "notes.md"), "# notes\n")
+
+	now := time.Now()
+	require.NoError(t, os.Chtimes(f.path("a", "one.go"), now.Add(-time.Hour), now.Add(-time.Hour)))
+	require.NoError(t, os.Chtimes(f.path("b", "two.go"), now, now))
 
 	out := structured[globResult](t, f.ok("sandbox_glob", map[string]any{
 		"pattern": "**/*.go", "root": f.remote,
@@ -509,6 +521,10 @@ func TestGlob_ReturnsMatchesNewestFirst(t *testing.T) {
 		assert.True(t, strings.HasSuffix(p, ".go"), "unexpected match %s", p)
 		assert.True(t, filepath.IsAbs(p), "paths must be absolute so they can be passed straight to sandbox_read")
 	}
+	require.Len(t, out.Paths, 2)
+	assert.True(t, strings.HasSuffix(out.Paths[0], "two.go"),
+		"the newest match must come first, got %v", out.Paths)
+	assert.True(t, strings.HasSuffix(out.Paths[1], "one.go"))
 }
 
 // TestGlob_NoMatchesExplainsTheAnchoringRule, which is the mistake a model

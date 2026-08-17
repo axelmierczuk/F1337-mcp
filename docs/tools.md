@@ -365,16 +365,22 @@ from the sandbox, and `..\..\x` is an ordinary filename on Linux — the
 normalisation that lets a Windows sandbox's `cmd\app\main.go` mean
 `cmd/app/main.go` would otherwise turn it into a way out of the directory the
 caller named, and past two levels out of the working directory. Every entry is
-checked against the destination root and against the same confinement the root
-was, so a symlinked subdirectory of the destination is not a way out either.
-Entries that fail either check are skipped and reported; the rest arrive.
+checked three ways: the name **as written** must stay under the destination
+root, and the path it **resolves to** must stay under that root *and* under the
+working directory. So a subdirectory of the destination that is a symlink is not
+a way out either — neither one pointing out of the working directory, nor one
+pointing at a sibling inside it, which would otherwise land the file somewhere
+the result then reported it had not gone. Entries that fail any of the three are
+skipped and reported; the rest arrive.
 
 **Defaults, caps and repeats.** `.git`, `.hg`, `.svn`, `node_modules`,
 `vendor`, `target`, `dist`, `build`, virtualenv and cache directories are
 excluded by default, applied only *below* the source root so naming `.git` as
 the source still transfers it; the result reports how many entries were
 excluded, so it is never silent. One call moves at most 5000 files or 256 MiB,
-refused up front naming the limit rather than abandoned half way. A file whose
+refused up front naming the limit rather than abandoned half way — including a
+single file over the byte cap, which is the shape with no walk to accumulate it.
+A file whose
 size matches and whose destination is no older is skipped as unchanged — rsync's
 quick check, minus the modification time this protocol has no field to preserve
 — which makes push, edit, push again cost only what changed. `force` overrides
