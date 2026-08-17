@@ -161,6 +161,11 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 
 	logs := &strings.Builder{}
 	auditLog := policy.NewAudit(auditCfg)
+	// Windows will not unlink a file that is still open, and the log holds its
+	// handle for the life of the daemon by design — so t.TempDir's cleanup
+	// fails there unless the handle goes first. Registered after t.TempDir
+	// above, so it runs before it.
+	t.Cleanup(func() { _ = auditLog.Close() })
 	base := BaseEnv()
 
 	return &harness{
