@@ -20,9 +20,6 @@ import (
 	// Cross-platform service installation: systemd, launchd, Windows SC (M1).
 	_ "github.com/kardianos/service"
 
-	// PTY allocation on Unix and ConPTY on Windows (M1).
-	_ "github.com/aymanbagabas/go-pty"
-
 	// Stable identifiers for sandboxes, processes, and selection handles.
 	_ "github.com/google/uuid"
 )
