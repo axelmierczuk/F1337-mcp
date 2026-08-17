@@ -16,6 +16,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	agentfs "github.com/axelmierczuk/sandboxd-mcp/internal/agent/fs"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
 )
 
 // --- MakeDirectory ---------------------------------------------------------
@@ -269,6 +270,13 @@ func TestRemovePath_RecursiveUnlinksNestedSymlinksWithoutFollowingThem(t *testin
 }
 
 // Removing the root would destroy the confinement while staying inside it.
+//
+// The assertion is on the sentence the root refusal produces, not merely on
+// PermissionDenied: the jail refuses this path anyway, because the parent of a
+// root is outside the roots, and a test that accepted either message would pass
+// with the root check deleted while telling the caller its own root is
+// "outside the allowed roots" — which is both confusing and a different
+// guarantee.
 func TestRemovePath_RefusesTheJailRoot(t *testing.T) {
 	root := tempRoot(t)
 	writeFile(t, filepath.Join(root, "keep.txt"), "x")
@@ -279,7 +287,8 @@ func TestRemovePath_RefusesTheJailRoot(t *testing.T) {
 			&sandboxdv1.RemovePathRequest{Path: spelling, Recursive: true})
 		require.Error(t, err, "spelling %q", spelling)
 		assert.Equal(t, codes.PermissionDenied, status.Code(err), "spelling %q", spelling)
-		assert.Contains(t, status.Convert(err).Message(), "allowed root")
+		assert.Contains(t, status.Convert(err).Message(), "is an allowed root", "spelling %q", spelling)
+		assert.Contains(t, status.Convert(err).Message(), "remove its contents instead", "spelling %q", spelling)
 	}
 	assert.DirExists(t, root)
 	assert.FileExists(t, filepath.Join(root, "keep.txt"))
@@ -457,7 +466,58 @@ func TestMovePath_RefusesTheJailRootAsSource(t *testing.T) {
 		&sandboxdv1.MovePathRequest{Source: root, Destination: filepath.Join(root, "elsewhere")})
 	require.Error(t, err)
 	assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	assert.Contains(t, status.Convert(err).Message(), "is an allowed root")
 	assert.DirExists(t, root)
+
+	// And as a destination, where the root would be replaced rather than moved.
+	src := writeFile(t, filepath.Join(root, "f.txt"), "x\n")
+	_, err = svc.MovePath(context.Background(),
+		&sandboxdv1.MovePathRequest{Source: src, Destination: root, Overwrite: true})
+	require.Error(t, err)
+	assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	assert.Contains(t, status.Convert(err).Message(), "is an allowed root")
+	assert.Equal(t, "x\n", readBack(t, src))
+}
+
+// The spelling the lexical check cannot see, which is why the handlers check
+// the resolved target as well.
+//
+// Reaching a root through a symlinked parent needs that parent to be inside a
+// root itself, which means nested roots — the sole-root case cannot get here,
+// because the parent of the only root is outside the jail and the resolve
+// refuses first. With two roots it is reachable: the path the caller wrote is
+// not textually a root, the jail resolves it happily, and what it resolves to
+// is a root. The refusal has to be made again on the resolved target or it is
+// not made at all.
+func TestRemovePath_RefusesAnAllowedRootReachedThroughASymlinkedParent(t *testing.T) {
+	outer := tempRoot(t)
+	inner := filepath.Join(outer, "inner")
+	require.NoError(t, os.Mkdir(inner, 0o755))
+	writeFile(t, filepath.Join(inner, "keep.txt"), "x")
+	requireSymlink(t, outer, filepath.Join(outer, "alias"))
+
+	confinement, err := jail.New(jail.Config{Roots: []string{outer, inner}})
+	require.NoError(t, err)
+	svc := agentfs.NewService(confinement, testLogger(), agentfs.Limits{})
+
+	_, err = svc.RemovePath(context.Background(), &sandboxdv1.RemovePathRequest{
+		Path: filepath.Join(outer, "alias", "inner"), Recursive: true})
+
+	require.Error(t, err)
+	assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	assert.Contains(t, status.Convert(err).Message(), "is an allowed root")
+	assert.FileExists(t, filepath.Join(inner, "keep.txt"))
+
+	// A nested root is refused by name too, and the refusal is about the roots
+	// rather than about everything under them.
+	_, err = svc.RemovePath(context.Background(),
+		&sandboxdv1.RemovePathRequest{Path: inner, Recursive: true})
+	require.Error(t, err)
+	assert.Contains(t, status.Convert(err).Message(), "is an allowed root")
+
+	_, err = svc.RemovePath(context.Background(),
+		&sandboxdv1.RemovePathRequest{Path: filepath.Join(inner, "keep.txt")})
+	require.NoError(t, err)
 }
 
 // Both endpoints go through the jail, not just the destination.

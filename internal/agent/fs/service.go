@@ -207,7 +207,8 @@ func (s *Service) lexical(path string) (string, error) {
 }
 
 // resolveSelf resolves a path for an operation on the path itself rather than
-// on whatever it points at.
+// on whatever it points at. verb names the operation, for the error an allowed
+// root produces.
 //
 // Containment is decided on the resolved *parent*, and the last component is
 // left exactly as the caller wrote it. That difference is the whole of it:
@@ -219,7 +220,7 @@ func (s *Service) lexical(path string) (string, error) {
 //
 // The parent still gets the full treatment, so a path whose directory is a
 // symlink out of the jail is refused exactly as it would be anywhere else.
-func (s *Service) resolveSelf(path string) (string, error) {
+func (s *Service) resolveSelf(path, verb string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", status.Error(codes.InvalidArgument, "path is required")
 	}
@@ -234,11 +235,115 @@ func (s *Service) resolveSelf(path string) (string, error) {
 		return "", status.Errorf(codes.InvalidArgument,
 			"%s is a filesystem root, not a path this agent will operate on", named)
 	}
+	// An allowed root is refused here rather than by the resolve below, and the
+	// reason is the message rather than the outcome. The parent of a root is
+	// outside the jail by construction, so resolving it refuses the request —
+	// correctly — with "the parent is outside the allowed roots", which names a
+	// directory the caller never mentioned and reads as a contradiction when the
+	// root is its own answer. Refusing the root by name says the true thing.
+	// The handlers check the *resolved* target as well, for the spellings this
+	// lexical comparison cannot see; see Service.refuseJailRoot.
+	if err := s.refuseJailRoot(named, verb); err != nil {
+		return "", err
+	}
 	resolvedParent, err := s.resolve(parent)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(resolvedParent, filepath.Base(named)), nil
+}
+
+// writeTarget returns the path a write should commit to, given an
+// already-jail-resolved one.
+//
+// Every write here lands by renaming a sibling temp file over the target, and a
+// rename over a symlink replaces the link with a regular file. So the path a
+// write commits to has to be the file the name resolves to, not the name
+// itself. A confined jail has already done that — Resolve follows every symlink
+// and returns what the kernel would reach — but jail.Unconfined normalises
+// without resolving, and the unconfined agent is the *default* one, since the
+// jail is only wired in with exec disabled.
+//
+// Without this, a write to a symlinked path on a default agent unlinks the
+// symlink, writes a new file where it stood, leaves the file the caller meant
+// to change untouched, and gives the new file the link's own permission bits —
+// 0777 on Linux, where a symlink is lrwxrwxrwx. All three are wrong, and the
+// last one is world-writable.
+//
+// A dangling link is left as the caller wrote it. There is nothing to write
+// through, and creating the file the link points at is a decision this does not
+// make on the caller's behalf.
+func (s *Service) writeTarget(resolved string) (string, error) {
+	target, ok := symlinkTarget(resolved)
+	if !ok {
+		return resolved, nil
+	}
+	if !s.jail.ContainsResolved(target) {
+		// This is the check that following the link requires, not a formality.
+		// A rename does not follow a symlink in its final component, so before
+		// this function existed a link swapped in after the resolve could only
+		// ever be *replaced*, never written through. Following it deliberately
+		// gives up that accident, so containment is decided again on what the
+		// link actually points at — which is what catches a component swapped
+		// for a symlink between Resolve and here, the race the jail package
+		// documents as unavoidable off Linux.
+		return "", s.pathError(resolved, jail.ErrOutsideJail)
+	}
+	return target, nil
+}
+
+// symlinkTarget returns what a symlink resolves to.
+//
+// It reports false for a path that is not a symlink, and for one whose target
+// cannot be reached — a dangling link included, since there is nothing there to
+// operate on. Neither is an error to report: both mean "use the path you were
+// given", which is what every caller does with it.
+func symlinkTarget(path string) (string, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		return "", false
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	return target, true
+}
+
+// isIrregular reports whether path is something other than a regular file or a
+// directory: a device, a socket or a named pipe.
+//
+// A path that cannot be stat'd is not irregular as far as this is concerned.
+// Whatever is wrong with it, the syscall that follows reports it better than a
+// guess here would.
+func isIrregular(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir() && !info.Mode().IsRegular()
+}
+
+// refuseIrregular rejects a path that is neither a regular file nor a
+// directory.
+//
+// Opening a named pipe blocks inside open(2) until a writer appears. Nothing
+// times it out and a cancelled request cannot interrupt it, so one RPC naming a
+// FIFO strands its handler goroutine for the life of the process — and the FIFO
+// does not have to be the caller's own, only present in a tree it can name. A
+// device or a socket is no better behaved, and none of the three has contents a
+// file RPC could return.
+//
+// walkTree has skipped these since it was written; this is the same rule for
+// the paths a caller names directly. Directories are left to the callers, which
+// have something more useful to say about them.
+func refuseIrregular(path string) error {
+	if !isIrregular(path) {
+		return nil
+	}
+	return status.Errorf(codes.FailedPrecondition,
+		"%s is not a regular file; this agent will not open a device, a socket or a named pipe, because reading one either blocks with no way to time it out or returns something that is not a file's contents",
+		path)
 }
 
 // pathError maps a jail refusal, or an ordinary filesystem error, to a status.

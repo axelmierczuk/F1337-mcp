@@ -53,6 +53,13 @@ func (s *Service) WriteFile(stream grpc.ClientStreamingServer[sandboxdv1.WriteFi
 	if err != nil {
 		return err
 	}
+	// The file the commit lands on, which is not the name when the name is a
+	// symlink. Taken before the lock, so a write through a link and a write to
+	// the file it names take the same lock rather than passing each other.
+	resolved, err = s.writeTarget(resolved)
+	if err != nil {
+		return err
+	}
 
 	release, err := s.locks.lock(ctx, resolved)
 	if err != nil {
@@ -68,10 +75,25 @@ func (s *Service) WriteFile(stream grpc.ClientStreamingServer[sandboxdv1.WriteFi
 
 	// Lstat, not Stat: a broken symlink at the target still means the name is
 	// taken, and fail_if_exists is about the name.
+	//
+	// fail_if_exists is checked here and the commit below does not check again,
+	// so in principle the name could be taken between the two. Within this agent
+	// it cannot: the path lock above is held across both, so concurrent creates
+	// of one path serialise and exactly one of them sees a free name. What
+	// remains is a process outside the agent creating the file in that window,
+	// which no rename-based atomic write can exclude — the commit is a rename,
+	// and rename replaces silently by definition.
 	existing, statErr := os.Lstat(resolved)
 	switch {
 	case statErr == nil && existing.IsDir():
 		return status.Errorf(codes.InvalidArgument, "%s is a directory", resolved)
+	case statErr == nil && !existing.Mode().IsRegular() && existing.Mode()&fs.ModeSymlink == 0:
+		// A device, a socket or a named pipe — a directory was handled above,
+		// and a symlink is either already followed by writeTarget or dangling.
+		// Committing over one would replace it with a regular file, and
+		// appending to one would block in open(2) with no way to time it out.
+		return status.Errorf(codes.FailedPrecondition,
+			"%s is not a regular file; this agent will not replace a device, a socket or a named pipe with one", resolved)
 	case statErr == nil && header.GetFailIfExists():
 		return status.Errorf(codes.AlreadyExists, "%s already exists and fail_if_exists was set", resolved)
 	case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
@@ -82,10 +104,16 @@ func (s *Service) WriteFile(stream grpc.ClientStreamingServer[sandboxdv1.WriteFi
 	// An existing file keeps the mode it has: a caller appending a line to a
 	// 0600 secret must not find it 0644 afterwards. Only a file this call
 	// creates takes the requested mode.
+	//
+	// The mode comes from a Stat rather than the Lstat above. writeTarget has
+	// already followed a live symlink, but a *dangling* one is left as written,
+	// and Lstat on it reports the link's own bits — 0777 on Linux. Those are not
+	// a mode to hand a regular file.
 	mode := DefaultFileMode
+	target, targetErr := os.Stat(resolved)
 	switch {
-	case !created:
-		mode = existing.Mode().Perm()
+	case !created && targetErr == nil:
+		mode = target.Mode().Perm()
 	case header.GetMode() != 0:
 		mode = fs.FileMode(header.GetMode()).Perm()
 	}
@@ -104,7 +132,10 @@ func (s *Service) WriteFile(stream grpc.ClientStreamingServer[sandboxdv1.WriteFi
 		// leaves a partly appended file — the one outcome this RPC promises not
 		// to produce. The cost is one copy of the file per append, which is the
 		// honest price of the guarantee.
-		if err := s.copyExisting(header.GetPath(), tmp); err != nil {
+		// The resolved target rather than the requested path: they differ when
+		// the name is a symlink, and appending must read the same file the
+		// commit will land on.
+		if err := s.copyExisting(resolved, tmp); err != nil {
 			return err
 		}
 	}

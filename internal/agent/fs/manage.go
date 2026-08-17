@@ -113,7 +113,7 @@ func (s *Service) MakeDirectory(ctx context.Context, req *sandboxdv1.MakeDirecto
 //     resolved *parent* and the last component is left exactly as the caller
 //     wrote it.
 func (s *Service) RemovePath(ctx context.Context, req *sandboxdv1.RemovePathRequest) (*sandboxdv1.RemovePathResponse, error) {
-	target, err := s.resolveSelf(req.GetPath())
+	target, err := s.resolveSelf(req.GetPath(), "remove")
 	if err != nil {
 		return nil, err
 	}
@@ -198,11 +198,11 @@ func (s *Service) RemovePath(ctx context.Context, req *sandboxdv1.RemovePathRequ
 // difference is the one that silently does the wrong thing when guessed, so it
 // is stated and an existing directory at the destination is refused.
 func (s *Service) MovePath(ctx context.Context, req *sandboxdv1.MovePathRequest) (*sandboxdv1.MovePathResponse, error) {
-	source, err := s.resolveSelf(req.GetSource())
+	source, err := s.resolveSelf(req.GetSource(), "move")
 	if err != nil {
 		return nil, err
 	}
-	destination, err := s.resolveSelf(req.GetDestination())
+	destination, err := s.resolveSelf(req.GetDestination(), "move")
 	if err != nil {
 		return nil, err
 	}
@@ -352,6 +352,13 @@ func (c *contextReader) Read(p []byte) (int, error) {
 // It compares against the jail's resolved roots, which are empty on an
 // unconfined agent — so this refuses nothing there, which is correct: there is
 // no confinement for the removal to destroy.
+//
+// It is called twice per path, and the two calls do different jobs.
+// Service.resolveSelf calls it on the path as written, which is what produces a
+// sensible message for the ordinary spelling of a root. The handlers call it
+// again on the resolved target, which is what catches the spellings the lexical
+// comparison cannot see: a root reached through a symlinked parent, or a root
+// nested inside another root.
 func (s *Service) refuseJailRoot(target, verb string) error {
 	for _, root := range s.jail.Roots() {
 		if platform.EqualPaths(target, root) {

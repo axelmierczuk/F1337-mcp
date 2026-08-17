@@ -33,6 +33,10 @@ func (s *Service) ReadFile(req *sandboxdv1.ReadFileRequest, stream grpc.ServerSt
 	if err != nil {
 		return err
 	}
+	// Before the open, because the open is where a named pipe blocks forever.
+	if err := refuseIrregular(resolved); err != nil {
+		return err
+	}
 	file, err := s.jail.OpenFile(req.GetPath(), os.O_RDONLY, 0)
 	if err != nil {
 		return s.pathError(req.GetPath(), err)

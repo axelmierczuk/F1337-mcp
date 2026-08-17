@@ -35,6 +35,23 @@
 // this exists to prevent. An interrupted transfer removes the temp file and
 // leaves the original untouched.
 //
+// Committing by rename is also why a write resolves its last component, which
+// is the exact opposite of what the path-management RPCs do above. A rename
+// over a symlink replaces the link with a regular file, so a write that did not
+// follow the link would unlink it, write a new file where it stood, and leave
+// the file the caller meant to change untouched. A confined jail resolves
+// everything already; the unconfined one does not, and it is the default. See
+// Service.writeTarget.
+//
+// # Files this package will not open
+//
+// Only regular files and directories. A named pipe blocks inside open(2) until
+// a writer appears, with no deadline and no way for a cancelled request to
+// interrupt it, so a single RPC naming one would strand its handler goroutine
+// for the life of the process — and the pipe need only exist somewhere in a
+// tree the caller can name. Devices and sockets are refused with it, here and
+// in the walk that Glob and Grep share.
+//
 // # Streaming
 //
 // ReadFile and WriteFile stream in bounded chunks and never hold a whole file

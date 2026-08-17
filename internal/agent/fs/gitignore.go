@@ -88,6 +88,12 @@ func (s *ignoreStack) ignored(path string, isDir bool) bool {
 
 // loadIgnoreFile parses a .gitignore, returning false when there is none.
 func loadIgnoreFile(path string) ([]ignoreRule, bool) {
+	// A .gitignore that is not a regular file is not read. A named pipe by that
+	// name would block the walk in open(2) forever, which turns any search over
+	// a tree someone else can write into a stuck handler goroutine.
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
 	f, err := os.Open(path) //nolint:gosec // path is inside a tree the jail already admitted
 	if err != nil {
 		return nil, false

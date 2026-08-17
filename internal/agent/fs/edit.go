@@ -51,6 +51,14 @@ func (s *Service) EditFile(ctx context.Context, req *sandboxdv1.EditFileRequest)
 	if err != nil {
 		return nil, err
 	}
+	// The file the commit lands on. Without this an edit through a symlink on an
+	// unconfined agent reads the target and writes a new regular file over the
+	// link — the change lands in a file nobody asked for and the file that was
+	// edited keeps its old contents.
+	resolved, err = s.writeTarget(resolved)
+	if err != nil {
+		return nil, err
+	}
 
 	release, err := s.locks.lock(ctx, resolved)
 	if err != nil {
@@ -58,7 +66,7 @@ func (s *Service) EditFile(ctx context.Context, req *sandboxdv1.EditFileRequest)
 	}
 	defer release()
 
-	content, mode, err := s.loadForEdit(req.GetPath(), resolved)
+	content, mode, err := s.loadForEdit(resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -96,10 +104,13 @@ func (s *Service) EditFile(ctx context.Context, req *sandboxdv1.EditFileRequest)
 // Whole, because an exact-match replacement has no streaming form: the match
 // may straddle any boundary. That is why there is a size ceiling here and
 // nowhere else in this package.
-func (s *Service) loadForEdit(requested, resolved string) (content string, mode os.FileMode, err error) {
-	file, err := s.jail.OpenFile(requested, os.O_RDONLY, 0)
+func (s *Service) loadForEdit(resolved string) (content string, mode os.FileMode, err error) {
+	if err := refuseIrregular(resolved); err != nil {
+		return "", 0, err
+	}
+	file, err := s.jail.OpenFile(resolved, os.O_RDONLY, 0)
 	if err != nil {
-		return "", 0, s.pathError(requested, err)
+		return "", 0, s.pathError(resolved, err)
 	}
 	defer func() { _ = file.Close() }()
 

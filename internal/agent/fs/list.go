@@ -48,7 +48,10 @@ func (s *Service) StatPath(ctx context.Context, req *sandboxdv1.StatPathRequest)
 	}
 
 	md := metadataFor(named, info)
-	if !md.GetIsDir() && !md.GetIsSymlink() {
+	// Only a regular file is sniffed. Opening a named pipe to read its head
+	// blocks in open(2) until a writer appears, with no deadline and nothing a
+	// cancelled request can do about it, so describing one must not open it.
+	if info.Mode().IsRegular() {
 		md.IsBinary = s.sniffPath(named)
 	}
 	return &sandboxdv1.StatPathResponse{Exists: true, Metadata: md}, nil

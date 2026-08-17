@@ -140,9 +140,13 @@ func (s *Service) symlinkInsideJail(path string) bool {
 		return false
 	}
 	info, err := os.Lstat(target)
-	if err != nil || info.IsDir() {
+	if err != nil || !info.Mode().IsRegular() {
 		// A link to a directory is not descended into, and returning it as a
-		// file would be a lie about what it is.
+		// file would be a lie about what it is. A link to a device, a socket or
+		// a named pipe is refused for the reason the switch below refuses one
+		// reached directly: Grep opens what this yields, and opening a FIFO
+		// blocks in open(2) with no deadline and no way to cancel it. Checking
+		// only IsDir here let a link smuggle one past that switch.
 		return false
 	}
 	return s.jail.ContainsResolved(target)
