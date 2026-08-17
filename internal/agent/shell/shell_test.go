@@ -90,10 +90,10 @@ func TestSession_CarriesTypingToTheProgramAndItsOutputBack(t *testing.T) {
 	require.NoError(t, err)
 	sess.awaitOutput(catReady)
 
-	require.NoError(t, sess.typed("hello-from-the-operator\n"))
+	require.NoError(t, sess.typedLine("hello-from-the-operator"))
 	sess.awaitOutput("read[hello-from-the-operator]")
 
-	require.NoError(t, sess.typed("quit\n"))
+	require.NoError(t, sess.typedLine("quit"))
 	exit := sess.awaitEnd()
 	require.NotNil(t, exit)
 	assert.Equal(t, int32(0), exit.GetExitCode())
@@ -159,7 +159,7 @@ func TestSession_InterruptByteReachesTheProgramRatherThanTheStream(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, sess.typed(strings.Join(selfArgv(), " ")+"\n"))
+	require.NoError(t, sess.typedLine(strings.Join(selfArgv(), " ")))
 	// The interrupt is sent only once the helper is the terminal's foreground
 	// process. A Ctrl-C arriving while the shell is still parsing the line
 	// interrupts nothing.
@@ -178,12 +178,12 @@ func TestSession_InterruptByteReachesTheProgramRatherThanTheStream(t *testing.T)
 	// test is about the agent rather than about /bin/sh. The marker is
 	// arithmetic, so the answer is something the far end computed rather than
 	// something the terminal echoed back.
-	require.NoError(t, sess.typed("echo after=$((21+21))\n"))
+	require.NoError(t, sess.typedLine("echo after=$((21+21))"))
 	sess.awaitOutput("after=42")
 
 	// And the session itself is still there — the half that fails if an
 	// interrupt is treated as anything other than a byte on the wire.
-	require.NoError(t, sess.typed("exit 4\n"))
+	require.NoError(t, sess.typedLine("exit 4"))
 	exit := sess.awaitEnd()
 	require.NotNil(t, exit)
 	assert.Equal(t, int32(4), exit.GetExitCode(), "the shell should have exited on its own, after the interrupt reached only the program it was running")
@@ -247,12 +247,12 @@ func TestSession_ActivityKeepsAnIdleTimeoutAtBay(t *testing.T) {
 	// are carrying bytes throughout.
 	deadline := time.Now().Add(keepFor)
 	for i := 0; time.Now().Before(deadline); i++ {
-		require.NoError(t, sess.typed("still-here-"+strconv.Itoa(i)+"\n"))
+		require.NoError(t, sess.typedLine("still-here-"+strconv.Itoa(i)))
 		sess.awaitOutput("read[still-here-" + strconv.Itoa(i) + "]")
 		time.Sleep(interval)
 	}
 
-	require.NoError(t, sess.typed("quit\n"))
+	require.NoError(t, sess.typedLine("quit"))
 	exit := sess.awaitEnd()
 	require.NotNil(t, exit)
 	assert.False(t, exit.GetIdleTimeout(), "a session that carried data throughout was reaped as idle")

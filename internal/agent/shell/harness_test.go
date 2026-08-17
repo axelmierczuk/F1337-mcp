@@ -221,6 +221,16 @@ func (s *clientSession) typed(text string) error {
 	})
 }
 
+// typedLine sends a line, ending it the way a terminal does.
+//
+// Carriage return, not newline. Enter is CR on a terminal — the Unix line
+// discipline translates it to NL for the reader with ICRNL, and a Windows
+// console treats it as Enter and a bare NL as nothing at all. A test that sent
+// NL therefore typed a line that was never entered on Windows: the echo came
+// back without a line ending and the program on the far end waited forever for
+// one. CI caught exactly that.
+func (s *clientSession) typedLine(text string) error { return s.typed(text + "\r") }
+
 // resize sends a new window size.
 func (s *clientSession) resize(columns, rows uint32) error {
 	return s.stream.Send(&sandboxdv1.ShellRequest{

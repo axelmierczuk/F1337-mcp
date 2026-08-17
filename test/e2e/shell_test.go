@@ -99,6 +99,15 @@ func (c *shellClient) typed(text string) {
 	}
 }
 
+// typedLine sends a line, ending it the way a terminal does.
+//
+// Carriage return, not newline: Enter is CR on a terminal, and the line
+// discipline is what turns it into the NL a program reads. Sending NL types a
+// line that was never entered — harmlessly here, where every scenario is POSIX,
+// and not at all harmlessly on a Windows console, which is why the unit tests
+// spell it the same way.
+func (c *shellClient) typedLine(text string) { c.typed(text + "\r") }
+
 // resized changes the size of the client's own terminal, which is what a person
 // dragging a window corner does.
 func (c *shellClient) resized(columns, rows int) {
@@ -189,13 +198,13 @@ func TestShellRunsOnTheSelectedSandboxAndReturnsItsExitCode(t *testing.T) {
 	// Every string asserted on below is one a program printed. A terminal
 	// echoes what is typed at it, so matching typed text would hold for a
 	// session in which nothing ever ran.
-	c.typed("cat " + markerFile + "\n")
+	c.typedLine("cat " + markerFile)
 	c.awaitOutput(beta.name)
 	if contains(c.printed(), alpha.name) {
 		t.Fatalf("the session reached the wrong sandbox:\n%s", c.printed())
 	}
 
-	c.typed("exit 3\n")
+	c.typedLine("exit 3")
 	if code := c.awaitExit(); code != 3 {
 		t.Fatalf("fleetctl exited %d; the remote shell's status has to be the CLI's own", code)
 	}
@@ -223,11 +232,11 @@ func TestShellSessionIsAuditedWithoutItsContents(t *testing.T) {
 	)
 
 	c := f.openShell(t, [2]int{100, 40}, a.name)
-	c.typed("echo " + printedOnly + "$((6*7))\n")
+	c.typedLine("echo " + printedOnly + "$((6*7))")
 	c.awaitOutput(printedOnly + "42")
 
-	c.typed("echo " + typedSecret + " > /dev/null\n")
-	c.typed("exit 0\n")
+	c.typedLine("echo " + typedSecret + " > /dev/null")
+	c.typedLine("exit 0")
 	if code := c.awaitExit(); code != 0 {
 		t.Fatalf("fleetctl shell exited %d", code)
 	}
@@ -303,7 +312,7 @@ func TestShellCtrlCInterruptsTheRemoteProgramRatherThanTheClient(t *testing.T) {
 	// A program that talks forever, in the foreground. Its own output is what
 	// says it is running — a terminal echoes what is typed at it, so matching
 	// the command line would hold for a session in which nothing ever started.
-	c.typed(bins.helpers + " spew 100 tick\n")
+	c.typedLine(bins.helpers + " spew 100 tick")
 	c.awaitOutput("tick 1")
 
 	c.typed("\x03")
@@ -314,14 +323,14 @@ func TestShellCtrlCInterruptsTheRemoteProgramRatherThanTheClient(t *testing.T) {
 	// far end leaves it unread forever; and a client that took Ctrl-C as a
 	// local signal is not there to send it. The marker is arithmetic, so the
 	// answer is something the host computed rather than something echoed back.
-	c.typed("echo after=$((21+21))\n")
+	c.typedLine("echo after=$((21+21))")
 	c.awaitOutput("after=42")
 
 	if !c.running() {
 		t.Fatal("Ctrl-C killed the client; in raw mode it is a byte on the wire and never a local signal")
 	}
 
-	c.typed("exit 0\n")
+	c.typedLine("exit 0")
 	if code := c.awaitExit(); code != 0 {
 		t.Fatalf("the shell exited %d after an interrupt it should have survived", code)
 	}

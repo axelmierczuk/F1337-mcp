@@ -49,13 +49,13 @@ func TestSession_IsRecordedWithoutItsContents(t *testing.T) {
 	require.NoError(t, err)
 	sess.awaitOutput(catReady)
 
-	require.NoError(t, sess.typed(typedSecret+"\n"))
+	require.NoError(t, sess.typedLine(typedSecret))
 	// Waited for, not assumed: if the secret never reached the session, the
 	// assertions below would hold for a session that carried nothing and this
 	// test would prove nothing at all.
 	sess.awaitOutput(printedSecret)
 
-	require.NoError(t, sess.typed("quit\n"))
+	require.NoError(t, sess.typedLine("quit"))
 	require.NotNil(t, sess.awaitEnd())
 
 	rec := onlyRecord(t, svc)
