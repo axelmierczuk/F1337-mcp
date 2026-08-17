@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -256,30 +257,122 @@ func TestAlwaysRestartsACleanExitToo(t *testing.T) {
 	})
 }
 
-// TestBackoffGrowsBetweenRestarts asserts the aggregate, which is an outcome,
-// rather than the interval between two particular restarts, which is a
-// stopwatch reading and would be flaky.
+// TestBackoffGrowsBetweenRestarts asserts that each wait is longer than the one
+// before it.
+//
+// Not that any of them equals a wall-clock figure: the previous version of this
+// test required the first three restarts to take at least 700ms and failed on a
+// CI runner at 649ms, which is the test being wrong rather than the runner being
+// slow. Comparing the waits to each other is scale-free — it holds on a fast
+// machine and a starved one alike, and a supervisor that hot-loops fails it on
+// both.
+//
+// The wait measured is exit-to-next-spawn, not spawn-to-spawn. Spawn-to-spawn
+// also contains the process's own startup and the log drain that follows its
+// exit, and on a loaded runner those vary by more than the difference between
+// two consecutive backoffs — which is how a correct supervisor gets a test
+// failure. Between the exit transition and the next spawn there is nothing but
+// the timer.
 func TestBackoffGrowsBetweenRestarts(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t)
+	ts := newTestSupervisor(t, func(c *supervisorConfig) {
+		// High enough that the cap is not what the test ends up measuring.
+		c.maxRestartBackoff = 10 * time.Second
+	})
 
 	spec := ts.helperSpec("backing-off", "exit", "1")
 	spec.restartPolicy = sandboxdv1.RestartPolicy_RESTART_POLICY_ON_FAILURE
 	spec.maxRestarts = 3
-	spec.restartBackoff = 100 * time.Millisecond
+	spec.restartBackoff = 300 * time.Millisecond
 
-	started := time.Now()
 	r, err := ts.start(spec, false)
 	require.NoError(t, err)
 
-	// Three restarts at 100ms, 200ms and 400ms cannot happen in under 700ms.
-	// A supervisor that hot-loops would be done in milliseconds.
+	waits := observeRestartWaits(t, r, 3, 60*time.Second)
+
 	waitFor(t, 30*time.Second, "the restart budget to be exhausted", func() bool {
 		return r.status().GetRestartCount() >= 3 &&
 			r.currentState() == sandboxdv1.ProcessState_PROCESS_STATE_CRASHED
 	})
-	require.GreaterOrEqual(t, time.Since(started), 700*time.Millisecond,
-		"the backoff must grow rather than hot-looping")
+
+	// What the supervisor decided. Deterministic: no clock involved.
+	announced := announcedBackoffs(t, r)
+	require.Len(t, announced, 3, "one announcement per restart, got %v", announced)
+	for i := 1; i < len(announced); i++ {
+		require.Greater(t, announced[i], announced[i-1],
+			"announced backoff %d (%s) should exceed backoff %d (%s)",
+			i+1, announced[i], i, announced[i-1])
+	}
+
+	// What it actually waited.
+	require.Len(t, waits, 3, "waits: %v", waits)
+	for i := 1; i < len(waits); i++ {
+		require.Greater(t, waits[i], waits[i-1],
+			"wait %d (%s) should exceed wait %d (%s); a hot-looping supervisor has them all equal",
+			i+1, waits[i], i, waits[i-1])
+	}
+}
+
+// observeRestartWaits measures the gap between each run's exit and the next
+// run's spawn.
+//
+// Polling is the only way in: a spawn is not a state a waiter can block on,
+// because every restart reaches STARTING alike. exited_at is cleared by the
+// spawn that follows it, so the value from the poll before a new started_at
+// appeared is the one that belongs to the run that just ended.
+func observeRestartWaits(t *testing.T, r *record, want int, timeout time.Duration) []time.Duration {
+	t.Helper()
+
+	var (
+		waits     []time.Duration
+		lastStart time.Time
+		lastExit  time.Time
+	)
+	deadline := time.Now().Add(timeout)
+	for len(waits) < want && time.Now().Before(deadline) {
+		status := r.status()
+
+		var startedAt time.Time
+		if at := status.GetStartedAt(); at != nil {
+			startedAt = at.AsTime()
+		}
+		if !startedAt.IsZero() && !startedAt.Equal(lastStart) {
+			if !lastStart.IsZero() && !lastExit.IsZero() {
+				waits = append(waits, startedAt.Sub(lastExit))
+			}
+			lastStart = startedAt
+			lastExit = time.Time{}
+		}
+		if at := status.GetExitedAt(); at != nil {
+			if exitedAt := at.AsTime(); !exitedAt.IsZero() {
+				lastExit = exitedAt
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return waits
+}
+
+// announcedBackoffs pulls the delays out of the supervisor's own notes, which
+// is its decision rather than its timing.
+func announcedBackoffs(t *testing.T, r *record) []time.Duration {
+	t.Helper()
+
+	var out []time.Duration
+	for _, text := range logTexts(r) {
+		const prefix = "supervisor: restarting in "
+		if !strings.HasPrefix(text, prefix) {
+			continue
+		}
+		field, _, ok := strings.Cut(strings.TrimPrefix(text, prefix), " ")
+		if !ok {
+			continue
+		}
+		d, err := time.ParseDuration(field)
+		require.NoError(t, err, "could not read a delay out of %q", text)
+		out = append(out, d)
+	}
+	return out
 }
 
 func TestBackoffForDoublesAndCaps(t *testing.T) {
@@ -444,4 +537,73 @@ func logTexts(r *record) []string {
 		out = append(out, line.Text)
 	}
 	return out
+}
+
+// TestRestartStandsDownAPendingPolicyRestart.
+//
+// A process in RESTARTING has already ended its run and has a spawn on a timer.
+// An explicit restart arriving in that window has to stand the timer down, not
+// race it: the run half is over, so a naive "is it still live?" check either
+// refuses the request or starts a second copy beside the one the policy is
+// about to start.
+func TestRestartStandsDownAPendingPolicyRestart(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t, func(c *supervisorConfig) {
+		// Long enough that the explicit restart lands squarely inside the
+		// backoff rather than after it.
+		c.maxRestartBackoff = 3 * time.Second
+	})
+
+	marker := filepath.Join(t.TempDir(), "ran-once")
+	spec := ts.helperSpec("pending-restart", "once-fail", marker)
+	spec.restartPolicy = sandboxdv1.RestartPolicy_RESTART_POLICY_ALWAYS
+	spec.maxRestarts = 5
+	spec.restartBackoff = 3 * time.Second
+	r, err := ts.start(spec, false)
+	require.NoError(t, err)
+
+	// The first run fails, so the policy parks the record in RESTARTING with a
+	// three-second timer.
+	waitState(t, r, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_RESTARTING)
+
+	require.NoError(t, ts.restart(r, 500*time.Millisecond),
+		"an explicit restart during a backoff must succeed, not report the process did not stop")
+	require.True(t, isLive(r.currentState()), "state was %s", stateName(r.currentState()))
+	waitForLine(t, r, 10*time.Second, "second run, staying up")
+
+	pid := int(r.status().GetPid())
+
+	// Past the point where the stood-down timer would have fired: the automatic
+	// restart did not also happen, so the process is the one the explicit
+	// restart started and the policy's counter was never charged.
+	time.Sleep(3500 * time.Millisecond)
+	require.Equal(t, pid, int(r.status().GetPid()),
+		"the pending policy restart must not have replaced the explicitly started process")
+	require.EqualValues(t, 0, r.status().GetRestartCount())
+	require.True(t, isLive(r.currentState()))
+}
+
+// TestForcedRemoveWaitsForAPendingRestartToStandDown: deleting a record that
+// still has a spawn on a timer would leave that process supervised by nobody.
+func TestForcedRemoveWaitsForAPendingRestartToStandDown(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t)
+
+	spec := ts.helperSpec("removed-mid-backoff", "exit", "1")
+	spec.restartPolicy = sandboxdv1.RestartPolicy_RESTART_POLICY_ALWAYS
+	spec.maxRestarts = 5
+	spec.restartBackoff = 2 * time.Second
+	r, err := ts.start(spec, false)
+	require.NoError(t, err)
+
+	waitState(t, r, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_RESTARTING)
+
+	require.NoError(t, ts.remove(r, true, true))
+	_, ok := ts.lookup(r.id)
+	require.False(t, ok)
+
+	// And nothing starts afterwards: the record is gone and so is its timer.
+	time.Sleep(2500 * time.Millisecond)
+	require.True(t, isTerminal(r.currentState()), "state was %s", stateName(r.currentState()))
+	require.EqualValues(t, 0, ts.liveCount())
 }

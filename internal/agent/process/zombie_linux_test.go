@@ -4,7 +4,6 @@ package process
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,8 +11,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 )
 
 // TestNoZombiesAfterAHundredShortLivedStarts reads the process table, which is
@@ -35,15 +32,7 @@ func TestNoZombiesAfterAHundredShortLivedStarts(t *testing.T) {
 	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxConcurrent = 200 })
 
 	const runs = 100
-	records := make([]*record, 0, runs)
-	for i := range runs {
-		records = append(records, ts.startHelper(fmt.Sprintf("reaped-%d", i), "exit", "0"))
-	}
-	for _, r := range records {
-		waitState(t, r, 30*time.Second,
-			sandboxdv1.ProcessState_PROCESS_STATE_EXITED,
-			sandboxdv1.ProcessState_PROCESS_STATE_CRASHED)
-	}
+	require.Len(t, startShortLived(t, ts, "reaped", runs), runs)
 
 	// The wait that produced the exit status is the same call that reaps, so by
 	// the time the states have settled the reaping has happened. A short retry

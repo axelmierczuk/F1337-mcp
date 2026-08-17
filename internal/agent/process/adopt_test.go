@@ -311,20 +311,29 @@ func TestStateFileIsAlwaysParseable(t *testing.T) {
 		}
 	}()
 
-	reads := 0
+	reads, refused := 0, 0
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path) //nolint:gosec // the test's own temp directory
-		if os.IsNotExist(err) {
+		if err != nil {
+			// The open failed. That is not the failure this test is about, and
+			// on Windows it is expected: replacing a file is MoveFileEx with
+			// MOVEFILE_REPLACE_EXISTING, and there is a window during which the
+			// destination cannot be opened at all. The guarantee is that a
+			// reader never sees *half* a record — an open that fails outright
+			// has seen nothing, and the startup path that actually reads these
+			// records runs when nothing is writing them.
+			refused++
 			continue
 		}
-		require.NoError(t, err)
 		var p persisted
 		require.NoError(t, json.Unmarshal(data, &p),
-			"a reader must never observe a half-written record; got %d bytes", len(data))
+			"a reader must never observe a half-written record; got %d bytes: %q", len(data), data)
 		require.Equal(t, "hammered-0001", p.ID)
+		require.NotEmpty(t, p.Name, "a record with no name is a record written in halves")
 		reads++
 	}
+	t.Logf("%d complete reads, %d opens refused while a rename was in flight", reads, refused)
 	close(stop)
 	writer.Wait()
 	require.Greater(t, reads, 100, "the test should have observed the file many times")

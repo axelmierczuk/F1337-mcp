@@ -293,7 +293,9 @@ func TestTailSinceAndFilterCompose(t *testing.T) {
 	t.Parallel()
 	ts := newTestSupervisor(t)
 
-	r := ts.startHelper("composing", "echo", "20", "10", "item")
+	// 40ms between lines: wide enough that the agent's read timestamps are not
+	// all the same on a host whose clock ticks every 15ms.
+	r := ts.startHelper("composing", "echo", "20", "40", "item")
 	waitState(t, r, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
 	waitForLine(t, r, 5*time.Second, "item 19")
 
@@ -315,7 +317,12 @@ func TestTailSinceAndFilterCompose(t *testing.T) {
 	})
 
 	t.Run("since", func(t *testing.T) {
-		// Everything at or after the tenth line's timestamp.
+		// Timestamps are the agent's read times, and a batch of lines read in
+		// one go shares one. On a host with a coarse clock several consecutive
+		// lines therefore carry the same instant, and since is inclusive — so
+		// "everything at or after item 10's timestamp" legitimately includes
+		// the lines that were read alongside it. Asserting that a particular
+		// neighbour is absent asserts the clock's resolution, not the filter.
 		var pivot time.Time
 		for _, line := range all {
 			if line.Text == "item 10" {
@@ -324,12 +331,28 @@ func TestTailSinceAndFilterCompose(t *testing.T) {
 		}
 		require.False(t, pivot.IsZero())
 
+		// A line that is strictly older than the pivot, chosen from the data
+		// rather than assumed to exist at a particular index.
+		var older logLine
+		for _, line := range all {
+			if line.At.Before(pivot) {
+				older = line
+			}
+		}
+		require.NotEmpty(t, older.Text, "no line was read before item 10; the helper's gaps are too small")
+
 		stream := &recordingStream{}
 		require.NoError(t, ts.streamLogs(context.Background(), r, logRequest{
 			sel: selector{tail: 100, since: pivot},
 		}, stream))
-		require.NotContains(t, stream.texts(), "item 9")
+
 		require.Contains(t, stream.texts(), "item 10")
+		require.NotContains(t, stream.texts(), older.Text,
+			"a line read strictly before the pivot must be excluded")
+		for _, line := range stream.lines {
+			require.False(t, line.GetTimestamp().AsTime().Before(pivot),
+				"line %q predates the since filter", line.GetText())
+		}
 	})
 
 	t.Run("all three together", func(t *testing.T) {

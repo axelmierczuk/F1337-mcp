@@ -183,6 +183,19 @@ func helperMain() {
 		fmt.Println(strings.Repeat("x", n))
 		time.Sleep(durationArg(args, 2, 0))
 
+	case "once-fail":
+		// once-fail <markerPath> — exits 1 the first time it is run and stays
+		// alive every time after. It gives a test a spec that crashes into
+		// RESTARTING and then, on the next spawn, stays up.
+		marker := argAt(args, 1, "")
+		if _, err := os.Stat(marker); err != nil {
+			_ = os.WriteFile(marker, []byte("ran"), 0o600)
+			fmt.Fprintln(os.Stderr, "first run, failing")
+			os.Exit(1)
+		}
+		fmt.Println("second run, staying up")
+		time.Sleep(time.Hour)
+
 	case "silent":
 		// Produces nothing at all. The bounded-follow test needs a process that
 		// cannot end a follow by writing.
@@ -302,12 +315,30 @@ func newTestSupervisorIn(t *testing.T, dir string, tweak ...func(*supervisorConf
 		// supervisor deliberately leaves them running — that is the contract —
 		// so the test has to be the thing that cleans up, or a failing run
 		// leaves helpers on the machine.
+		//
+		// The kill afterwards is not belt and braces. Several tests here put a
+		// record into a state where the supervisor correctly refuses to signal
+		// it — ORPHANED, or a start identity that no longer matches its pid —
+		// and the helper then survives the stop. On Windows a surviving helper
+		// holds its capture files open, the file cannot be deleted while it
+		// does, and t.TempDir's own cleanup fails the test with an error that
+		// names a path rather than a cause.
+		var killed []int
 		for _, r := range sup.snapshotRecords() {
 			if isLive(r.currentState()) {
 				_ = sup.stopRecord(r, 200*time.Millisecond, true)
 			}
+			if pid := int(r.status().GetPid()); pid > 0 && pidAlive(pid) {
+				killPID(t, pid)
+				killed = append(killed, pid)
+			}
 		}
 		_ = sup.Close()
+		// And wait for them, because a terminated process on Windows releases
+		// its handles a moment after the call returns, and t.TempDir runs next.
+		for _, pid := range killed {
+			awaitGone(pid, 10*time.Second)
+		}
 	})
 	return ts
 }
@@ -340,6 +371,40 @@ func (ts *testSupervisor) helperSpec(name, mode string, args ...string) startSpe
 		restartBackoff: ts.cfg.defaultRestartBackoff,
 		maxLogBytes:    ts.cfg.maxLogBytes,
 	}
+}
+
+// shortLivedBatchSize bounds how many supervised helpers the hundred-start
+// tests keep in flight at once.
+//
+// The criterion is a hundred starts, not a hundred simultaneous processes, and
+// the difference matters off this machine: `go test ./...` runs packages in
+// parallel, every helper is another copy of a race-instrumented test binary,
+// and a hundred of them at once on a four-vCPU CI runner starves the whole job.
+// It did — internal/mcpserver, which this branch does not touch, went from 20
+// seconds to 77 on the Windows runner, and a PowerShell-based test in
+// internal/platform blew a 60-second budget waiting to start.
+const shortLivedBatchSize = 8
+
+// startShortLived runs total short-lived helpers, at most shortLivedBatchSize
+// at a time, and returns their records once every one has reached a terminal
+// state.
+func startShortLived(t *testing.T, ts *testSupervisor, prefix string, total int) []*record {
+	t.Helper()
+
+	records := make([]*record, 0, total)
+	for start := 0; start < total; start += shortLivedBatchSize {
+		batch := make([]*record, 0, shortLivedBatchSize)
+		for i := start; i < start+shortLivedBatchSize && i < total; i++ {
+			batch = append(batch, ts.startHelper(fmt.Sprintf("%s-%d", prefix, i), "exit", "0"))
+		}
+		for _, r := range batch {
+			waitState(t, r, 60*time.Second,
+				sandboxdv1.ProcessState_PROCESS_STATE_EXITED,
+				sandboxdv1.ProcessState_PROCESS_STATE_CRASHED)
+		}
+		records = append(records, batch...)
+	}
+	return records
 }
 
 // waitState blocks until the record reaches one of the given states.
@@ -489,8 +554,13 @@ const goroutineSlack = 4
 // pidAlive reports whether a pid still names a live process.
 func pidAlive(pid int) bool { return platform.ProcessExists(pid) }
 
-// killPID stops a process the test started outside a supervisor's care. It is
-// os.Process.Kill rather than a signal, so it works identically on Windows.
+// killPID stops a process the test started outside a supervisor's care, and
+// waits for it to be gone.
+//
+// os.Process.Kill rather than a signal, so it works identically on Windows —
+// and the wait matters most there: TerminateProcess returns before the handles
+// are released, and the temp directory the process was writing into cannot be
+// removed until they are.
 func killPID(t *testing.T, pid int) {
 	t.Helper()
 	if pid <= 0 {
@@ -501,6 +571,18 @@ func killPID(t *testing.T, pid int) {
 		return
 	}
 	_ = p.Kill()
+	awaitGone(pid, 10*time.Second)
+}
+
+// awaitGone waits for a pid to leave the process table.
+func awaitGone(pid int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !pidAlive(pid) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // grpcServerStreamStub satisfies the parts of grpc.ServerStream that the

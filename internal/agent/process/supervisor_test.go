@@ -305,15 +305,7 @@ func TestManyShortLivedStartsLeaveNothingBehind(t *testing.T) {
 	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxConcurrent = 200 })
 
 	const runs = 100
-	records := make([]*record, 0, runs)
-	for i := range runs {
-		records = append(records, ts.startHelper(fmt.Sprintf("short-%d", i), "exit", "0"))
-	}
-	for _, r := range records {
-		waitState(t, r, 30*time.Second,
-			sandboxdv1.ProcessState_PROCESS_STATE_EXITED,
-			sandboxdv1.ProcessState_PROCESS_STATE_CRASHED)
-	}
+	require.Len(t, startShortLived(t, ts, "short", runs), runs)
 	// The count Health reports is derived from the states and refreshed just
 	// after each transition, so it settles a moment behind the last one.
 	waitFor(t, 10*time.Second, "the supervised process count to fall to zero",
@@ -331,7 +323,11 @@ func TestConcurrentStartListRemove(t *testing.T) {
 	var starters, lister, remover sync.WaitGroup
 	ids := make(chan string, 64)
 
-	for i := range 8 {
+	// Four starters, not eight: what is under test is that concurrent calls do
+	// not race, and -race is the assertion. Sixteen live helpers make that point
+	// as well as thirty-two do, without starving a CI runner shared with every
+	// other package's tests.
+	for i := range 4 {
 		starters.Add(1)
 		go func() {
 			defer starters.Done()
