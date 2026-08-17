@@ -48,3 +48,14 @@ audit:
   # Append-only JSONL record of every exec and every write.
   path: "/var/log/sandboxd/audit.jsonl"
   enabled: true
+
+# Supervised process records live here, so they survive a daemon restart — and
+# an uninstall, which deliberately leaves this directory alone.
+state_dir: "/var/lib/sandboxd"
+
+log:
+  # debug, info, warn, or error.
+  level: "info"
+  # "text" or "json". Logs go to stderr, which is what journald, launchd's
+  # StandardErrorPath, and the Windows event log all capture.
+  format: "text"
