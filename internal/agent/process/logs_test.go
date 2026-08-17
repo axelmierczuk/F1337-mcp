@@ -667,8 +667,13 @@ func TestGetProcessLogsThroughTheService(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 300 * time.Millisecond })
 
+	// The helper lingers well past maxFollowDuration after its last line. Without
+	// that the process exits while the lines are still being drained, the follow
+	// ends because there is nothing left to follow, and the deadline below is
+	// never what stopped it -- which is a property of how fast the machine tore
+	// the process down, not of the clamp this test is about.
 	start, err := svc.StartProcess(context.Background(), &sandboxdv1.StartProcessRequest{
-		Argv: helperArgv(t, "echo", "5", "0", "served"),
+		Argv: helperArgv(t, "echo", "5", "0", "served", "10000"),
 		Name: "served",
 		Env:  helperEnviron(),
 	})
@@ -689,6 +694,7 @@ func TestGetProcessLogsThroughTheService(t *testing.T) {
 	}, stream))
 
 	require.Equal(t, []string{"served 3", "served 4"}, stream.texts())
+	// The request asked to follow for an hour; returning at all is the clamp.
 	require.True(t, stream.summary.GetFollowDeadlineReached())
 
 	// A bad filter is the caller's mistake, reported as one.
@@ -697,6 +703,39 @@ func TestGetProcessLogsThroughTheService(t *testing.T) {
 		FilterPattern: "([unclosed",
 	}, stream)
 	require.Error(t, err)
+}
+
+// TestGetProcessLogsFollowEndsWhenTheProcessExits covers the other way a follow
+// can end. A caller that asked to follow for an hour and got an answer in
+// milliseconds needs to be able to tell "the deadline passed" from "there is
+// nothing left to follow", because only the second means the logs are complete.
+func TestGetProcessLogsFollowEndsWhenTheProcessExits(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, func(c *testSupervisorOptions) { c.maxFollowDuration = time.Hour })
+
+	start, err := svc.StartProcess(context.Background(), &sandboxdv1.StartProcessRequest{
+		Argv: helperArgv(t, "echo", "3", "0", "done"),
+		Name: "done",
+		Env:  helperEnviron(),
+	})
+	require.NoError(t, err)
+
+	r, ok := svc.sup.lookup(start.GetStatus().GetProcessId())
+	require.True(t, ok)
+	waitState(t, r, 10*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
+
+	stream := &fakeServerStream{recordingStream: &recordingStream{}, ctx: context.Background()}
+	require.NoError(t, svc.GetProcessLogs(&sandboxdv1.GetProcessLogsRequest{
+		ProcessId:      start.GetStatus().GetProcessId(),
+		Follow:         true,
+		FollowDuration: durationpb.New(time.Hour),
+	}, stream))
+
+	// It returned rather than following a dead process for an hour, and it said
+	// which of the two reasons that was.
+	require.False(t, stream.summary.GetFollowDeadlineReached())
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_EXITED, stream.summary.GetState())
+	require.Equal(t, []string{"done 0", "done 1", "done 2"}, stream.texts())
 }
 
 func TestSupervisorNotesAreNeitherStdoutNorStderr(t *testing.T) {
