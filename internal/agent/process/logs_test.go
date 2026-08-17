@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
 )
 
 func TestStreamsAreDistinguishableAndOrdered(t *testing.T) {
@@ -474,3 +476,67 @@ type fakeServerStream struct {
 }
 
 func (s *fakeServerStream) Context() context.Context { return s.ctx }
+
+// TestASlowFollowerIsDroppedAndTold covers the other half of the drop
+// accounting. The retention shortfall in the million-line test is what a reader
+// missed because the buffer turned over; this is what one particular follower
+// missed because it could not keep up, which is counted per follower and
+// reported on the next line it does receive.
+func TestASlowFollowerIsDroppedAndTold(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxFollowDuration = 5 * time.Second })
+
+	stream := &recordingStream{}
+	// A follower that takes a millisecond per line cannot keep up with a
+	// process emitting fifty thousand of them.
+	stream.onLine = func(*sandboxdv1.LogLine) { time.Sleep(time.Millisecond) }
+
+	r := ts.startHelper("outruns-its-reader", "spew", "50000")
+
+	require.NoError(t, ts.streamLogs(context.Background(), r, logRequest{
+		sel:       selector{tail: 1},
+		follow:    true,
+		followFor: 2 * time.Second,
+	}, stream))
+
+	require.NotNil(t, stream.summary)
+	require.Positive(t, stream.summary.GetLinesDropped(),
+		"a follower that fell behind must be told how much it missed")
+
+	var reported uint64
+	for _, line := range stream.lines {
+		reported += line.GetDroppedBefore()
+	}
+	require.Positive(t, reported, "the gap has to be visible inline, not only in the summary")
+}
+
+// TestListeningPortsAreReportedFromTheLivePID asserts the wiring, not the
+// platform read: ListeningPorts is best effort by contract — it shells out to
+// lsof on macOS and returns nothing when lsof is absent — so the assertion is
+// that the status carries whatever the platform reports for that pid, and that
+// it is read live rather than cached from before the bind.
+func TestListeningPortsAreReportedFromTheLivePID(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t)
+
+	port := freePort(t)
+	r := ts.startHelper("binds-a-port", "listen", "0", strconv.Itoa(port))
+	waitFor(t, 20*time.Second, "the helper to bind its port", func() bool {
+		return dialLoopback(context.Background(), uint32(port), 200*time.Millisecond) //nolint:gosec // a port is in range by construction
+	})
+
+	pid := int(r.status().GetPid())
+	expected, err := platform.ListeningPorts(pid)
+	if err != nil || len(expected) == 0 {
+		t.Skipf("this host cannot enumerate listening ports (err=%v); the field is documented as best effort", err)
+	}
+	require.Contains(t, expected, uint32(port))                               //nolint:gosec // a port is in range by construction
+	require.Subset(t, r.status().GetListeningPorts(), []uint32{uint32(port)}, //nolint:gosec // a port is in range by construction
+		"the status must report the ports the platform can see for the live pid")
+
+	// An exited process reports none: the field describes a live process, and a
+	// stale answer is worse than an empty one.
+	_, err = ts.gracefulStop(r, time.Second, true, true)
+	require.NoError(t, err)
+	require.Empty(t, r.status().GetListeningPorts())
+}
