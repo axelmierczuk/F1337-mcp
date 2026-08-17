@@ -16,6 +16,21 @@ import (
 // its pid.
 func sleeper(t *testing.T) int {
 	t.Helper()
+	pid, _ := sleeperWithExit(t)
+	return pid
+}
+
+// sleeperWithExit is sleeper plus a channel that closes once the process has
+// been waited on.
+//
+// Any assertion that a process is *gone* needs that wait. A pid is not
+// released while something still holds the process: on Unix an unreaped child
+// is a zombie, and on Windows the process object outlives termination until
+// the last handle closes — os/exec holds one until Wait returns. Either way a
+// killed process keeps answering "I exist", and a test that skips the wait is
+// asserting against a pid that cannot yet have been released.
+func sleeperWithExit(t *testing.T) (pid int, exited <-chan struct{}) {
+	t.Helper()
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -24,11 +39,17 @@ func sleeper(t *testing.T) int {
 		cmd = exec.Command("/bin/sh", "-c", "sleep 60")
 	}
 	require.NoError(t, cmd.Start())
+
+	reaped := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(reaped)
+	}()
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		<-reaped
 	})
-	return cmd.Process.Pid
+	return cmd.Process.Pid, reaped
 }
 
 // deadPID returns a pid that existed and no longer does.

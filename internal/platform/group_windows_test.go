@@ -83,6 +83,13 @@ func readWindowsPIDs(t *testing.T, path string) (first, second int) {
 	return 0, 0
 }
 
+// requireGoneWithin waits for a pid to stop existing.
+//
+// Only valid for a process this test holds no handle to. Windows keeps the
+// process object, and with it the pid, until every handle closes, so a
+// process the test itself started through os/exec keeps existing until Wait
+// runs no matter how thoroughly it has been terminated. For those, wait on
+// the channel from sleeperWithExit first.
 func requireGoneWithin(t *testing.T, pid int, within time.Duration) {
 	t.Helper()
 
@@ -153,7 +160,7 @@ func TestJobObject_ReopenByName(t *testing.T) {
 // a name that no longer resolves leaves a handle that controls the leader
 // alone, rather than an error that would strand the process entirely.
 func TestJobObject_ReopenWithUnknownNameDegrades(t *testing.T) {
-	pid := sleeper(t)
+	pid, exited := sleeperWithExit(t)
 
 	reopened, err := platform.OpenProcessGroup(pid, "sandboxd-test-no-such-job-"+strconv.Itoa(os.Getpid()))
 	require.NoError(t, err)
@@ -162,6 +169,15 @@ func TestJobObject_ReopenWithUnknownNameDegrades(t *testing.T) {
 	require.False(t, reopened.Isolated(), "no job means no tree guarantee, and the caller must be able to see that")
 	require.Equal(t, pid, reopened.PID())
 	require.NoError(t, reopened.Kill())
+
+	// Wait for the handle os/exec holds to be released before asking whether
+	// the pid is gone; until then Windows keeps the process object, and
+	// OpenProcess on it still succeeds.
+	select {
+	case <-exited:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("pid %d did not exit after Kill", pid)
+	}
 	requireGoneWithin(t, pid, 30*time.Second)
 }
 

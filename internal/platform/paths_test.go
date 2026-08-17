@@ -11,8 +11,19 @@ import (
 	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
 )
 
+// abs builds an absolute path for the host platform.
+//
+// Windows needs the volume. A bare leading separator produces "\root", which
+// is rooted on the *current drive* rather than absolute — filepath.IsAbs says
+// so, and ClassifyPath deliberately calls it PathRelative because the drive it
+// is relative to is state the agent does not track. Building paths that way
+// here would test the helper instead of the code under it.
 func abs(parts ...string) string {
-	return filepath.Join(append([]string{string(filepath.Separator)}, parts...)...)
+	root := string(filepath.Separator)
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+	return filepath.Join(append([]string{root}, parts...)...)
 }
 
 func TestHasPathPrefix(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"strconv"
 )
@@ -34,16 +35,19 @@ func listeningPorts(pid int) ([]uint32, error) {
 		return nil, fmt.Errorf("platform: reading %s: %w", fdDir, err)
 	}
 
+	// The two socket tables, opened by literal name rather than through a
+	// loop variable. This reader takes a pid, never a path, and spelling the
+	// only two files it can ever open directly at the call site is what makes
+	// that visible — to gosec, which flags a variable reaching os.ReadFile,
+	// and to a reader wondering whether a caller can steer it.
+	//
+	// A missing table is not an error: IPv6 is routinely absent.
 	byInode := make(map[uint64]uint32)
-	for _, name := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := os.ReadFile(name)
-		if err != nil {
-			// IPv6 is routinely absent; a missing table is not an error.
-			continue
-		}
-		for inode, port := range parseProcNetTCP(data) {
-			byInode[inode] = port
-		}
+	if data, err := os.ReadFile("/proc/net/tcp"); err == nil {
+		maps.Copy(byInode, parseProcNetTCP(data))
+	}
+	if data, err := os.ReadFile("/proc/net/tcp6"); err == nil {
+		maps.Copy(byInode, parseProcNetTCP(data))
 	}
 	if len(byInode) == 0 {
 		return nil, nil

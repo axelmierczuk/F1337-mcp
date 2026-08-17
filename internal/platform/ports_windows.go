@@ -11,7 +11,7 @@ import (
 
 var (
 	modiphlpapi             = windows.NewLazySystemDLL("iphlpapi.dll")
-	procGetExtendedTcpTable = modiphlpapi.NewProc("GetExtendedTcpTable")
+	procGetExtendedTCPTable = modiphlpapi.NewProc("GetExtendedTcpTable")
 )
 
 // tcpTableOwnerPIDListener is TCP_TABLE_OWNER_PID_LISTENER: rows for listening
@@ -58,7 +58,7 @@ func extendedTCPTable(family uint32) ([]byte, error) {
 		// The pointer conversions stay inside the call expression, and buf is
 		// kept alive across it, so the buffer cannot be collected or moved
 		// between taking its address and the kernel writing into it.
-		ret, _, _ := procGetExtendedTcpTable.Call(
+		ret, _, _ := procGetExtendedTCPTable.Call(
 			uintptr(unsafe.Pointer(first)),
 			uintptr(unsafe.Pointer(&size)),
 			0, // bOrder: sorting is irrelevant, skip the work

@@ -250,34 +250,74 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 	}
 }
 
-// terminate kills the job, then the leader. Both, because a child that spawned
-// grandchildren before the job assignment landed is still in the agent's care.
+// stillActive is STILL_ACTIVE, the exit code GetExitCodeProcess reports for a
+// process that has not exited.
+const stillActive = 259
+
+// terminate kills the job, then the leader.
+//
+// Both, because a child that spawned grandchildren before the job assignment
+// landed is still in the agent's care. But the job is the guarantee: when it
+// goes down, the tree is gone, and whether the leader could also be terminated
+// individually afterwards says nothing about whether the caller's request
+// succeeded. TerminateProcess against a process that has already exited fails
+// with ERROR_ACCESS_DENIED, so reporting that error turns every successful
+// group kill into a failure.
 func terminate(job windows.Handle, pid uint32) error {
-	var jobErr error
 	if job != 0 {
 		if err := windows.TerminateJobObject(job, 1); err != nil {
-			jobErr = fmt.Errorf("platform: terminating job object: %w", err)
-		}
-	}
-
-	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid)
-	if err != nil {
-		// Already gone. If the job terminated cleanly that is the expected
-		// outcome, not a failure.
-		if jobErr != nil {
+			// The job did not go down. The leader is then the only thing left
+			// to try, and its error is the one worth reporting.
+			jobErr := fmt.Errorf("platform: terminating job object: %w", err)
+			if leaderErr := terminateProcess(pid); leaderErr != nil {
+				return errors.Join(jobErr, leaderErr)
+			}
 			return jobErr
 		}
-		if job != 0 {
-			return nil
-		}
+		// Best effort, and deliberately unchecked: it is normally already dead.
+		_ = terminateProcess(pid)
+		return nil
+	}
+	return terminateProcess(pid)
+}
+
+// terminateProcess kills a single process, treating "it already exited" as
+// success rather than as the access-denied error Windows reports for it.
+func terminateProcess(pid uint32) error {
+	h, err := windows.OpenProcess(
+		windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		// The pid is not openable at all, which means every handle to it has
+		// closed and it is well and truly gone.
 		return fmt.Errorf("platform: pid %d: %w", pid, ErrProcessNotFound)
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
-	if err := windows.TerminateProcess(h, 1); err != nil && jobErr == nil {
+	if processExited(h) {
+		return nil
+	}
+	if err := windows.TerminateProcess(h, 1); err != nil {
+		// It can exit on its own between the check and the call.
+		if processExited(h) {
+			return nil
+		}
 		return fmt.Errorf("platform: terminating pid %d: %w", pid, err)
 	}
-	return jobErr
+	return nil
+}
+
+// processExited reports whether the process behind h has exited.
+//
+// A process whose own exit code happens to be 259 is indistinguishable from a
+// running one here. That is a wart in the Windows API rather than in this
+// code, and it is the safe direction to be wrong in: the caller goes on to
+// call TerminateProcess, which is what it wanted anyway.
+func processExited(h windows.Handle) bool {
+	var code uint32
+	if err := windows.GetExitCodeProcess(h, &code); err != nil {
+		return false
+	}
+	return code != stillActive
 }
 
 // Kill terminates the whole tree immediately.
