@@ -7,48 +7,46 @@
 
         P(X,Y,Z) = ( 15.5 + (X-Y)*11 , 15.5 + (X+Y)*5.5 - Z*11 )
 
-    Square-section beams of half-size 0.13 join the cubes through their volume
-    centres, at height Z=0.5. They are drawn face-to-face rather than
-    centre-to-centre, because the segment inside a cube is not visible:
+    Square-section rods of half-size 0.13 join the cubes through their volume
+    centres, at height Z=0.5. The 55x55 composition is centred in the 64x64
+    viewBox.
 
-        LT -> R    along +X,  X from 1 to 3,  at Y=0.5
-        R  -> LB   along +Y,  Y from 1 to 3,  at X=3.5
-        LT -> LB   along the (1,1) diagonal,  from (1,1) to (3,3)
+    WHERE A ROD MEETS A CUBE, AND WHY THE THREE DIFFER
 
-    DEPTH ORDER IS LEAD, NOT DECORATION. A beam leaving a cube through that
-    cube's own face is nearer than the cube, so it paints OVER it and visibly
-    plugs into the centre of the face. Approaching the far cube it is behind,
-    so it vanishes into that cube's silhouette, which is correct: the face it
-    enters is turned away from the viewer. Painting every beam behind every
-    cube instead makes each one surface at a silhouette CORNER, which reads as
-    connected-at-the-corner. Hence the back-to-front order:
+    A rod leaving a cube's centre emerges through a FACE only when it travels
+    along a ground axis. The two axial rods therefore stop at the face plane
+    they exit (X=1 and Y=1) and are painted AFTER that cube, so each visibly
+    plugs into the centre of the face. Each is painted BEFORE the cube it
+    approaches, which is right: the face it enters there is turned away from
+    the viewer, so it should vanish into that cube's silhouette.
 
-        LT cube, beam LT->R, beam LT->LB, R cube, beam R->LB, LB cube
+        rod +X   X from 1 to 3, at Y=0.5   drawn over cell (0,0), under (3,0)
+        rod +Y   Y from 1 to 3, at X=3.5   drawn over cell (3,0), under (3,3)
 
-    The beams never overlap one another on screen, so only cube-vs-beam order
-    matters. The diagonal beam needs two corrections the axial ones do not:
+    The closing rod runs the (1,1) diagonal and cannot do this. Travelling
+    diagonally it reaches X=1 and Y=1 at the same instant, so it leaves through
+    the cube's vertical EDGE rather than any face, and a symmetric composition
+    forces exactly that 45-degree angle. Painted over the cube it lays a dark
+    bar across the block's front and ends in a peak floating mid-face. So it is
+    instead drawn centre-to-centre and painted FIRST, behind everything: the
+    cubes' silhouettes clip it, and it drops from the block on the shared
+    centre line. Strictly its far sliver is nearer than the cube, but that
+    sliver is degenerate at a tangent exit and showing it costs more than it
+    buys.
 
-      1. RIDGED SECTION. Its section is rotated 45 degrees about its own axis.
-         A square section on that axis would put its side faces exactly
-         edge-on, since both the bar axis and z project to screen-vertical, and
-         render as a flat plate. The ridge's two upper facets project as real
-         quads instead.
+    That rod's section is also rotated 45 degrees about its own axis into a
+    ridge. A square section on this axis would put its side faces exactly
+    edge-on, since both the rod axis and z project to screen-vertical, and
+    render as a flat plate. The ridge's two upper facets project as real quads.
 
-      2. MITRED START. It leaves through the cube's front vertical EDGE rather
-         than a face: travelling along (1,1) it crosses X=1 and Y=1 at the same
-         instant. Cutting it square to its own axis (the plane X+Y=2) matches
-         neither cube face and leaves a chevron cap hanging past the corner.
-         So the right facet is cut at X=1 and the left facet at Y=1. Each start
-         edge then lies in the face it enters and projects at the isometric 1:2
-         slope, exactly like the axial beams' starts.
-
-    The 55x55 composition is centred in the 64x64 viewBox.
+    Painted back to front:
+        diagonal rod, cell (0,0), rod +X, cell (3,0), rod +Y, cell (3,3)
   -->
 
   <style>
     /* One "sky" ramp, lightest to darkest, each value declared exactly once.
        Cubes take t1/t2/t3 for their up / down-left / down-right faces. The
-       beams take t4/t5, deliberately below every cube tone, so a beam stays
+       rods take t4/t5, deliberately below every cube tone, so a rod stays
        legible against whichever face it crosses on its way out of a block.
 
        Light blue carries the mark and dominates by area; t3-t5 exist because a
@@ -65,6 +63,12 @@
     .t5 { fill: #075985 }
   </style>
 
+  <!-- closing rod, ridged, on the (1,1) diagonal: behind both left cubes -->
+  <g>
+    <path class="t4" d="M12.95 15.5 15.5 12.93 15.5 45.93 12.95 48.5Z"/>
+    <path class="t5" d="M15.5 12.93 15.5 45.93 18.05 48.5 18.05 15.5Z"/>
+  </g>
+
   <!-- back cube, cell (0,0) -->
   <g>
     <path class="t1" d="M15.5 4.5 26.5 10 15.5 15.5 4.5 10Z"/>
@@ -72,16 +76,10 @@
     <path class="t3" d="M15.5 15.5 26.5 10 26.5 21 15.5 26.5Z"/>
   </g>
 
-  <!-- beam along +X, out of the back cube's right face -->
+  <!-- rod +X, out of the back cube's right face -->
   <g>
     <path class="t4" d="M22.43 16.11 44.43 27.1 41.57 28.54 19.57 17.54Z"/>
     <path class="t5" d="M19.57 17.54 41.57 28.54 41.57 31.4 19.57 20.39Z"/>
-  </g>
-
-  <!-- ridged beam along the (1,1) diagonal, out of the back cube's front edge -->
-  <g>
-    <path class="t4" d="M12.95 19.72 15.5 18.43 15.5 40.43 12.95 43Z"/>
-    <path class="t5" d="M15.5 18.43 15.5 40.43 18.05 43 18.05 19.72Z"/>
   </g>
 
   <!-- right cube, cell (3,0) -->
@@ -91,7 +89,7 @@
     <path class="t3" d="M48.5 32 59.5 26.5 59.5 37.5 48.5 43Z"/>
   </g>
 
-  <!-- beam along +Y, out of the right cube's left face -->
+  <!-- rod +Y, out of the right cube's left face -->
   <g>
     <path class="t4" d="M41.57 32.6 44.43 34.04 22.43 45.03 19.57 43.61Z"/>
     <path class="t5" d="M44.43 34.04 22.43 45.03 22.43 47.89 44.43 36.9Z"/>
