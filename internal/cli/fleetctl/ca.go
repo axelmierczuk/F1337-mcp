@@ -607,23 +607,34 @@ func writeCertificate(path string, data []byte) error {
 
 // hostsToSANs turns the subject and the operator-supplied addresses into the
 // SAN set for an agent leaf.
+//
+// The subject is a name and goes in whole; only the addresses are host:port and
+// have a port to strip. Passing the subject through net.SplitHostPort as well
+// silently truncated `--subject build:box` into a leaf that answers to "build" —
+// a certificate for a name nobody asked for, and possibly another fleet member's.
+// Left alone, a subject the CA will not sign is now refused by CheckSANs, which
+// is where that belongs.
 func hostsToSANs(subject string, addresses []string) (dnsNames []string, ips []net.IP) {
-	hosts := append([]string{subject}, addresses...)
 	seen := map[string]bool{}
-	for _, entry := range hosts {
-		host := entry
-		if h, _, err := net.SplitHostPort(entry); err == nil {
-			host = h
-		}
+	add := func(host string) {
 		if host == "" || seen[host] {
-			continue
+			return
 		}
 		seen[host] = true
 		if ip := net.ParseIP(host); ip != nil {
 			ips = append(ips, ip)
-			continue
+			return
 		}
 		dnsNames = append(dnsNames, host)
+	}
+
+	add(subject)
+	for _, entry := range addresses {
+		host := entry
+		if h, _, err := net.SplitHostPort(entry); err == nil {
+			host = h
+		}
+		add(host)
 	}
 	return dnsNames, ips
 }

@@ -301,6 +301,37 @@ func TestLoad_DoesNotOfferTheRepairForAnUnrelatedMismatch(t *testing.T) {
 	assert.NotContains(t, err.Error(), "ca rotate --activate")
 }
 
+// The case above has no rotation staged, so mismatchedPairError returns before
+// it ever consults the key — which means it held whether or not the "only when"
+// existed, and the guard that decides it was covered by nothing. This is the
+// case that decides it: a rotation *is* staged, and the key beside ca.crt
+// belongs to neither the issuer nor the staged CA.
+//
+// Nothing about that is an interrupted activation. Re-running Activate there
+// would produce a working CA — under the staged root, silently discarding the
+// key someone had just restored — so diagnosing it as a rotation to finish would
+// be a confident answer to a question this tool cannot answer. It says only what
+// it knows.
+func TestLoad_DoesNotOfferTheRepairWhenAStagedRotationDoesNotExplainTheMismatch(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	_, err := ca.Init(dir, false)
+	require.NoError(t, err)
+	_, err = ca.Stage(dir)
+	require.NoError(t, err)
+
+	// A third CA's key, which is neither the issuer's nor the staged one's.
+	other := filepath.Join(t.TempDir(), "other")
+	_, err = ca.Init(other, false)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca.key"), mustReadFile(t, filepath.Join(other, "ca.key")), 0o600))
+
+	_, err = ca.Load(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "different CAs", "the mismatch itself still has to be reported")
+	assert.NotContains(t, err.Error(), "ca rotate --activate",
+		"a staged rotation that does not explain the mismatch is not a repair to name")
+}
+
 // Status describes where in a rotation a directory is, and the state an
 // operator most needs described is the one Load refuses. Reading it through
 // Load meant Status could not answer for an interrupted activation, and the

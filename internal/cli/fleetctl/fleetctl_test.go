@@ -17,10 +17,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/cli/fleetctl"
 	"github.com/axelmierczuk/fleet-mcp/internal/security/ca"
 	"github.com/axelmierczuk/fleet-mcp/internal/security/enroll"
@@ -390,6 +392,105 @@ func TestEnrollMint_AcceptsWhatEnrollmentWouldHonour(t *testing.T) {
 			require.Equal(t, 0, code, "mint refused %v:\n%s", args, out)
 		})
 	}
+}
+
+// The two tests above assert mint's verdict against a list this test wrote down.
+// This one asserts it against the only authority on the question: what redemption
+// actually does with the same name and addresses.
+//
+// The list is what drifted. Round 2 added mint's check to stop `--name` costing a
+// single-use token, and re-derived the SAN set to do it — running the *name*
+// through net.SplitHostPort as though it were an address. So `--name build:box`
+// was checked as "build", passed, minted, and was refused at redemption as
+// "build:box" once Redeem had already marked the token used. Two of the eight
+// address shapes went the other way: `[::1]` and `[::]` were refused by mint and
+// would have been honoured, because enrollment strips the brackets and mint did
+// not. A check that answers a question differently from the code it is
+// speaking for is not a check.
+//
+// So this compares the two directly. Mint runs through the CLI; redemption runs
+// through enroll.Service against a token minted straight into a store, so the
+// mint verdict cannot gate the comparison. A disagreement either way fails,
+// which is what makes this hold when someone adds a rule to one side.
+func TestEnrollMint_AgreesWithRedemptionOnWhatCanBeCertified(t *testing.T) {
+	cases := []struct {
+		label     string
+		name      string
+		addresses []string
+	}{
+		{label: "name with a colon", name: "build:box"},
+		{label: "name that looks like an endpoint", name: "gpu-01:9000"},
+		{label: "name with a space", name: "build box"},
+		{label: "wildcard name", name: "*box"},
+		{label: "plain name", name: "build-box"},
+		{label: "underscore in a name", name: "build_box"},
+		{label: "dotted name", name: "gpu-01.internal"},
+		{label: "bare host", name: "build-box", addresses: []string{"build-box.internal"}},
+		{label: "host and port", name: "build-box", addresses: []string{"build-box.internal:9000"}},
+		{label: "ipv4", name: "build-box", addresses: []string{"10.0.0.5:9000"}},
+		{label: "bracketed ipv6 with a port", name: "build-box", addresses: []string{"[::1]:9000"}},
+		{label: "bracketed ipv6 with no port", name: "build-box", addresses: []string{"[::1]"}},
+		{label: "bracketed wildcard bind", name: "build-box", addresses: []string{"[::]"}},
+		{label: "bare ipv6", name: "build-box", addresses: []string{"::1"}},
+		{label: "wildcard bind", name: "build-box", addresses: []string{"0.0.0.0:9000"}},
+		{label: "port only", name: "build-box", addresses: []string{":9000"}},
+		{label: "wildcard address", name: "build-box", addresses: []string{"*.internal:9000"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			dir := t.TempDir()
+			_, code := run(t, dir, "ca", "init")
+			require.Equal(t, 0, code)
+
+			args := []string{"enroll", "mint", "--control", "workstation.internal:9443", "--name", tc.name}
+			for _, addr := range tc.addresses {
+				args = append(args, "--address", addr)
+			}
+			mintOut, mintCode := runCapturingErrors(t, dir, args...)
+
+			redeemErr := redeemThroughEnrollment(t, dir, tc.name, tc.addresses)
+
+			assert.Equal(t, redeemErr == nil, mintCode == 0,
+				"mint and redemption disagree about --name %q --address %v\nmint: %s\nredemption: %v",
+				tc.name, tc.addresses, mintOut, redeemErr)
+
+			// And a mint that was refused must not have cost a token, which is
+			// the whole reason the check is at mint time.
+			if mintCode != 0 {
+				listed, code := run(t, dir, "enroll", "list")
+				require.Equal(t, 0, code, listed)
+				assert.Contains(t, listed, "no enrollment tokens",
+					"a refused mint spent a token anyway:\n%s", listed)
+			}
+		})
+	}
+}
+
+// redeemThroughEnrollment asks the real enrollment service to redeem a token
+// reserving name and authorizing addresses, and returns what it said. The token
+// is minted into an in-memory store rather than by the CLI, so what mint decided
+// does not decide what this observes.
+func redeemThroughEnrollment(t *testing.T, configDir, name string, addresses []string) error {
+	t.Helper()
+	authority, err := ca.Load(filepath.Join(configDir, "ca"))
+	require.NoError(t, err)
+
+	store := enroll.NewTokenStore()
+	token, _, err := store.Mint(enroll.MintOptions{Name: name, Addresses: addresses})
+	require.NoError(t, err)
+
+	key, err := enroll.GenerateKey()
+	require.NoError(t, err)
+	csrDER, err := enroll.BuildCSR(key, name, nil, nil)
+	require.NoError(t, err)
+
+	svc := &enroll.Service{Tokens: store, CA: authority}
+	_, err = svc.Enroll(context.Background(), &sandboxdv1.EnrollRequest{
+		Token:         token,
+		RequestedName: name,
+		CsrDer:        csrDER,
+	})
+	return err
 }
 
 // A token minted without a CA would be unusable: `fleet-agent enroll` refuses
@@ -770,6 +871,39 @@ func TestCASign_RotatesALeafWithoutAToken(t *testing.T) {
 	assert.Contains(t, listOut, "no enrollment tokens")
 }
 
+// The subject of an agent leaf is a name, not an endpoint, and it was being run
+// through net.SplitHostPort as though it were one. `--subject build:box` split
+// into host "build" and port "box", and the leaf came back naming "build" —
+// which may well be another fleet member. The operator asked for one identity
+// and silently got a different one, reported as success.
+//
+// A colon in a name is a mistake either way. Refusing it is the correct outcome;
+// issuing a certificate for a name nobody typed is not.
+func TestCASign_DoesNotSilentlyTruncateASubjectAtAColon(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+
+	key, err := enroll.GenerateKey()
+	require.NoError(t, err)
+	csrDER, err := enroll.BuildCSR(key, "build:box", nil, nil)
+	require.NoError(t, err)
+	csrPath := filepath.Join(dir, "build.csr")
+	require.NoError(t, os.WriteFile(csrPath, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE REQUEST", Bytes: csrDER,
+	}), 0o600))
+
+	certPath := filepath.Join(dir, "build.crt")
+	out, code := runCapturingErrors(t, dir, "ca", "sign",
+		"--csr", csrPath, "--subject", "build:box", "--out", certPath)
+	require.NotEqual(t, 0, code, "signed a leaf for a subject the CA will not certify:\n%s", out)
+
+	// And nothing was written, so there is no leaf naming "build" on disk for a
+	// later step to pick up and trust.
+	_, statErr := os.Stat(certPath)
+	assert.True(t, os.IsNotExist(statErr), "a refused sign left a certificate at %s", certPath)
+}
+
 func TestCASign_RejectsAWildcardAddress(t *testing.T) {
 	dir := t.TempDir()
 	_, code := run(t, dir, "ca", "init")
@@ -832,23 +966,56 @@ func TestServe_ReleasesTheListenerWhenItCannotPrintItsBanner(t *testing.T) {
 // not a failure to serve, and reporting it as one made the exit code depend on
 // which side of a mutex won.
 //
-// The window is small, so the loop is what makes losing it likely rather than
-// possible: with the check removed this fails within a few hundred iterations,
-// and with it in place every iteration exits 0 however the race lands.
+// This used to be a 500-iteration loop, on the theory that the window was small
+// but reachable. Measured, it was reached 0.12% of the time — so the loop caught
+// its own regression under half the time it ran, and "confirmed to fail with the
+// fix reverted" had been confirmed once, by luck. serve now waits for the
+// watcher when it finds the context already cancelled, rather than racing it, so
+// a cancelled serve deterministically never opens its accept loop and Serve
+// deterministically returns ErrServerStopped. One iteration is now worth more
+// than five hundred were: reverting the check fails this every run.
 func TestServe_ExitsCleanlyWhenStoppedBeforeItStartsServing(t *testing.T) {
 	dir := t.TempDir()
 	_, code := run(t, dir, "ca", "init")
 	require.Equal(t, 0, code)
 	t.Setenv("FLEET_CONFIG_DIR", dir)
 
-	for i := range 500 {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		var out bytes.Buffer
-		code := fleetctl.MainContext(ctx, []string{
-			"serve", "--listen", "127.0.0.1:0", "--advertise", "127.0.0.1",
-		}, &out)
-		require.Equal(t, 0, code, "iteration %d: a serve that was told to stop reported a failure:\n%s", i, out.String())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out bytes.Buffer
+	code = fleetctl.MainContext(ctx, []string{
+		"serve", "--listen", "127.0.0.1:0", "--advertise", "127.0.0.1",
+	}, &out)
+	require.Equal(t, 0, code, "a serve that was told to stop reported a failure:\n%s", out.String())
+}
+
+// The other half of that determinism, and the reason it is worth having beyond
+// testability: this endpoint is the one an unauthenticated caller can reach, so
+// a serve that was cancelled before it began must not accept anything at all.
+// It used to open the accept loop first and drain it a moment later, ~999 runs
+// in 1000.
+func TestServe_AcceptsNothingWhenCancelledBeforeItStarts(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+	t.Setenv("FLEET_CONFIG_DIR", dir)
+
+	// A fixed port, so the check below is against the socket serve was given
+	// rather than against whatever the kernel handed out after it exited.
+	addr := "127.0.0.1:" + freeTCPPort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out bytes.Buffer
+	require.Equal(t, 0, fleetctl.MainContext(ctx, []string{
+		"serve", "--listen", addr, "--advertise", "127.0.0.1",
+	}, &out), out.String())
+
+	// Nothing is listening: the listener was closed on the way out, and the
+	// accept loop it would have run was never entered.
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("a serve that was cancelled before it started left %s accepting connections", addr)
 	}
 }
 

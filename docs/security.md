@@ -88,6 +88,14 @@ The fleet CA is the root of every identity in the system. Replacing it is
 `fleetctl ca rotate`, and it is deliberately **three commands over three
 sittings**, not one.
 
+**Stop `fleetctl serve` before you start, and leave it stopped until you are
+done.** It loads the CA and the bundle once, at startup, and keeps signing with
+what it loaded: a host that enrolls through a `serve` started before a rotation
+is issued a leaf under the outgoing CA and handed a bundle with no new root in
+it — a fleet member built to break at step 3, created after you began the
+rotation to avoid exactly that. `serve` is meant to be short-lived anyway; this
+is one more reason.
+
 The reason is the trust that runs in both directions. Each fleet member holds a
 bundle of roots it trusts and a leaf signed by whichever root was issuing when
 it enrolled. The control plane verifies an agent's leaf against its bundle; the

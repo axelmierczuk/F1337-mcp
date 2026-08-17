@@ -274,53 +274,48 @@ func checkEndpoint(flag, value string, requireHost bool) error {
 // a re-mint to show for it. `--name "build box"` and `--address host:https` both
 // did exactly that.
 //
-// The check is the CA's own, over the same set enrollment will hand it, so mint
-// refuses what redemption would refuse and nothing else.
+// The question is asked through [enroll.CheckCertifiable] rather than assembled
+// here, so that mint refuses exactly what redemption would refuse. Assembling it
+// here is what let the two drift: this function ran the name through
+// net.SplitHostPort as if it were an address, so `--name build:box` was checked
+// as "build" and minted, and redemption then refused "build:box" after Redeem
+// had spent the token — the failure the check exists to prevent, on the flag it
+// was added for.
 func checkCertifiable(name string, addresses []string) error {
-	hosts := make([]string, 0, len(addresses))
 	for _, value := range addresses {
-		host, err := authorizedHost(value)
-		if err != nil {
+		if err := checkAuthorizedAddress(value); err != nil {
 			return err
 		}
-		if host != "" {
-			hosts = append(hosts, host)
-		}
 	}
-	dnsNames, ips := hostsToSANs(name, hosts)
-	if err := ca.CheckSANs(dnsNames, ips); err != nil {
+	if err := enroll.CheckCertifiable(name, addresses); err != nil {
 		return fmt.Errorf("this token could not be redeemed as minted: %w (--name and --address become the issued certificate's subject alternative names)", err)
 	}
 	return nil
 }
 
-// authorizedHost is the host an --address authorizes, or the empty string for a
-// wildcard bind, which authorizes none. It mirrors what enrollment extracts, so
-// what is checked here is what will be signed there.
+// checkAuthorizedAddress refuses an --address this command cannot carry, as
+// distinct from one the CA will not certify — which is
+// [enroll.CheckCertifiable]'s job, over the same values.
 //
-// The port is checked on the way past because it is what --listen is derived
-// from when the operator did not give one: a port net.SplitHostPort accepts and
-// strconv does not sent the generated command back to the installer's 8722
-// without saying it had, standing the agent up where the control plane will
-// never look — the exact failure deriving --listen from --address prevents.
+// Two things are wrong with an address before it ever reaches a SAN. A leading
+// '-' is read as a flag by the installer, exactly as it is for --control. And a
+// port net.SplitHostPort accepts but strconv does not is what --listen is
+// derived from when the operator gave none: it sent the generated command back
+// to the installer's 8722 without saying so, standing the agent up on a port the
+// control plane will never dial.
 //
 // A bare host with no port is not malformed: it authorizes the name without
 // claiming to know which port the agent will serve on.
-func authorizedHost(value string) (string, error) {
+func checkAuthorizedAddress(value string) error {
 	if strings.HasPrefix(value, "-") {
-		return "", fmt.Errorf("--address %q starts with '-'; give it as host or host:port", value)
+		return fmt.Errorf("--address %q starts with '-'; give it as host or host:port", value)
 	}
-	host := value
-	if h, port, err := net.SplitHostPort(value); err == nil {
-		host = h
+	if _, port, err := net.SplitHostPort(value); err == nil {
 		if n, convErr := strconv.Atoi(port); convErr != nil || n < 1 || n > 65535 {
-			return "", fmt.Errorf("--address %q does not name a port between 1 and 65535", value)
+			return fmt.Errorf("--address %q does not name a port between 1 and 65535", value)
 		}
 	}
-	if host == "0.0.0.0" || host == "::" {
-		return "", nil
-	}
-	return host, nil
+	return nil
 }
 
 // listenFor derives the agent's listen address from the endpoints the token

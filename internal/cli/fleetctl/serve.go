@@ -143,6 +143,24 @@ func newServeCommand(out io.Writer) *cobra.Command {
 				<-stopped
 			}()
 
+			// Already told to stop before serving began: let the watcher's
+			// GracefulStop land before Serve rather than racing it.
+			//
+			// This endpoint is the one an unauthenticated caller can reach, so
+			// opening its accept loop after the operator has asked for it to
+			// close is the wrong direction to lose a race in — and lose it we
+			// did, roughly 999 times in 1000, because Serve is a few
+			// instructions after the `go` above. Waiting here means a serve that
+			// was cancelled first accepts nothing at all.
+			//
+			// It also makes the outcome deterministic: Serve now always finds
+			// the server stopped and always returns ErrServerStopped, so the
+			// branch below is exercised by every run rather than by the rare
+			// scheduling that used to reach it.
+			if ctx.Err() != nil {
+				<-stopped
+			}
+
 			// ErrServerStopped means the watcher above stopped this server
 			// before Serve reached its accept loop — a Ctrl-C, or a caller
 			// cancelling the context, landing in the window between starting

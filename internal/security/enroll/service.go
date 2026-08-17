@@ -470,6 +470,31 @@ func checkRequestedAddresses(certName string, authorized, requested []string) ([
 	return extra, nil
 }
 
+// CheckCertifiable reports whether a token reserving name and authorizing
+// addresses could be redeemed at all, by asking the CA the question redemption
+// asks — over the same SAN set, assembled by the same code.
+//
+// It is exported for `fleetctl enroll mint`, which has to answer this before it
+// records a single-use secret. [Service.Enroll] applies the CA's SAN rules in
+// its certifiable closure, which runs after Redeem has marked the token used, so
+// a name the CA will not sign costs the operator a token and is discovered on a
+// host they have already walked away from.
+//
+// The point of it living here is that there is one implementation. Mint's own
+// re-derivation of this rule agreed with sanSet on almost every input and
+// disagreed on the ones that matter: it ran the *name* through
+// net.SplitHostPort, so `--name build:box` was checked as "build", passed, and
+// was then refused at redemption as "build:box" — the exact failure the check
+// was added to prevent. Two implementations of one rule drift; this is the one.
+//
+// Only the operator's own inputs are covered. What the enrolling host asks to
+// add — loopback addresses checkRequestedAddresses clears — is not knowable at
+// mint time and is checked when it arrives.
+func CheckCertifiable(name string, addresses []string) error {
+	dnsNames, ips := sanSet(name, addresses, nil)
+	return ca.CheckSANs(dnsNames, ips)
+}
+
 // sanSet assembles the subject alternative names the leaf carries: the name the
 // operator reserved for this token, the addresses the operator authorized with
 // it, and the loopback addresses checkRequestedAddresses cleared. Nothing the
