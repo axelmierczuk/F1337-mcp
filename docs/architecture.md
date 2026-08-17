@@ -85,6 +85,13 @@ restart of both the server and the registry with nothing extra to persist, and
 opaque enough that a model cannot construct one for a sandbox it was never
 given.
 
+A reference carrying the `sbx_` prefix resolves as a handle first and only then
+as a name. `sandbox_add` refuses to register a name with that prefix, but it is
+not the only way a name reaches the registry: an enrollment token that reserves
+no name lets the enrolling host choose its own. Matching names first would let
+such a host name itself after another sandbox's handle and receive every call
+aimed at it.
+
 Every tool result carries the resolved sandbox name. This is not diagnostic
 garnish — silent target confusion is the most destructive failure mode
 available to this system, and it is invisible without an echo. The echo is

@@ -252,13 +252,34 @@ func (r *Registry) UpdateHostInfo(name string, platform Platform, agentVersion s
 	})
 }
 
+// maxClientIDLength bounds an identity that becomes a key in the registry
+// file. See [Registry.SetSelection].
+const maxClientIDLength = 256
+
 // SetSelection records the sticky default sandbox for a client identity,
 // persisted so it survives a process restart. Two different client
 // identities against the same registry never observe each other's
 // selection.
+//
+// The identity is bounded here as well as by its producer. Whether an identity
+// is durable enough to persist is the caller's judgement — this file has no way
+// to tell "client:some-editor" from "process:4242", and teaching it would put
+// one package's naming scheme inside another's storage — but whether a string
+// is fit to become a key in a YAML file that every later operation rewrites
+// whole is this file's business, exactly as refusing an empty sandbox name is.
+// A megabyte of identity, or one carrying a NUL, is a caller's bug wherever it
+// came from, and it costs every subsequent read and write once it is on disk.
 func (r *Registry) SetSelection(clientID, sandboxName string) error {
 	if clientID == "" {
 		return fmt.Errorf("registry: client identity is required")
+	}
+	if len(clientID) > maxClientIDLength {
+		return fmt.Errorf("registry: client identity is %d bytes, limit is %d", len(clientID), maxClientIDLength)
+	}
+	for _, ch := range clientID {
+		if ch < ' ' || ch == 0x7f {
+			return fmt.Errorf("registry: client identity contains a control character %q", ch)
+		}
 	}
 	return r.mutate(func(s *state) error {
 		if s.Selections == nil {

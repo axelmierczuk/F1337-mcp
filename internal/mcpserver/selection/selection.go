@@ -43,9 +43,14 @@ import (
 const MetaKeyClientID = "io.sandboxd/clientId"
 
 // handlePrefix marks a sandbox reference as a handle rather than a name.
-// Sandbox names are operator-chosen and could in principle collide with a
-// handle, so resolution checks names first and the prefix keeps the two
-// populations visibly distinct.
+//
+// A reference carrying it is resolved as a handle first, and only then as a
+// name. A sandbox name is not always the operator's choice: an enrollment
+// token that reserves no name lets the enrolling host pick its own, and
+// nothing on that path refuses one shaped like a handle. Resolving names first
+// would let such a host name itself after another sandbox's handle and collect
+// every call aimed at it — silent target confusion, arrived at through the one
+// reference the model is told is opaque and safe to hand back.
 const handlePrefix = "sbx_"
 
 // maxIdentityLength bounds a client-supplied identity. It becomes a key in
@@ -312,22 +317,27 @@ func (r *Resolver) ResolveFor(id Identity, explicit string) (*Target, error) {
 }
 
 // Lookup resolves a name or handle to a registered sandbox.
+//
+// A handle-shaped reference is matched against handles first, so a sandbox
+// merely *named* like another's handle cannot intercept calls aimed at it. See
+// [handlePrefix]. Anything else — including a handle-shaped reference matching
+// no handle — falls through to an ordinary name match.
 func (r *Resolver) Lookup(ref string) (registry.Sandbox, error) {
 	ref = strings.TrimSpace(ref)
 	sandboxes, err := r.fleet.List()
 	if err != nil {
 		return registry.Sandbox{}, err
 	}
-	for _, sb := range sandboxes {
-		if sb.Name == ref {
-			return sb, nil
-		}
-	}
 	if strings.HasPrefix(ref, handlePrefix) {
 		for _, sb := range sandboxes {
 			if HandleFor(sb.Name) == ref {
 				return sb, nil
 			}
+		}
+	}
+	for _, sb := range sandboxes {
+		if sb.Name == ref {
+			return sb, nil
 		}
 	}
 	return registry.Sandbox{}, &UnknownSandboxError{Ref: ref, Available: namesOf(sandboxes)}

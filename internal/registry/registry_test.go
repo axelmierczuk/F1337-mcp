@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -231,6 +232,35 @@ func TestSelection_ClearForSandboxReachesEveryClient(t *testing.T) {
 	cleared, err = r.ClearSelectionsFor("build-box")
 	require.NoError(t, err)
 	assert.Zero(t, cleared, "clearing again is not an error and clears nothing")
+}
+
+// TestSelection_RefusesAnIdentityUnfitToBeAKey. The identity comes from
+// whatever calls this, and it becomes a key in a file every later operation
+// reads and rewrites whole. Whether an identity is durable enough to persist is
+// the caller's judgement; whether a string is fit to be a YAML key is this
+// package's.
+func TestSelection_RefusesAnIdentityUnfitToBeAKey(t *testing.T) {
+	r, path := newTestRegistry(t)
+
+	for name, id := range map[string]string{
+		"empty":            "",
+		"a megabyte of it": strings.Repeat("A", 1<<20),
+		"a newline":        "line\nbreak",
+		"a NUL":            "nul\x00byte",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, r.SetSelection(id, "build-box"))
+		})
+	}
+
+	// Nothing was written by any of them.
+	if data, err := os.ReadFile(path); err == nil {
+		assert.NotContains(t, string(data), "build-box")
+	}
+
+	// A realistic identity, namespace prefix included, is well inside the
+	// bound: the producer already caps its own half at 128 bytes.
+	require.NoError(t, r.SetSelection("client:"+strings.Repeat("a", 128), "build-box"))
 }
 
 func TestMalformedFile_ClearErrorNamingPath(t *testing.T) {

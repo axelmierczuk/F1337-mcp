@@ -2,6 +2,7 @@ package tools
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -130,4 +131,51 @@ func TestShortDetail(t *testing.T) {
 	multibyte := shortDetail(errors.New(strings.Repeat("é", 200)))
 	assert.True(t, utf8.ValidString(multibyte), "truncation produced invalid UTF-8: %q", multibyte)
 	assert.Contains(t, multibyte, "…")
+}
+
+// TestCompact covers the bound every agent-supplied field in a listing row
+// shares. An agent writes the failure message when a probe fails, the status
+// message when it reports itself degraded, and the platform and version cached
+// from its last GetHostInfo; only the first used to be bounded, and the listing
+// they all land in is paid for on every fleet check.
+func TestCompact(t *testing.T) {
+	assert.Empty(t, compact(""))
+	assert.Empty(t, compact("   \n "))
+	assert.Equal(t, "disk 94% full", compact("  disk 94% full  "))
+
+	long := compact(strings.Repeat("x", 400))
+	assert.LessOrEqual(t, len(long), 164)
+	assert.Contains(t, long, "…")
+
+	multibyte := compact(strings.Repeat("é", 200))
+	assert.True(t, utf8.ValidString(multibyte), "truncation produced invalid UTF-8: %q", multibyte)
+}
+
+// TestCheckLabels guards the free-form half of a sandbox_add call: the model
+// supplies it, the registry stores it, and every sandbox_list result carries it.
+func TestCheckLabels(t *testing.T) {
+	assert.NoError(t, checkLabels(nil))
+	assert.NoError(t, checkLabels(map[string]string{"arch": "arm64", "owner": "platform team", "empty": ""}))
+
+	tooMany := map[string]string{}
+	for i := range maxLabels + 1 {
+		tooMany[strconv.Itoa(i)] = "v"
+	}
+	for name, labels := range map[string]map[string]string{
+		"too many":          tooMany,
+		"empty key":         {"": "v"},
+		"key with a space":  {"data centre": "west"},
+		"non-ASCII key":     {"café": "v"},
+		"oversized key":     {strings.Repeat("k", maxLabelKeyLength+1): "v"},
+		"oversized value":   {"k": strings.Repeat("v", maxLabelValueLength+1)},
+		"value with a tab":  {"k": "a\tb"},
+		"value with a line": {"k": "a\nb"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := checkLabels(labels)
+			require.Error(t, err)
+			assert.Contains(t, strings.ToLower(err.Error()), "label")
+			assert.Less(t, len(err.Error()), 512, "the rejection must not echo the input back whole")
+		})
+	}
 }

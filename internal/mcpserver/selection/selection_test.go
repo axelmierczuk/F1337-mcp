@@ -166,6 +166,38 @@ func TestResolve_UnknownReferenceListsWhatExists(t *testing.T) {
 	require.ErrorAs(t, err, &unknown)
 }
 
+// TestResolve_ANameShapedLikeAHandleCannotShadowIt.
+//
+// sandbox_add refuses a name starting with sbx_, but it is not the only way a
+// name enters the registry: an enrollment token that reserves no name lets the
+// enrolling host choose its own, checked only for length and printable ASCII.
+// A host that names itself after another sandbox's handle would then collect
+// every call aimed at that handle — the model passing back the opaque reference
+// it was handed, and reaching a different machine. Handles therefore win over
+// names for a handle-shaped reference.
+func TestResolve_ANameShapedLikeAHandleCannotShadowIt(t *testing.T) {
+	fleet := newFleet(t, "build-box")
+
+	// What an enrolling host would compute offline and ask to be named.
+	impostor := selection.HandleFor("build-box")
+	require.NoError(t, fleet.Add(registry.Sandbox{Name: impostor, Address: "impostor.internal:8722"}))
+
+	resolver := selection.NewResolver(fleet, nil)
+
+	target, err := resolver.ResolveFor("meta:alice", impostor)
+	require.NoError(t, err)
+	assert.Equal(t, "build-box", target.Name(),
+		"a handle must reach the sandbox it was minted for, not one merely named after it")
+	assert.Equal(t, "build-box.internal:8722", target.Address())
+
+	// A handle-shaped name that shadows nothing stays addressable, so the rule
+	// costs a legitimately odd name nothing.
+	require.NoError(t, fleet.Add(registry.Sandbox{Name: "sbx_0000000000000000", Address: "odd.internal:8722"}))
+	target, err = resolver.ResolveFor("meta:alice", "sbx_0000000000000000")
+	require.NoError(t, err)
+	assert.Equal(t, "sbx_0000000000000000", target.Name())
+}
+
 // TestResolve_StaleSelectionIsItsOwnError so the model is told to re-select
 // rather than to fix a name it typed correctly.
 func TestResolve_StaleSelectionIsItsOwnError(t *testing.T) {
@@ -288,6 +320,42 @@ func TestSelection_UnderTheProcessFallbackDoesNotOutliveTheProcess(t *testing.T)
 	target, err = second.ResolveFor("meta:alice", "")
 	require.NoError(t, err)
 	assert.Equal(t, "build-box", target.Name())
+}
+
+// TestSelection_APersistedProcessKeyIsNeverInherited is the other half of the
+// pid-reuse story, and the half a fresh registry file cannot show.
+//
+// Not writing the fallback's selection stops one from being created. It does
+// not remove the ones already on disk: every registry.yaml written by a build
+// from before that fix still carries `process:<pid>` keys, and one of those
+// pids will eventually be handed to a new sandboxd-mcp. Resolution must read
+// the fallback identity from memory only, so an inherited key is inert rather
+// than merely unlikely.
+func TestSelection_APersistedProcessKeyIsNeverInherited(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.yaml")
+	fleet, err := registry.Open(path)
+	require.NoError(t, err)
+	require.NoError(t, fleet.Add(registry.Sandbox{Name: "build-box", Address: "build-box.internal:8722"}))
+	require.NoError(t, fleet.Add(registry.Sandbox{Name: "gpu-01", Address: "gpu-01.internal:8722"}))
+
+	// Exactly what an older build left behind, under the pid this process was
+	// handed — the collision, fabricated.
+	pid := fmt.Sprintf("process:%d", os.Getpid())
+	require.NoError(t, fleet.SetSelection(pid, "gpu-01"))
+
+	resolver := selection.NewResolver(fleet, nil)
+	require.Equal(t, selection.Identity(pid), resolver.IdentityFor(nil),
+		"this test is only meaningful if the fallback is the key that was planted")
+
+	_, err = resolver.ResolveFor(resolver.IdentityFor(nil), "")
+	var noTarget *selection.NoTargetError
+	require.ErrorAs(t, err, &noTarget,
+		"a selection left on disk under a recycled pid must not be inherited")
+
+	name, ok, err := resolver.Selected(resolver.IdentityFor(nil))
+	require.NoError(t, err)
+	assert.False(t, ok, "and it must not be visible as a selection either")
+	assert.Empty(t, name)
 }
 
 // TestClearSelectionsFor_ReachesTheInMemoryOne. sandbox_remove has to clear

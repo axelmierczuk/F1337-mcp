@@ -52,10 +52,14 @@ Register an already-enrolled agent that is not in the local registry.
 | --- | --- | --- |
 | `name` | string | **Required.** |
 | `address` | string | **Required.** `host:port`. |
-| `labels` | object | Free-form `key=value`. |
+| `labels` | object | Free-form `key=value`, bounded: at most 32, keys printable ASCII with no spaces. |
 
 Does not enroll. Enrollment mints credentials and is an operator action via
 `sandboxctl`.
+
+Name, address and labels are all validated before the registry is touched, so a
+rejected call leaves nothing behind. Labels are bounded because they are paid
+for twice: in the registry file, and in every `sandbox_list` result.
 
 ### `sandbox_remove`
 Deregister a sandbox locally. Does not uninstall the agent.

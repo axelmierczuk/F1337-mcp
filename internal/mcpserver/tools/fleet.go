@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,6 +25,13 @@ import (
 // put into a certificate subject, so a name added here is a name that could
 // have been enrolled.
 const maxSandboxNameLength = 128
+
+// Bounds on the labels sandbox_add accepts. See [checkLabels].
+const (
+	maxLabels           = 32
+	maxLabelKeyLength   = 64
+	maxLabelValueLength = 256
+)
 
 // enrollmentHint is what an empty fleet gets told. Adding a sandbox is an
 // operator action; the model needs to know that rather than retrying.
@@ -156,7 +164,11 @@ func (r *Registrar) sandboxList(ctx context.Context, req *mcp.CallToolRequest, i
 		}
 		filtered := sandboxes[:0:0]
 		for _, sb := range sandboxes {
-			if sb.Labels[key] == value {
+			// The label has to be present, not merely absent-and-therefore-
+			// empty: `label="gpu="` asks for the sandboxes whose gpu label is
+			// set to nothing, and answering it with every sandbox that has no
+			// gpu label at all is the opposite set.
+			if v, ok := sb.Labels[key]; ok && v == value {
 				filtered = append(filtered, sb)
 			}
 		}
@@ -178,12 +190,15 @@ func (r *Registrar) sandboxList(ctx context.Context, req *mcp.CallToolRequest, i
 			agent = h.agentVersion
 		}
 		out.Sandboxes = append(out.Sandboxes, SandboxLine{
-			Name:     sb.Name,
-			Address:  sb.Address,
-			Platform: platformString(sb.Platform),
+			Name:    sb.Name,
+			Address: sb.Address,
+			// Platform and agent version are the agent's words too, cached from
+			// the last GetHostInfo, so they are bounded on the same terms as
+			// the detail column: no single row may run away with the listing.
+			Platform: compact(platformString(sb.Platform)),
 			Health:   h.status,
 			Detail:   h.detail,
-			Agent:    agent,
+			Agent:    compact(agent),
 			LastSeen: relativeTime(lastSeen, now),
 			Labels:   sb.Labels,
 			Selected: sb.Name == selected,
@@ -331,12 +346,15 @@ func (r *Registrar) sandboxAdd(_ context.Context, _ *mcp.CallToolRequest, in Add
 	name := strings.TrimSpace(in.Name)
 	address := strings.TrimSpace(in.Address)
 
-	// Both checks run before the registry is touched, so a malformed call
+	// Every check runs before the registry is touched, so a malformed call
 	// cannot leave a half-registered sandbox behind.
 	if err := checkSandboxName(name); err != nil {
 		return AddResult{}, "", err
 	}
 	if err := checkAddress(address); err != nil {
+		return AddResult{}, "", err
+	}
+	if err := checkLabels(in.Labels); err != nil {
 		return AddResult{}, "", err
 	}
 
@@ -378,6 +396,45 @@ func checkSandboxName(name string) error {
 	}
 	if strings.HasPrefix(name, "sbx_") {
 		return fmt.Errorf("name %q collides with the handle prefix sbx_; choose another", name)
+	}
+	return nil
+}
+
+// checkLabels bounds the free-form metadata a sandbox_add call attaches.
+//
+// Labels are the one part of the call with no shape of their own, and they are
+// paid for twice: once in the registry file that every later operation rewrites
+// whole, and again in every sandbox_list result, which lands in model context
+// on every fleet check. The labels enrollment attaches come from the operator's
+// token and are the operator's business; these come from the model, so they are
+// bounded here, before the registry is touched.
+func checkLabels(labels map[string]string) error {
+	if len(labels) > maxLabels {
+		return fmt.Errorf("%d labels given, limit is %d", len(labels), maxLabels)
+	}
+	for key, value := range labels {
+		if key == "" {
+			return errors.New(`a label key is empty; labels are key=value metadata, e.g. {"arch":"arm64"}`)
+		}
+		if len(key) > maxLabelKeyLength {
+			return fmt.Errorf("label key %q is %d bytes, limit is %d", compact(key), len(key), maxLabelKeyLength)
+		}
+		for _, r := range key {
+			// A key is typed into the label filter as key=value and printed in
+			// a table, so it carries the same restriction a name does.
+			if r <= ' ' || r > '~' {
+				return fmt.Errorf("label key %q contains an invalid character %q; use printable ASCII with no spaces",
+					compact(key), r)
+			}
+		}
+		if len(value) > maxLabelValueLength {
+			return fmt.Errorf("label %q has a %d-byte value, limit is %d", key, len(value), maxLabelValueLength)
+		}
+		for _, r := range value {
+			if !unicode.IsPrint(r) {
+				return fmt.Errorf("label %q has a value containing an unprintable character %q", key, r)
+			}
+		}
 	}
 	return nil
 }
@@ -697,7 +754,7 @@ func (r *Registrar) healthFor(ctx context.Context, sandboxes []registry.Sandbox,
 			default:
 				out[sb.Name] = healthView{
 					status:       healthString(h.Status),
-					detail:       h.Message,
+					detail:       compact(h.Message),
 					agentVersion: h.AgentVersion,
 					seenAt:       h.CheckedAt,
 				}
@@ -753,7 +810,7 @@ func (r *Registrar) probe(ctx context.Context, sb registry.Sandbox, timeout time
 	}
 	return healthView{
 		status:       healthString(resp.GetStatus()),
-		detail:       resp.GetMessage(),
+		detail:       compact(resp.GetMessage()),
 		agentVersion: resp.GetAgentVersion(),
 		seenAt:       time.Now(),
 	}
@@ -769,19 +826,32 @@ func (r *Registrar) probe(ctx context.Context, sb registry.Sandbox, timeout time
 // live-probe path was mapped. Second, the row this sits in already names the
 // sandbox, its address and its health, so the sentence Call.Map builds would
 // repeat all three on every line of every fleet check.
-//
-// The length cap keeps one unreachable sandbox from turning a twenty-machine
-// listing into a wall of text; the full mapped error is always available from
-// a direct call against that sandbox.
 func shortDetail(err error) string {
-	const maxDetail = 160
-	msg := strings.TrimSpace(mcperr.Message(err))
-	if len(msg) <= maxDetail {
+	return compact(mcperr.Message(err))
+}
+
+// maxField bounds what one field of one listing row may contribute.
+const maxField = 160
+
+// compact bounds an agent-supplied string for a listing, cutting on a rune
+// boundary.
+//
+// Everything a row says about a sandbox except its name and address is the
+// agent's own words — the status message when it reports itself degraded, the
+// failure message when it cannot be reached, the platform and version cached
+// from its last GetHostInfo — so none of those lengths are this side's to
+// assume. One machine answering a probe with a stack trace must not turn a
+// twenty-machine listing into a wall of text the model pays for on every fleet
+// check; the full text is always available from a direct call against that
+// sandbox.
+func compact(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if len(msg) <= maxField {
 		return msg
 	}
-	// Cut on a rune boundary: msg carries an agent-supplied message, and
-	// slicing mid-rune would put invalid UTF-8 into the result.
-	cut := maxDetail
+	// Cut on a rune boundary: the text is agent-supplied, and slicing mid-rune
+	// would put invalid UTF-8 into the result.
+	cut := maxField
 	for cut > 0 && !utf8.RuneStart(msg[cut]) {
 		cut--
 	}

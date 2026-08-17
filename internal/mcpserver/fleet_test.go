@@ -66,10 +66,11 @@ type infoResult struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"toolchains"`
-	Agent  string `json:"agent"`
-	Uptime string `json:"uptime"`
-	Health string `json:"health"`
-	Note   string `json:"note"`
+	Agent            string `json:"agent"`
+	Uptime           string `json:"uptime"`
+	Health           string `json:"health"`
+	RunningProcesses uint32 `json:"running_processes"`
+	Note             string `json:"note"`
 }
 
 type removeResult struct {
@@ -174,6 +175,67 @@ func TestList_UnreachableDetailNeverLeaksTheGRPCEnvelope(t *testing.T) {
 	}
 }
 
+// TestList_AgentSuppliedDetailIsBounded.
+//
+// The detail column is written by the agent at both ends: the failure message
+// when a probe fails, and the status message when the agent reports itself
+// degraded. Only the failure half was bounded, so one machine answering a probe
+// with a stack trace turned a fleet listing into a wall of text — paid for on
+// every fleet check, in the same result issue #21 requires to stay compact.
+func TestList_AgentSuppliedDetailIsBounded(t *testing.T) {
+	f := newFixture(t, fixtureOptions{})
+	f.add("cached", "cached.internal:8722", nil)
+	f.add("probed", "probed.internal:8722", nil)
+
+	// Not an error: an agent that is up, answering, and describing itself as
+	// degraded at length.
+	huge := strings.Repeat("x", 50_000)
+	f.clients.setCached("cached", client.HealthStatus{
+		Reachable: true, Status: sandboxdv1.HealthResponse_STATUS_DEGRADED,
+		Message: huge, CheckedAt: time.Now(),
+	})
+	host := f.clients.host("probed")
+	host.mu.Lock()
+	host.status, host.message = sandboxdv1.HealthResponse_STATUS_DEGRADED, huge
+	host.mu.Unlock()
+
+	for _, refresh := range []bool{false, true} {
+		res := f.ok("sandbox_list", map[string]any{"refresh": refresh}, "")
+		out := structured[listResult](t, res)
+		require.Len(t, out.Sandboxes, 2)
+
+		name := "cached"
+		if refresh {
+			name = "probed"
+		}
+		for _, sb := range out.Sandboxes {
+			if sb.Name != name {
+				continue
+			}
+			assert.Equalf(t, "degraded", sb.Health, "refresh=%v", refresh)
+			assert.NotEmptyf(t, sb.Detail, "refresh=%v dropped the reason entirely", refresh)
+			assert.LessOrEqualf(t, len(sb.Detail), 164,
+				"refresh=%v: %s contributed %d bytes of detail to the listing", refresh, name, len(sb.Detail))
+		}
+		assert.Lessf(t, len(resultText(res)), 4096,
+			"refresh=%v: one talkative agent must not blow up the whole listing", refresh)
+	}
+
+	// The rest of what a row says about a sandbox is the agent's words too:
+	// the version it reports, and the platform cached from its GetHostInfo.
+	f.clients.setCached("cached", client.HealthStatus{
+		Reachable: true, Status: sandboxdv1.HealthResponse_STATUS_SERVING,
+		AgentVersion: huge, CheckedAt: time.Now(),
+	})
+	require.NoError(t, f.fleet.UpdateHostInfo("cached", registry.Platform{OS: huge, Arch: huge}, huge))
+
+	out := structured[listResult](t, f.ok("sandbox_list", map[string]any{}, ""))
+	for _, sb := range out.Sandboxes {
+		assert.LessOrEqualf(t, len(sb.Agent), 164, "%s reported a %d-byte agent version", sb.Name, len(sb.Agent))
+		assert.LessOrEqualf(t, len(sb.Platform), 164, "%s reported a %d-byte platform", sb.Name, len(sb.Platform))
+	}
+}
+
 // TestList_UnreachableSandboxDoesNotHangTheCall covers the powered-off box.
 // One of them must not hold up the listing, and a per-sandbox deadline is
 // what makes that true regardless of how many are off.
@@ -222,6 +284,14 @@ func TestList_FiltersByLabel(t *testing.T) {
 	assert.Contains(t, out.Hint, "gpu=h100")
 	assert.NotContains(t, out.Hint, "sandboxctl enroll mint",
 		"a filter that matched nothing is not an empty fleet")
+
+	// An empty value asks for the sandboxes whose label is set to nothing, not
+	// for the ones that do not carry the label at all — which is every other
+	// sandbox in the fleet, and the opposite answer.
+	f.add("blank-gpu", "blank-gpu.internal:8722", map[string]string{"gpu": ""})
+	out = structured[listResult](t, f.ok("sandbox_list", map[string]any{"label": "gpu="}, ""))
+	require.Len(t, out.Sandboxes, 1, "a sandbox without the label must not match an empty value")
+	assert.Equal(t, "blank-gpu", out.Sandboxes[0].Name)
 
 	text := f.fails("sandbox_list", map[string]any{"label": "arm64"}, "")
 	assert.Contains(t, text, "key=value")
@@ -413,6 +483,50 @@ func TestAdd_RejectsUnusableNames(t *testing.T) {
 	}
 }
 
+// TestAdd_BoundsTheLabelsItWritesToTheRegistry. Labels are the one part of a
+// sandbox_add call with no shape of its own, and the model supplies them. They
+// are paid for twice — in the registry file every later operation rewrites
+// whole, and in every sandbox_list result — so an unbounded one is a fleet
+// listing nobody can read and a registry file that only grows.
+func TestAdd_BoundsTheLabelsItWritesToTheRegistry(t *testing.T) {
+	f := newFixture(t, fixtureOptions{})
+
+	huge := strings.Repeat("y", 50_000)
+	many := map[string]any{}
+	for i := range 40 {
+		many[fmt.Sprintf("k%02d", i)] = "v"
+	}
+
+	for name, labels := range map[string]map[string]any{
+		"oversized value": {"note": huge},
+		"oversized key":   {huge: "v"},
+		"too many":        many,
+		"empty key":       {"": "v"},
+		"key with space":  {"data centre": "west"},
+		"unprintable":     {"note": "line\nbreak"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := f.fails("sandbox_add",
+				map[string]any{"name": "box", "address": "box.internal:8722", "labels": labels}, "")
+			assert.Contains(t, strings.ToLower(text), "label", "the rejection should name the labels")
+			assert.Less(t, len(text), 1024, "the rejection must not echo the oversized input back")
+
+			sandboxes, err := f.fleet.List()
+			require.NoError(t, err)
+			assert.Empty(t, sandboxes, "a rejected call must not leave a registry entry")
+		})
+	}
+
+	// Ordinary labels are untouched.
+	f.ok("sandbox_add", map[string]any{
+		"name": "box", "address": "box.internal:8722",
+		"labels": map[string]any{"arch": "arm64", "owner": "platform team"},
+	}, "")
+	sb, err := f.fleet.Get("box")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"arch": "arm64", "owner": "platform team"}, sb.Labels)
+}
+
 // TestRemove_ClearsTheSelectionAndSaysWhatItDidNotDo covers the criterion
 // that a dangling selection is worse than none, and the one that stops a
 // reader assuming the host was cleaned up.
@@ -515,6 +629,44 @@ func TestInfo_CachesPlatformIntoTheRegistry(t *testing.T) {
 	out := structured[listResult](t, f.ok("sandbox_list", map[string]any{}, ""))
 	require.Len(t, out.Sandboxes, 1)
 	assert.Equal(t, "linux/amd64", out.Sandboxes[0].Platform)
+}
+
+// TestInfo_HealthIsNotDowngradedByACacheWithNoOpinion.
+//
+// sandbox_info takes the running-process count from the health cache rather
+// than paying for a second round trip, and the agent's own opinion of itself —
+// degraded, draining — is worth more than "the call went through". A cache with
+// no opinion is not: reporting a GetHostInfo that just succeeded as "unknown"
+// tells the model the host said nothing when it had in fact just answered in
+// full.
+//
+// The fix for this shipped in audit round 1 with no test, so reverting it broke
+// nothing.
+func TestInfo_HealthIsNotDowngradedByACacheWithNoOpinion(t *testing.T) {
+	f := newFixture(t, fixtureOptions{})
+	f.add("build-box", "build-box.internal:8722", nil)
+
+	// Reachable, so the running-process count is usable, but carrying no
+	// status — what a HealthResponse with an unset status field decodes to.
+	f.clients.setCached("build-box", client.HealthStatus{
+		Reachable: true, Status: sandboxdv1.HealthResponse_STATUS_UNSPECIFIED,
+		RunningProcesses: 3, CheckedAt: time.Now(),
+	})
+
+	out := structured[infoResult](t, f.ok("sandbox_info", map[string]any{"sandbox": "build-box"}, ""))
+	assert.Equal(t, "serving", out.Health,
+		"a call that answered in full must not be reported as unknown")
+	assert.Equal(t, uint32(3), out.RunningProcesses,
+		"the count still comes from the cache; only the status is disregarded")
+
+	// A cache that does have an opinion still wins: the agent describing itself
+	// as degraded outranks "the call went through".
+	f.clients.setCached("build-box", client.HealthStatus{
+		Reachable: true, Status: sandboxdv1.HealthResponse_STATUS_DEGRADED,
+		RunningProcesses: 3, CheckedAt: time.Now(),
+	})
+	out = structured[infoResult](t, f.ok("sandbox_info", map[string]any{"sandbox": "build-box"}, ""))
+	assert.Equal(t, "degraded", out.Health)
 }
 
 // TestInfo_UnavailableSurfacesAsAReadableToolError is issue #19's error
