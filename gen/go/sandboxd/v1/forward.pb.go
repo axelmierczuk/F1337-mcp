@@ -129,7 +129,26 @@ type ForwardOpen struct {
 	// Host on the sandbox to connect to. Empty means loopback, which is the
 	// common case and keeps the agent from being turned into a general-purpose
 	// network pivot by default.
-	RemoteHost    string `protobuf:"bytes,2,opt,name=remote_host,json=remoteHost,proto3" json:"remote_host,omitempty"`
+	RemoteHost string `protobuf:"bytes,2,opt,name=remote_host,json=remoteHost,proto3" json:"remote_host,omitempty"`
+	// Set when this connection is one a SOCKS5 proxy asked for, rather than a
+	// port forward the caller named a host and port for up front.
+	//
+	// It is a declaration of purpose, and the agent's policy is written in the
+	// same terms: a proxy is refused outright unless forward.socks_enabled is
+	// set, and an agent whose forward.allowed_hosts is empty will serve a
+	// proxied connection to any host it can reach while still forwarding only
+	// to its own loopback. Those are two capabilities an operator decides
+	// separately, and a field is the only way the agent can tell them apart —
+	// the destination alone cannot, because the same address can be reached
+	// either way.
+	//
+	// It is deliberately not a security boundary, and it does not need to be:
+	// declaring it can only ever make the policy applied to a connection
+	// stricter, never looser. A caller that lies and clears it gets the forward
+	// rules, which permit loopback and the explicit allow-list and nothing
+	// else. There is no value a caller can put here that reaches a host the
+	// configuration does not already permit it to reach.
+	Socks         bool `protobuf:"varint,3,opt,name=socks,proto3" json:"socks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -176,6 +195,13 @@ func (x *ForwardOpen) GetRemoteHost() string {
 		return x.RemoteHost
 	}
 	return ""
+}
+
+func (x *ForwardOpen) GetSocks() bool {
+	if x != nil {
+		return x.Socks
+	}
+	return false
 }
 
 type ForwardResponse struct {
@@ -393,12 +419,13 @@ const file_sandboxd_v1_forward_proto_rawDesc = "" +
 	"\x04open\x18\x01 \x01(\v2\x18.sandboxd.v1.ForwardOpenH\x00R\x04open\x12\x14\n" +
 	"\x04data\x18\x02 \x01(\fH\x00R\x04data\x121\n" +
 	"\x05close\x18\x03 \x01(\v2\x19.sandboxd.v1.ForwardCloseH\x00R\x05closeB\a\n" +
-	"\x05event\"O\n" +
+	"\x05event\"e\n" +
 	"\vForwardOpen\x12\x1f\n" +
 	"\vremote_port\x18\x01 \x01(\rR\n" +
 	"remotePort\x12\x1f\n" +
 	"\vremote_host\x18\x02 \x01(\tR\n" +
-	"remoteHost\"\x99\x01\n" +
+	"remoteHost\x12\x14\n" +
+	"\x05socks\x18\x03 \x01(\bR\x05socks\"\x99\x01\n" +
 	"\x0fForwardResponse\x124\n" +
 	"\x06opened\x18\x01 \x01(\v2\x1a.sandboxd.v1.ForwardOpenedH\x00R\x06opened\x12\x14\n" +
 	"\x04data\x18\x02 \x01(\fH\x00R\x04data\x121\n" +

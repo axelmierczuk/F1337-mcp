@@ -40,6 +40,33 @@ message GetHostInfoResponse {
   // Subject common name from the client certificate the agent authenticated,
   // echoed back so the caller can confirm which identity it is using.
   string authenticated_principal = 7;
+  // What this agent will connect to on a caller's behalf.
+  ForwardPolicy forward_policy = 8;
+}
+
+// ForwardPolicy is the agent's own account of its pivot configuration.
+//
+// It is reported for the same reason allowed_roots is: a caller has to be able
+// to find out what a host permits before it depends on it, and "the agent
+// refuses SOCKS" is far more useful arriving when a proxy is being started
+// than on the first connection through one. It describes configuration and is
+// never itself a boundary — the agent enforces this policy per connection,
+// whatever a caller has been told or believes.
+message ForwardPolicy {
+  // Whether ForwardService is on at all (forward.enabled).
+  bool enabled = 1;
+  // Whether this agent will carry SOCKS5-proxied connections
+  // (forward.socks_enabled). False is the default.
+  bool socks_enabled = 2;
+  // The non-loopback hosts, addresses and CIDRs this agent will connect to
+  // (forward.allowed_hosts), as the operator wrote them.
+  //
+  // Empty is meaningful in two different ways depending on socks_enabled, and
+  // this is the field a caller reads to tell them apart: with it off, empty
+  // means "loopback only"; with it on, empty means "any host this machine can
+  // reach", which is the one configuration in which this agent is an
+  // unrestricted network pivot.
+  repeated string allowed_hosts = 3;
 }
 
 message HealthRequest {}

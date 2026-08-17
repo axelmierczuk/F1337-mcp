@@ -34,6 +34,25 @@ message ForwardOpen {
   // common case and keeps the agent from being turned into a general-purpose
   // network pivot by default.
   string remote_host = 2;
+  // Set when this connection is one a SOCKS5 proxy asked for, rather than a
+  // port forward the caller named a host and port for up front.
+  //
+  // It is a declaration of purpose, and the agent's policy is written in the
+  // same terms: a proxy is refused outright unless forward.socks_enabled is
+  // set, and an agent whose forward.allowed_hosts is empty will serve a
+  // proxied connection to any host it can reach while still forwarding only
+  // to its own loopback. Those are two capabilities an operator decides
+  // separately, and a field is the only way the agent can tell them apart —
+  // the destination alone cannot, because the same address can be reached
+  // either way.
+  //
+  // It is deliberately not a security boundary, and it does not need to be:
+  // declaring it can only ever make the policy applied to a connection
+  // stricter, never looser. A caller that lies and clears it gets the forward
+  // rules, which permit loopback and the explicit allow-list and nothing
+  // else. There is no value a caller can put here that reaches a host the
+  // configuration does not already permit it to reach.
+  bool socks = 3;
 }
 
 message ForwardResponse {
