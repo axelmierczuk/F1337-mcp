@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -773,26 +775,34 @@ func TestForward_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
 	// these connections, so what ends it has to be this side noticing that its
 	// own client is gone.
 	parked, releaseParked := startParkedServer(t)
+	// And a server that answers the forward's preflight and is then gone, so
+	// the sandbox-side dial fails on a forward that is already open and
+	// listening. That is the shape where carry ends before either pump starts.
+	departing, stopDeparting := startStoppableServer(t)
 
 	echoForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": echo.port})
 	crashForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": crashing.port})
 	parkedForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": parked.port})
+	departedForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": departing.port})
+	stopDeparting()
 
 	// One of each first, so gRPC's own long-lived goroutines and the pool's own
 	// descriptors are in the baseline rather than counted as a hold.
 	roundTrip(t, echoForward.LocalAddress, "warmup")
 	abortedRoundTrip(t, crashForward.LocalAddress)
 	resetRoundTrip(t, parkedForward.LocalAddress)
-	waitForNoOpenConnections(t, f, echo.port, crashing.port, parked.port)
+	refusedRoundTrip(t, departedForward.LocalAddress)
+	waitForNoOpenConnections(t, f, echo.port, crashing.port, parked.port, departing.port)
 
 	baseline := goleak.IgnoreCurrent()
-	descriptorsBefore, canCountDescriptors := openDescriptors()
+	descriptorsBefore, canCountDescriptors := descriptorSnapshot()
 
 	const (
 		sequential = 120
 		concurrent = 60
 		aborted    = 60
 		killed     = 40
+		refused    = 40
 		idle       = 40
 	)
 
@@ -834,6 +844,13 @@ func TestForward_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
 		resetRoundTrip(t, parkedForward.LocalAddress)
 	}
 
+	// And connections the sandbox side refuses, on a forward that is open and
+	// listening: the local socket is accepted and the connection ends on the
+	// agent's answer, before either pump exists.
+	for range refused {
+		refusedRoundTrip(t, departedForward.LocalAddress)
+	}
+
 	// And connections that do nothing, held open. A browser's keep-alive
 	// connection through a forward is exactly this: parked, with a send pump
 	// parked in conn.Read waiting for a client that has no reason to speak.
@@ -851,7 +868,7 @@ func TestForward_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
 	}
 
 	// Now the count, with every forward still open and still listening.
-	waitForNoOpenConnections(t, f, echo.port, crashing.port, parked.port)
+	waitForNoOpenConnections(t, f, echo.port, crashing.port, parked.port, departing.port)
 
 	// The stand-in server's own sockets go first, and only now: the forward has
 	// already been observed releasing every connection, so what is left to count
@@ -861,13 +878,18 @@ func TestForward_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
 	goleak.VerifyNone(t, baseline)
 
 	if canCountDescriptors {
-		descriptorsAfter, _ := openDescriptors()
-		// Slack, not equality: the fixture's own gRPC connection and the agent's
-		// listeners move a little underneath this. What it must not do is grow
-		// with the connections that just went through.
-		assert.LessOrEqualf(t, descriptorsAfter, descriptorsBefore+16,
-			"descriptors grew from %d to %d across %d forwarded connections; goleak does not see a socket",
-			descriptorsBefore, descriptorsAfter, sequential+concurrent+aborted+killed+idle)
+		descriptorsAfter, _ := descriptorSnapshot()
+		// No growth at all, rather than a tolerance. Everything opened above is
+		// a connection that has been observed to end, and the listeners were
+		// open before the baseline was taken, so there is nothing left for a
+		// tolerance to cover — and a tolerance is where a leak of one descriptor
+		// every seven connections hides. This started as a tolerance of sixteen,
+		// which was enough to hide twenty-two.
+		assert.LessOrEqualf(t, len(descriptorsAfter), len(descriptorsBefore),
+			"descriptors grew from %d to %d across %d forwarded connections, and goleak does not see a socket: %s",
+			len(descriptorsBefore), len(descriptorsAfter),
+			sequential+concurrent+aborted+killed+refused+idle,
+			describeNewDescriptors(descriptorsBefore, descriptorsAfter))
 	}
 
 	// And the forward still works, so none of the above was achieved by
@@ -899,15 +921,60 @@ func openConnections(f *liveFixture, remotePort int) int {
 	return -1
 }
 
-// openDescriptors counts this process's open descriptors, and reports whether
-// the platform can be asked at all — Windows cannot, and skipping the count
-// there is better than a count that means something else.
-func openDescriptors() (int, bool) {
-	entries, err := os.ReadDir("/dev/fd")
-	if err != nil {
-		return 0, false
+// descriptorSnapshot lists this process's open descriptors with whatever the
+// platform will say about each one, and reports whether the platform can be
+// asked at all — Windows cannot, and skipping the count there is better than a
+// count that means something else.
+//
+// Linux resolves each entry to "socket:[inode]", "pipe:[inode]" or a path,
+// which is what makes a failure name itself; macOS answers the count only. The
+// count is the assertion either way.
+func descriptorSnapshot() (map[int]string, bool) {
+	for _, dir := range []string{"/proc/self/fd", "/dev/fd"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		out := make(map[int]string, len(entries))
+		for _, entry := range entries {
+			fd, err := strconv.Atoi(entry.Name())
+			if err != nil {
+				continue
+			}
+			// Best effort: a descriptor can close underneath this, and macOS
+			// does not answer at all.
+			target, _ := os.Readlink(filepath.Join(dir, entry.Name()))
+			out[fd] = target
+		}
+		return out, true
 	}
-	return len(entries), true
+	return nil, false
+}
+
+// describeNewDescriptors summarises what appeared between two snapshots, so a
+// failure names the path that leaked rather than leaving it to be bisected.
+// Descriptor numbers are reused, so this is a lower bound on what is new — the
+// count is the assertion, and this is the lead.
+func describeNewDescriptors(before, after map[int]string) string {
+	counts := map[string]int{}
+	for fd, target := range after {
+		if _, had := before[fd]; had {
+			continue
+		}
+		if target == "" {
+			target = "(this platform does not say what it is)"
+		}
+		counts[target]++
+	}
+	if len(counts) == 0 {
+		return "no descriptor is new by number, so the growth is in descriptors that replaced closed ones"
+	}
+	lines := make([]string, 0, len(counts))
+	for target, n := range counts {
+		lines = append(lines, fmt.Sprintf("%d x %s", n, target))
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "; ")
 }
 
 // ---------------------------------------------------------------- helpers
@@ -929,10 +996,32 @@ func startHTTPServer(t *testing.T, body string) remoteServer {
 }
 
 // startEchoServer runs a TCP echo server on loopback.
+//
+// Copied by hand rather than with io.Copy, and that is not a style choice.
+// io.Copy between two TCP connections takes Linux's splice(2) path, which
+// borrows a pipe from a runtime-wide pool for as long as the copy is running
+// and returns it to a sync.Pool afterwards — so the pipes survive until a
+// garbage collection, and their number tracks how many copies were in flight at
+// once. That is invisible on macOS, which has no splice, and it put twenty-two
+// descriptors belonging to *this stand-in server* into
+// TestForward_ReleasesEveryConnectionWhileItStaysOpen's count of what the
+// forward was holding. A measurement of the forward must not be paid for by the
+// fixture it forwards to.
 func startEchoServer(t *testing.T) remoteServer {
 	return startTCPServer(t, func(conn net.Conn) {
 		defer func() { _ = conn.Close() }()
-		_, _ = io.Copy(conn, conn)
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				if _, writeErr := conn.Write(buf[:n]); writeErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
 	})
 }
 
@@ -946,6 +1035,41 @@ func startReadThenReplyServer(t *testing.T, reply string) remoteServer {
 		}
 		_, _ = conn.Write([]byte(reply))
 	})
+}
+
+// startStoppableServer answers and closes, and can be stopped mid-test so that
+// the sandbox-side dial starts failing on a forward that is already open. That
+// is the path where carry returns before either pump has started — the local
+// socket is accepted, the stream is opened, and the connection ends on the
+// agent's answer — and it is a real state: a forward preflights successfully
+// and the dev server behind it exits a minute later.
+func startStoppableServer(t *testing.T) (remoteServer, func()) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	var accept sync.WaitGroup
+	accept.Add(1)
+	go func() {
+		defer accept.Done()
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			_ = lis.Close()
+			accept.Wait()
+		})
+	}
+	t.Cleanup(stop)
+	return remoteServer{port: lis.Addr().(*net.TCPAddr).Port}, stop
 }
 
 // startResettingServer reads a request and then resets the connection instead
@@ -1087,6 +1211,22 @@ func roundTrip(t *testing.T, address, payload string) {
 	got, err := io.ReadAll(conn)
 	require.NoError(t, err)
 	require.Equal(t, payload, string(got))
+}
+
+// refusedRoundTrip opens a connection through a forward whose sandbox-side
+// target has gone away. The local socket is accepted and the stream is opened;
+// the agent's dial fails, and the connection ends on that answer rather than on
+// anything either pump did.
+func refusedRoundTrip(t *testing.T, address string) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	require.NoError(t, err, "the listener is still there even when its target is not")
+	defer func() { _ = conn.Close() }()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(30*time.Second)))
+
+	// Dropped rather than answered, and either an EOF or a reset is a drop.
+	_, _ = conn.Write([]byte("a request with nothing behind it"))
+	_, _ = io.ReadAll(conn)
 }
 
 // abortedRoundTrip sends a request whose far side is reset before it answers,
