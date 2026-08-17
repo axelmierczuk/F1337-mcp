@@ -53,8 +53,37 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go build ./...
-      - run: go vet ./...
+      # With the integration tag, so the end-to-end suite is typechecked on
+      # every platform including the one it skips itself on. A test that does
+      # not compile under GOOS=windows has reached this repository's CI once
+      # already, and `go test ./...` below cannot see a tagged file.
+      - run: go vet -tags integration ./...
       - run: go test -race -count=1 ./...
+
+  integration:
+    name: Integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both platforms the suite can drive. It skips itself on Windows —
+        # the workloads it runs on a sandbox are POSIX — and says so rather
+        # than reporting a coverage it does not have; see test/e2e/README.md.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: End-to-end suite
+        run: make test-integration
+      # The container scenario runs only on Linux, where the runner has a
+      # Docker daemon. It is the one place "the timeout left no survivors" can
+      # be asserted against a whole PID namespace instead of a process group.
+      - name: End-to-end suite (containerised tree-kill)
+        if: runner.os == 'Linux'
+        run: make test-integration-docker
 
   lint:
     name: Lint

@@ -2,6 +2,13 @@ version: "2"
 
 run:
   timeout: 5m
+  # The end-to-end suite is behind `//go:build integration` so that
+  # `go test ./...` stays fast. A tag that hides a package from the test runner
+  # hides it from the linters too, and an unlinted package is exactly where the
+  # findings this repo has already shipped twice — a gosec hit and a test that
+  # did not compile under another GOOS — come from.
+  build-tags:
+    - integration
 
 # Report every finding. The defaults cap a linter at 50 issues and, worse, cap
 # repeated issues with the same text at 3 — which silently truncated the G103
