@@ -23,30 +23,66 @@ fleetctl ca init
 Writes the CA key and certificate to `~/.config/fleet/ca/`. The signing key
 never leaves this directory, and no MCP tool can read it.
 
-Print the fingerprint to pin during enrollment:
+`ca init` prints the CA fingerprint in a box. **Keep it.** Every enrolling host
+pins it, and a host enrolled without it trusts whatever answers on the network.
+Read it again at any time:
 
 ```sh
 fleetctl ca fingerprint
-# 9f2c8a1e...
+# SHA256 Fingerprint=9F:2C:8A:1E:...
 ```
 
-## 3. Start the enrollment endpoint
+## 3. Issue this workstation's identity
+
+```sh
+fleetctl ca sign --profile control
+```
+
+Writes `control.crt` and `control.key` beside the registry. This is the client
+certificate `fleet-mcp` and `fleetctl list` present to agents; without it they
+can see which hosts are enrolled but cannot talk to any of them.
+
+## 4. Start the enrollment endpoint
 
 ```sh
 fleetctl serve --listen 0.0.0.0:9443
 ```
 
-Only needed while enrolling hosts. Stop it afterwards.
+**Stop it once your hosts have enrolled.** It is the only endpoint an
+unauthenticated caller can reach, a fleet is enrolled in minutes and runs for
+months, and an enrollment endpoint left listening is attack surface that buys
+nothing for almost all of its uptime.
 
-## 4. Mint a token
+## 5. Mint a token
 
 ```sh
-fleetctl enroll mint --name build-box --address build-box.internal:8722 --ttl 15m
-# token: sbx_ey...
+fleetctl enroll mint --name build-box --address build-box.internal:8722 \
+  --control your-workstation:9443 --ttl 15m
+```
+
+Which prints the token, its id, the CA fingerprint, and the command to run on
+the host — token, control address and fingerprint already filled in:
+
+```
+token:          sbx_ey...
+token-id:       bac4a8a2b7e3
+name:           build-box
+expires:        2026-08-17T18:57:20Z (in 15m0s)
+ca-fingerprint: 9F:2C:8A:1E:...
+
+Run this on the host, as-is:
+
+  curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
+    | sh -s -- --token sbx_ey... \
+        --control your-workstation:9443 \
+        --ca-fingerprint 9F:2C:8A:1E:... \
+        --listen 0.0.0.0:8722
 ```
 
 Single-use and short-lived. Getting it to the host is your job — the same way
-you would move any other bootstrap secret.
+you would move any other bootstrap secret. Without `--control` the command names
+this machine's hostname and says so, so pass it when the host reaches you by
+some other name.
 
 `--name` and `--address` are what the token authorizes, and the certificate the
 host is issued carries exactly those. An enrolling host cannot widen either, so
@@ -54,33 +90,32 @@ give the address you will actually dial the sandbox by: without it the leaf
 names only `build-box`, and a control plane connecting to
 `build-box.internal:8722` will reject it.
 
-## 5. Install the agent
-
-On the sandbox host:
+Changed your mind, or the token did not reach the host? Withdraw it by id:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
-  | sh -s -- --token sbx_ey... \
-             --control your-workstation:9443 \
-             --ca-fingerprint 9f2c8a1e... \
-             --root /home/build/workspace
+fleetctl enroll revoke bac4a8a2b7e3
+fleetctl enroll list                 # outstanding tokens, with state and expiry
 ```
 
-Windows, in an elevated PowerShell:
+`enroll list` never shows a token's value, in any output mode. The store keeps
+only a hash; the plaintext exists once, in the output above.
 
-```powershell
-$s = irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.ps1
-& ([scriptblock]::Create($s)) -Token sbx_ey... `
-    -Control your-workstation:9443 `
-    -CaFingerprint 9f2c8a1e... `
-    -Root C:\workspace
-```
+## 6. Install the agent
+
+Paste the command `enroll mint` printed. Add `--root` if you want to record the
+paths the agent should stay within — but read
+[docs/security.md](security.md#filesystem-confinement) first, because roots are
+enforced only on an agent with `exec` disabled.
+
+Windows hosts get the PowerShell form, printed directly below the shell one.
 
 Prefer not to pipe to a shell? Download the archive from the releases page,
 check it against `checksums.txt`, then run `fleet-agent enroll` yourself with
 the same flags.
 
-## 6. Wire up your agent CLI
+Then stop `fleetctl serve`.
+
+## 7. Wire up your agent CLI
 
 Add to `mcp.json`:
 
@@ -99,9 +134,16 @@ Restart the CLI. Confirm the fleet is visible:
 
 ```sh
 fleetctl list
+# NAME       ADDRESS                   PLATFORM     AGENT  HEALTH   LAST SEEN  DETAIL
+# build-box  build-box.internal:8722   linux/amd64  v0.3.0 serving  2s ago
 ```
 
-## 7. Use it
+`list` probes every sandbox concurrently under a per-host deadline, so a
+powered-off host is reported `unreachable` rather than holding up the listing.
+It reads health through the same client the MCP server uses, so `fleetctl list`
+and `fleet_list` cannot disagree about whether a host is up.
+
+## 8. Use it
 
 ```
 fleet_list()                                    → build-box (linux/amd64, serving)
@@ -109,10 +151,31 @@ fleet_select(name="build-box")                  → selected
 fleet_exec(argv=["go","test","./..."])          → exit 0
 ```
 
+## Operating the fleet
+
+```sh
+fleetctl list                     # the fleet, with health
+fleetctl list --json              # the same, for scripting
+fleetctl info build-box           # one host in full: resources, roots, uptime
+fleetctl remove build-box         # deregister locally; the host is untouched
+fleetctl version
+```
+
+`--json` is available on every command that reports something, and is the
+supported interface for scripts — the tables are laid out for people.
+
+`remove` is local only. The agent keeps running and keeps its certificate, so a
+removed sandbox can be re-registered without re-enrolling; to actually stop it
+serving, uninstall the agent on the host.
+
+Replacing the CA without a flag day is
+[docs/security.md → Rotating the CA](security.md#rotating-the-ca).
+
 ## Adding more hosts
 
-Repeat steps 4 and 5. `--name` distinguishes them; labels let the model choose
-by capability rather than hostname:
+Repeat steps 4–6. Restart `fleetctl serve` while you do; stop it again after.
+`--name` distinguishes hosts; labels let the model choose by capability rather
+than hostname:
 
 ```sh
 fleetctl enroll mint --name gpu-01 --address gpu-01.internal:8722 \

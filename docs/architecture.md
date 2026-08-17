@@ -28,14 +28,22 @@
 
    ┌──────────────────────────────────────┐
    │ fleetctl                (:9443)      │
+   │   internal/cli/fleetctl              │  operator commands
    │   internal/security/ca               │  CA, signing, rotation
    │   internal/security/enroll           │  EnrollmentService, tokens
+   │   internal/client                    │  the same client fleet-mcp uses
    └──────────────────────────────────────┘
 ```
 
 `fleetctl` is a separate control plane rather than a subcommand of the MCP
 server for one reason: the MCP server is a process a model can reach. The CA
 signing key must not be.
+
+It reads the fleet through `internal/client` — the same package, TLS
+configuration and health vocabulary `fleet-mcp` uses — rather than through
+anything of its own. `fleetctl list` is what an operator reaches for when the
+model reports a sandbox as unreachable, and a CLI with a second idea of fleet
+health would answer that question about itself instead of about the fleet.
 
 ## Selection under a stateless protocol
 
