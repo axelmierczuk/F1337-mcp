@@ -9,7 +9,7 @@ export PATH := $(TOOLS_DIR):$(PATH)
 BUF_VERSION            := v1.72.0
 PROTOC_GEN_GO_VERSION  := v1.36.12
 PROTOC_GEN_GRPC_VERSION:= v1.6.2
-GOLANGCI_VERSION       := v2.6.2
+GOLANGCI_VERSION       := v2.6.1
 GO_TOOLCHAIN           := go1.25.13
 
 # Everything above that decides what ends up in .tools/, named once so CI can
