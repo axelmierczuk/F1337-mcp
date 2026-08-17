@@ -20,6 +20,7 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // supervisorConfig is every knob the supervisor has, resolved once.
@@ -28,9 +29,12 @@ import (
 // defaults with no config key, kept here rather than as package constants so a
 // test can compress a sixty-second stability window into fifty milliseconds
 // without the suite depending on wall-clock patience.
+// max_concurrent is deliberately absent: it is an agent-wide cap, held by the
+// shared policy limiter every service that spawns a process takes slots from,
+// and a copy of it here is how an agent ends up running two limits' worth of
+// processes. See Supervisor.slots.
 type supervisorConfig struct {
 	stateDir           string
-	maxConcurrent      int
 	maxLogBytes        int64
 	ringBufferLines    int
 	defaultGracePeriod time.Duration
@@ -70,7 +74,6 @@ func defaultSupervisorConfig(cfg *agent.Config) supervisorConfig {
 	pc := cfg.Process
 	sc := supervisorConfig{
 		stateDir:           cfg.StateDir,
-		maxConcurrent:      pc.MaxConcurrent,
 		maxLogBytes:        pc.MaxLogBytes,
 		ringBufferLines:    pc.RingBufferLines,
 		defaultGracePeriod: pc.DefaultGracePeriod.Duration(),
@@ -109,6 +112,17 @@ type Supervisor struct {
 	log   *slog.Logger
 	store *store
 
+	// slots is the agent-wide concurrency limit, shared with every other
+	// service that spawns a process. The supervisor does not keep a count of
+	// its own — a second count is a second limit, and an agent configured for
+	// 32 that enforces 32 in two places runs 64.
+	//
+	// A record holds one slot from the moment it is admitted until it stops
+	// running. A restart therefore has to take one again, and at capacity it
+	// does not get one: the alternative is a crash loop quietly walking past
+	// the operator's number. The refusal is written into the process's own log.
+	slots *policy.Policy
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -116,6 +130,15 @@ type Supervisor struct {
 	records map[string]*record
 	order   []string
 	closed  bool
+
+	// admitted holds the starts that have passed the name and concurrency
+	// checks but whose record is not yet live. Without it those checks are a
+	// read-modify-write with the lock dropped in the middle: two StartProcess
+	// calls both read "the name is free" and "there is a slot" before either
+	// has registered anything, and the agent ends up supervising two processes
+	// under one name, or one more than max_concurrent. Neither is recoverable
+	// afterwards — the second process is already spawned.
+	admitted map[*admission]struct{}
 
 	// wg covers every goroutine the supervisor owns: monitors, probes and
 	// restart timers. Close waits on it, which is what keeps a test's goroutine
@@ -131,19 +154,28 @@ type Supervisor struct {
 
 // newSupervisor builds a supervisor and re-adopts whatever the state directory
 // says was running.
-func newSupervisor(cfg supervisorConfig, log *slog.Logger) (*Supervisor, error) {
+func newSupervisor(cfg supervisorConfig, slots *policy.Policy, log *slog.Logger) (*Supervisor, error) {
+	if slots == nil {
+		// Not a convenience default. A nil limiter here would mean the
+		// supervisor either enforces nothing or invents a limit of its own,
+		// and the second of those is the bug this parameter exists to make
+		// impossible.
+		return nil, errors.New("process: a shared policy limiter is required; see agent.Deps.Policy")
+	}
 	st, err := newStore(cfg.stateDir)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Supervisor{
-		cfg:     cfg,
-		log:     log,
-		store:   st,
-		ctx:     ctx,
-		cancel:  cancel,
-		records: map[string]*record{},
+		cfg:      cfg,
+		log:      log,
+		slots:    slots,
+		store:    st,
+		ctx:      ctx,
+		cancel:   cancel,
+		records:  map[string]*record{},
+		admitted: map[*admission]struct{}{},
 	}
 	s.adoptAll()
 	return s, nil
@@ -179,6 +211,16 @@ func (s *Supervisor) Close() error {
 
 		if capt != nil {
 			capt.close()
+			// After the tailers have stopped, not before. close signals them
+			// and waits, and a read already in flight completes inside it —
+			// so an offset read beforehand names a position the agent has
+			// already gone past. Persisting that has the next agent re-read
+			// bytes it has turned into log lines once already, and a
+			// re-adopted process's history begins with a duplicate of its own
+			// last few hundred lines.
+			r.mu.Lock()
+			r.captureOffsets = capt.offsets()
+			r.mu.Unlock()
 		}
 		if group != nil {
 			// Close releases the handle. It never signals: the group was
@@ -188,6 +230,11 @@ func (s *Supervisor) Close() error {
 				errs = append(errs, err)
 			}
 		}
+		// The slot goes back with the daemon that held it. The process keeps
+		// running — that is the contract — and the next agent takes a slot for
+		// it again when it re-adopts it, so the limit is rebuilt from what is
+		// actually there rather than carried across a restart.
+		r.dropSlot()
 		// Persist last, after the final capture offsets are known, so the next
 		// agent resumes reading where this one stopped.
 		r.persist()
@@ -267,6 +314,41 @@ type startSpec struct {
 	maxLogBytes    int64
 }
 
+// slotWait bounds how long a start waits for a free concurrency slot.
+//
+// Long enough that a slot being handed back at the same moment is not reported
+// as a full agent, short enough that "the agent is at its limit" arrives as an
+// answer rather than as a call that appears to hang. Blocking indefinitely
+// would be worse than either: a StartProcess that waits for a dev server
+// somewhere else to exit is a tool call the model cannot interpret.
+const slotWait = 250 * time.Millisecond
+
+// acquireSlot takes one slot in the agent-wide concurrency limit, and explains
+// the refusal in the operator's vocabulary rather than the limiter's.
+func (s *Supervisor) acquireSlot() (release func(), err error) {
+	ctx, cancel := context.WithTimeout(s.ctx, slotWait)
+	defer cancel()
+
+	release, err = s.slots.Acquire(ctx)
+	if err != nil {
+		if errors.Is(s.ctx.Err(), context.Canceled) {
+			return nil, errors.New("process: supervisor is shutting down")
+		}
+		return nil, fmt.Errorf("the agent is already running %d processes, which is its process.max_concurrent limit — a limit it shares with every other service that starts one; stop a process or raise process.max_concurrent: %w",
+			s.slots.Caps().MaxConcurrent, policy.ErrTooManyProcesses)
+	}
+	return release, nil
+}
+
+// admission is a start that has claimed a process name but whose record is not
+// yet visible as live. It is held from the moment the name check passes until
+// the record reaches STARTING, so checking the name and taking it are one step
+// as far as any other start is concerned.
+//
+// The concurrency slot is a separate thing and comes from the shared limiter,
+// which does its own atomicity; the name has nowhere else to live.
+type admission struct{ name string }
+
 // start creates a record, spawns it, and returns it in STARTING (with a probe)
 // or RUNNING (without one).
 //
@@ -280,15 +362,22 @@ func (s *Supervisor) start(spec startSpec, replaceExisting bool) (*record, error
 	}
 
 	var replaced *record
-	live := 0
 	for _, r := range s.recordsLocked() {
-		st := r.currentState()
-		if !isLive(st) {
+		if !isLive(r.currentState()) {
 			continue
 		}
-		live++
 		if r.nameOf() == spec.name {
 			replaced = r
+		}
+	}
+	for adm := range s.admitted {
+		if adm.name == spec.name {
+			// A concurrent start of the same name that has been admitted but
+			// has not spawned yet. It cannot be replaced — there is nothing to
+			// stop — and it cannot be allowed to coexist, so this one loses.
+			s.mu.Unlock()
+			return nil, fmt.Errorf("a process named %q is already being started; wait for it and pass replace_existing if you want to take its place",
+				spec.name)
 		}
 	}
 	if replaced != nil && !replaceExisting {
@@ -296,26 +385,44 @@ func (s *Supervisor) start(spec startSpec, replaceExisting bool) (*record, error
 		return nil, fmt.Errorf("a process named %q is already %s (process_id %s); pass replace_existing to stop it and take its place",
 			spec.name, strings.ToLower(stateName(replaced.currentState())), replaced.id)
 	}
-	// The cap is counted against the processes that will still be live once the
-	// replacement has happened: replacing a process does not need a free slot.
-	if replaced == nil && live >= s.cfg.maxConcurrent {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("the agent is already supervising %d processes, which is its max_concurrent limit; stop one or raise process.max_concurrent",
-			s.cfg.maxConcurrent)
-	}
+	adm := &admission{name: spec.name}
+	s.admitted[adm] = struct{}{}
 	s.mu.Unlock()
+
+	// Released the moment the record holds the name itself, and again on every
+	// path out of here. Deleting twice is a no-op; not deleting at all would
+	// reserve the name for the life of the supervisor.
+	release := func() {
+		s.mu.Lock()
+		delete(s.admitted, adm)
+		s.mu.Unlock()
+	}
+	defer release()
 
 	if replaced != nil {
 		s.log.Info("replacing process", "name", spec.name, "process_id", replaced.id)
-		if err := s.stopRecord(replaced, s.cfg.defaultGracePeriod, true); err != nil {
+		if err := s.stopRecord(replaced, s.cfg.defaultGracePeriod); err != nil {
 			return nil, fmt.Errorf("could not stop the existing process named %q: %w", spec.name, err)
 		}
 	}
 
-	id := s.newProcessID(spec.name)
-	dir, err := s.store.dir(id)
+	// After the replacement, not before: the process being replaced gives its
+	// slot back when it stops, so replacing does not need a free one.
+	slot, err := s.acquireSlot()
 	if err != nil {
 		return nil, err
+	}
+	handed := false
+	defer func() {
+		if !handed {
+			slot()
+		}
+	}()
+
+	id := s.newProcessID(spec.name)
+	dir, err2 := s.store.dir(id)
+	if err2 != nil {
+		return nil, err2
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("process: create state directory %s: %w", dir, err)
@@ -327,6 +434,8 @@ func (s *Supervisor) start(spec startSpec, replaceExisting bool) (*record, error
 	}
 
 	r := newRecord(s, id, dir)
+	r.holdSlot(slot)
+	handed = true
 	r.buf = newLogBuffer(s.cfg.ringBufferLines, file)
 	r.name = spec.name
 	r.argv = spec.argv
@@ -350,8 +459,13 @@ func (s *Supervisor) start(spec startSpec, replaceExisting bool) (*record, error
 	s.mu.Unlock()
 
 	if err := r.setState(sandboxdv1.ProcessState_PROCESS_STATE_STARTING, nil); err != nil {
+		r.dropSlot()
 		return nil, err
 	}
+	// The record is live now, so it holds the name itself and the reservation
+	// would double-count it.
+	release()
+
 	if err := s.spawn(r, true); err != nil {
 		// The record stays, in CRASHED, rather than being deleted. A start that
 		// failed is something the caller needs to be able to read about, and a
@@ -672,7 +786,23 @@ func (s *Supervisor) maybeRestart(r *record, crashed bool, ranFor time.Duration)
 		return
 	}
 
+	// A run that has ended holds no slot: the cap counts processes that are
+	// running, not records that once were. So a restart has to take one, and at
+	// capacity it does not get one — the alternative is a crash loop quietly
+	// walking past the number the operator set. The reason goes in the
+	// process's own log, where whoever is wondering why it stayed down will
+	// find it.
+	slot, err := s.acquireSlot()
+	if err != nil {
+		s.log.Warn("not restarting: no free concurrency slot",
+			"process_id", r.id, "name", r.nameOf(), "error", err)
+		r.buf.note("supervisor: not restarting: " + err.Error())
+		return
+	}
+	r.holdSlot(slot)
+
 	if err := r.setState(sandboxdv1.ProcessState_PROCESS_STATE_RESTARTING, nil); err != nil {
+		r.dropSlot()
 		return
 	}
 
@@ -806,7 +936,7 @@ func (s *Supervisor) remove(r *record, force, deleteLogs bool) error {
 			return fmt.Errorf("process %s is %s; pass force to stop it and remove it anyway",
 				r.id, strings.ToLower(stateName(r.currentState())))
 		}
-		if err := s.stopRecord(r, s.cfg.defaultGracePeriod, true); err != nil {
+		if err := s.stopRecord(r, s.cfg.defaultGracePeriod); err != nil {
 			return err
 		}
 		// stopRecord is satisfied by RESTARTING — the run has ended — but a
@@ -854,6 +984,9 @@ func (s *Supervisor) remove(r *record, force, deleteLogs bool) error {
 	if err := r.buf.close(); err != nil {
 		s.log.Warn("could not close log buffer", "process_id", r.id, "error", err)
 	}
+	// A removed record is gone whatever state it was in, so its slot goes back
+	// here as well as on the transition that should already have released it.
+	r.dropSlot()
 	s.refreshLive()
 	return s.store.remove(r.id, deleteLogs)
 }

@@ -139,6 +139,12 @@ func (c *Config) JailEnforced() bool { return !c.Exec.IsEnabled() }
 
 // ProcessConfig bounds the background process supervisor (#11–#15).
 type ProcessConfig struct {
+	// MaxConcurrent is an agent-wide cap, not a per-service one. It is spelled
+	// under process.* because supervised processes are what it was written
+	// for, but what it bounds is how many processes this agent has running on
+	// somebody's host, and that is one quantity however many services can
+	// spawn one. Every such service takes its slots from the single limiter
+	// built from it; see Deps.Policy.
 	MaxConcurrent      int      `yaml:"max_concurrent"`
 	MaxLogBytes        int64    `yaml:"max_log_bytes"`
 	RingBufferLines    int      `yaml:"ring_buffer_lines"`

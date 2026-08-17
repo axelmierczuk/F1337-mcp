@@ -18,12 +18,13 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // newTestService wraps a test-timed supervisor in the gRPC surface, so the
 // request validation and the defaults are exercised by the same tests that
 // exercise the supervisor.
-func newTestService(t *testing.T, tweak ...func(*supervisorConfig)) *Service {
+func newTestService(t *testing.T, tweak ...func(*testSupervisorOptions)) *Service {
 	t.Helper()
 	ts := newTestSupervisor(t, tweak...)
 	return &Service{
@@ -153,7 +154,7 @@ func TestDuplicateNameNeedsReplaceExisting(t *testing.T) {
 
 func TestMaxConcurrentIsEnforced(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxConcurrent = 2 })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxConcurrent = 2 })
 
 	ts.startHelper("one", "sleep")
 	ts.startHelper("two", "sleep")
@@ -162,11 +163,33 @@ func TestMaxConcurrentIsEnforced(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "max_concurrent")
 	require.Contains(t, err.Error(), "2")
+	require.ErrorIs(t, err, policy.ErrTooManyProcesses)
+}
+
+// TestAFullAgentIsResourceExhausted. "Not now" and "not like this" are
+// different answers, and the code is how a caller tells them apart: a start
+// refused because the agent is full is worth retrying unchanged, and one
+// refused because argv is empty never will be.
+func TestAFullAgentIsResourceExhausted(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, func(c *testSupervisorOptions) { c.maxConcurrent = 1 })
+	ctx := context.Background()
+
+	_, err := svc.StartProcess(ctx, &sandboxdv1.StartProcessRequest{
+		Argv: helperArgv(t, "silent"), Name: "the-one", Env: helperEnviron(),
+	})
+	require.NoError(t, err)
+
+	_, err = svc.StartProcess(ctx, &sandboxdv1.StartProcessRequest{
+		Argv: helperArgv(t, "silent"), Name: "one-too-many", Env: helperEnviron(),
+	})
+	require.Equal(t, codes.ResourceExhausted, status.Code(err))
+	require.Contains(t, status.Convert(err).Message(), "max_concurrent")
 }
 
 func TestMaxConcurrentCountsOnlyLiveProcesses(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxConcurrent = 1 })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxConcurrent = 1 })
 
 	done := ts.startHelper("shortlived", "exit", "0")
 	waitState(t, done, 10*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
@@ -302,7 +325,7 @@ func TestManyShortLivedStartsLeaveNothingBehind(t *testing.T) {
 		t.Skip("starts a hundred processes")
 	}
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxConcurrent = 200 })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxConcurrent = 200 })
 
 	const runs = 100
 	require.Len(t, startShortLived(t, ts, "short", runs), runs)
@@ -317,7 +340,7 @@ func TestManyShortLivedStartsLeaveNothingBehind(t *testing.T) {
 // assertion.
 func TestConcurrentStartListRemove(t *testing.T) {
 	t.Parallel()
-	svc := newTestService(t, func(c *supervisorConfig) { c.maxConcurrent = 64 })
+	svc := newTestService(t, func(c *testSupervisorOptions) { c.maxConcurrent = 64 })
 	ctx := context.Background()
 
 	var starters, lister, remover sync.WaitGroup
@@ -376,6 +399,304 @@ func TestConcurrentStartListRemove(t *testing.T) {
 	lister.Wait()
 }
 
+// TestConcurrentStartsOfOneNameAdmitExactlyOne.
+//
+// The name check and the record's registration are a read-modify-write, and
+// dropping the lock between them lets every caller read "the name is free"
+// before any of them has taken it. The result is two dev servers under one
+// name fighting over a port, and neither the caller nor a later
+// replace_existing can tell which is which — the second start has already
+// happened by the time anyone could notice.
+func TestConcurrentStartsOfOneNameAdmitExactlyOne(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t)
+
+	const racers = 8
+	var wg sync.WaitGroup
+	results := make(chan error, racers)
+	for range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := ts.start(ts.helperSpec("one-name-only", "silent"), false)
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	admitted := 0
+	for err := range results {
+		if err == nil {
+			admitted++
+		}
+	}
+	require.Equal(t, 1, admitted, "exactly one of %d concurrent starts may take the name", racers)
+
+	live := 0
+	for _, r := range ts.snapshotRecords() {
+		if isLive(r.currentState()) {
+			live++
+		}
+	}
+	require.Equal(t, 1, live, "and only one process may be left running under it")
+}
+
+// TestConcurrentStartsRespectMaxConcurrent is the same read-modify-write, seen
+// through the cap rather than the name. An agent that runs more processes than
+// its operator allowed has no way to get back under the limit afterwards.
+func TestConcurrentStartsRespectMaxConcurrent(t *testing.T) {
+	t.Parallel()
+	const limit = 3
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxConcurrent = limit })
+
+	const racers = 12
+	var wg sync.WaitGroup
+	results := make(chan error, racers)
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := ts.start(ts.helperSpec(fmt.Sprintf("capped-%d", i), "silent"), false)
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	admitted := 0
+	for err := range results {
+		if err == nil {
+			admitted++
+		}
+	}
+	require.Equal(t, limit, admitted, "%d concurrent starts against a cap of %d", racers, limit)
+
+	live := 0
+	for _, r := range ts.snapshotRecords() {
+		if isLive(r.currentState()) {
+			live++
+		}
+	}
+	require.LessOrEqual(t, live, limit, "the agent must never supervise more than max_concurrent processes")
+}
+
+// newSupervisorWithPolicy builds a supervisor that shares a limiter with
+// whatever else the test wants to hold slots in it.
+func newSupervisorWithPolicy(t *testing.T, pol *policy.Policy, tweak ...func(*supervisorConfig)) *Supervisor {
+	t.Helper()
+	cfg := testConfig(t.TempDir())
+	for _, fn := range tweak {
+		fn(&cfg)
+	}
+	sup, err := newSupervisor(cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		for _, r := range sup.snapshotRecords() {
+			if isLive(r.currentState()) {
+				_ = sup.stopRecord(r, 200*time.Millisecond)
+			}
+		}
+		_ = sup.Close()
+	})
+	return sup
+}
+
+// TestTheConcurrencyLimitIsTheAgentsNotTheSupervisors.
+//
+// process.max_concurrent bounds how many processes this agent runs, not how
+// many each service runs. A supervisor counting its own live records enforces
+// the number a second time rather than sharing it, and an agent configured for
+// 32 then runs 32 supervised processes beside 32 exec commands — 64 against a
+// limit of 32, with neither service wrong about its own number, which is why
+// the mistake survives review.
+func TestTheConcurrencyLimitIsTheAgentsNotTheSupervisors(t *testing.T) {
+	t.Parallel()
+
+	pol := testPolicy(t, 2)
+	// Another service on this agent — ExecService, in the shape it arrives in
+	// with #40 — is holding one of the two slots.
+	elsewhere, err := pol.Acquire(context.Background())
+	require.NoError(t, err)
+
+	sup := newSupervisorWithPolicy(t, pol)
+	specOf := func(name string) startSpec {
+		return startSpec{
+			argv: helperArgv(t, "silent"), name: name, env: helperEnviron(),
+			restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+			maxLogBytes:   1 << 18,
+		}
+	}
+
+	_, err = sup.start(specOf("fits"), false)
+	require.NoError(t, err, "one slot is free, so one supervised process fits")
+
+	_, err = sup.start(specOf("does-not-fit"), false)
+	require.Error(t, err, "the agent is full, even though the supervisor itself is running only one")
+	require.Contains(t, err.Error(), "max_concurrent")
+
+	// And when the other service is done, the room reappears.
+	elsewhere()
+	_, err = sup.start(specOf("fits-now"), false)
+	require.NoError(t, err)
+}
+
+// TestAProcessGivesItsSlotBackOnEveryWayItStops. A slot held by a record that
+// is no longer running is a slot the agent has lost for good, and the limit
+// walks down to zero over the life of the daemon.
+func TestAProcessGivesItsSlotBackOnEveryWayItStops(t *testing.T) {
+	t.Parallel()
+
+	pol := testPolicy(t, 4)
+	sup := newSupervisorWithPolicy(t, pol)
+	specOf := func(name, mode string, args ...string) startSpec {
+		return startSpec{
+			argv: helperArgv(t, mode, args...), name: name, env: helperEnviron(),
+			restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+			maxLogBytes:   1 << 18,
+		}
+	}
+	idle := func(what string) {
+		waitFor(t, 10*time.Second, what, func() bool { return pol.InUse() == 0 })
+	}
+
+	// It exited on its own.
+	exiting, err := sup.start(specOf("exits", "exit", "0"), false)
+	require.NoError(t, err)
+	waitState(t, exiting, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
+	idle("an exited process to give its slot back")
+
+	// It was removed.
+	removed, err := sup.start(specOf("removed", "silent"), false)
+	require.NoError(t, err)
+	require.Equal(t, 1, pol.InUse())
+	require.NoError(t, sup.remove(removed, true, true))
+	idle("a removed process to give its slot back")
+
+	// It was replaced, and the replacement took the slot rather than a second one.
+	_, err = sup.start(specOf("replaced", "silent"), false)
+	require.NoError(t, err)
+	_, err = sup.start(specOf("replaced", "silent"), true)
+	require.NoError(t, err)
+	waitFor(t, 10*time.Second, "the replacement to hold exactly one slot",
+		func() bool { return pol.InUse() == 1 })
+
+	// The daemon stopped. The process keeps running — that is the contract —
+	// but the slot belongs to the daemon that was counting it, and the next
+	// agent takes one for it again when it re-adopts it.
+	require.NoError(t, sup.Close())
+	require.Zero(t, pol.InUse(), "Close must not leave the agent's limit spent")
+}
+
+// TestARestartTakesASlotAgain: a run that has ended holds no slot, so the run
+// that replaces it has to take one. Nothing else keeps the limit honest across
+// a service that restarts all day.
+func TestARestartTakesASlotAgain(t *testing.T) {
+	t.Parallel()
+
+	pol := testPolicy(t, 4)
+	// The stability window out of reach: a run that outlasts it resets the
+	// budget, and this waits for the budget to run out.
+	sup := newSupervisorWithPolicy(t, pol, func(c *supervisorConfig) { c.stabilityWindow = time.Hour })
+
+	r, err := sup.start(startSpec{
+		argv: helperArgv(t, "exit", "1", "20"), name: "restarts", env: helperEnviron(),
+		restartPolicy:  sandboxdv1.RestartPolicy_RESTART_POLICY_ALWAYS,
+		maxRestarts:    3,
+		restartBackoff: 20 * time.Millisecond,
+		maxLogBytes:    1 << 18,
+	}, false)
+	require.NoError(t, err)
+
+	waitFor(t, 30*time.Second, "the restart budget to be exhausted", func() bool {
+		return r.currentState() == sandboxdv1.ProcessState_PROCESS_STATE_CRASHED &&
+			r.status().GetRestartCount() >= 3
+	})
+	// Three restarts, each of which took a slot and gave it back. A slot taken
+	// per restart and never returned would have spent the whole limit by now.
+	waitFor(t, 10*time.Second, "the last run's slot to come back",
+		func() bool { return pol.InUse() == 0 })
+}
+
+// TestReadoptionTakesASlotInTheAgentLimit. A process that survived the last
+// agent is running on this host now. An agent that rebuilds its limit as empty
+// on every restart has a limit that means less every time it is upgraded.
+func TestReadoptionTakesASlotInTheAgentLimit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv: helperArgv(t, "silent"), name: "survives-upgrade", env: helperEnviron(),
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+	pid := int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+	require.NoError(t, first.Close())
+
+	pol := testPolicy(t, 1)
+	second, err := newSupervisor(testConfig(dir), pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = second.Close() })
+
+	adopted, ok := second.lookup(r.id)
+	require.True(t, ok)
+	require.True(t, isLive(adopted.currentState()), "state was %s", stateName(adopted.currentState()))
+	require.Equal(t, 1, pol.InUse(), "a re-adopted process occupies a slot in the new agent's limit")
+
+	_, err = second.start(startSpec{
+		argv: helperArgv(t, "silent"), name: "one-too-many", env: helperEnviron(),
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.Error(t, err, "the agent is full of processes it inherited")
+	require.Contains(t, err.Error(), "max_concurrent")
+}
+
+// TestStartingAProcessIsRefusedWhenExecIsDisabled.
+//
+// exec.enabled: false is the only configuration in which allowed_roots is a
+// boundary rather than a decoration, and it is that only because an agent that
+// runs commands does not need FileService to reach a path. Starting a
+// supervised process runs a command.
+func TestStartingAProcessIsRefusedWhenExecIsDisabled(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	disabled := false
+	svc.deps.Config.Exec.Enabled = &disabled
+	require.True(t, svc.deps.Config.JailEnforced(), "this is the configuration where the jail is real")
+
+	_, err := svc.StartProcess(ctx, &sandboxdv1.StartProcessRequest{
+		Argv: helperArgv(t, "silent"),
+		Name: "walks-past-the-jail",
+		Env:  helperEnviron(),
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.Contains(t, status.Convert(err).Message(), "exec.enabled")
+	require.Empty(t, svc.sup.snapshotRecords(), "and nothing was spawned")
+
+	// A restart is the same capability: it re-runs the same argv, and a record
+	// can outlive the config change that disabled exec.
+	_, err = svc.RestartProcess(ctx, &sandboxdv1.RestartProcessRequest{ProcessId: "anything-0001"})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.Contains(t, status.Convert(err).Message(), "exec.enabled")
+
+	// And with exec on — the default, and what every other test here runs —
+	// the same call works.
+	enabled := true
+	svc.deps.Config.Exec.Enabled = &enabled
+	_, err = svc.StartProcess(ctx, &sandboxdv1.StartProcessRequest{
+		Argv: helperArgv(t, "silent"),
+		Name: "allowed",
+		Env:  helperEnviron(),
+	})
+	require.NoError(t, err)
+}
+
 func TestSanitizeNameProducesUsablePathComponents(t *testing.T) {
 	t.Parallel()
 	for input, want := range map[string]string{
@@ -417,7 +738,7 @@ func TestStateMachineRefusesIllegalTransitions(t *testing.T) {
 func TestSupervisorCloseLeavesProcessesRunning(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sup, err := newSupervisor(testConfig(dir), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sup, err := newSupervisor(testConfig(dir), testPolicy(t, 16), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 
 	r, err := sup.start(startSpec{
@@ -443,7 +764,6 @@ func TestSupervisorCloseLeavesProcessesRunning(t *testing.T) {
 func testConfig(dir string) supervisorConfig {
 	return supervisorConfig{
 		stateDir:              dir,
-		maxConcurrent:         16,
 		maxLogBytes:           256 * 1024,
 		ringBufferLines:       200,
 		defaultGracePeriod:    300 * time.Millisecond,

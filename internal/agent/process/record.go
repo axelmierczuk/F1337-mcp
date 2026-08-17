@@ -95,6 +95,13 @@ type record struct {
 	// directory that is being removed.
 	removed bool
 
+	// slot is this record's share of the agent-wide concurrency limit, held
+	// for as long as it is live and released the moment it is not. It is a
+	// release function rather than a bool because the limit lives in the
+	// shared policy — the supervisor deliberately keeps no count of its own,
+	// so there is nothing here to decrement.
+	slot func()
+
 	// persistMu serialises the write itself, and is what makes the removed
 	// flag sufficient. Without it a persist that read removed as false could
 	// still be inside WriteAtomic when the directory is deleted, and the rename
@@ -154,6 +161,14 @@ func (r *record) setState(to sandboxdv1.ProcessState, mutate func()) error {
 	r.notifyLocked()
 	r.mu.Unlock()
 
+	if isLive(from) && !isLive(to) {
+		// The one place a concurrency slot is given back, so that every way a
+		// process can stop running gives it back — the ones nobody enumerated
+		// as much as the ordinary exit. A slot released per terminal path
+		// instead would be a slot leaked by whichever path was added later.
+		r.dropSlot()
+	}
+
 	r.sup.log.Debug("process state",
 		"process_id", r.id, "name", r.name, "from", stateName(from), "to", stateName(to))
 	// The supervised-process count Health reports is derived from the states,
@@ -169,10 +184,50 @@ func (r *record) setState(to sandboxdv1.ProcessState, mutate func()) error {
 // previous agent left in some state rather than moving it through one.
 func (r *record) restoreState(to sandboxdv1.ProcessState) {
 	r.mu.Lock()
+	from := r.state
 	r.state = to
 	r.notifyLocked()
 	r.mu.Unlock()
+	if isLive(from) && !isLive(to) {
+		// Adoption reaches ORPHANED and CRASHED this way rather than through
+		// the table, so the slot has to come back here too.
+		r.dropSlot()
+	}
 	r.sup.refreshLive()
+}
+
+// holdSlot attaches a concurrency slot to the record.
+//
+// A record that already holds one keeps it and the redundant slot goes
+// straight back. Assigning over the field instead would drop a release nobody
+// else holds, and the agent's limit would shrink by one for the life of the
+// daemon — the kind of leak that shows up months later as a limit that no
+// longer means the number in the config.
+func (r *record) holdSlot(release func()) {
+	r.mu.Lock()
+	held := r.slot != nil
+	if !held {
+		r.slot = release
+	}
+	r.mu.Unlock()
+	if held {
+		release()
+	}
+}
+
+// dropSlot returns this record's share of the agent-wide concurrency limit.
+//
+// Safe when none is held and safe to call twice: the release the limiter hands
+// out is itself once-only, and clearing the field means a later restart takes
+// a fresh slot rather than reusing a spent release.
+func (r *record) dropSlot() {
+	r.mu.Lock()
+	release := r.slot
+	r.slot = nil
+	r.mu.Unlock()
+	if release != nil {
+		release()
+	}
 }
 
 // notifyLocked wakes every waiter. Callers must hold mu.

@@ -5,6 +5,7 @@ package process
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -21,40 +22,130 @@ import (
 // still accumulate a zombie per start until the agent hits its process limit.
 // Linux is where the evidence is readable, so this is where the test lives; the
 // portable half is TestManyShortLivedStartsLeaveNothingBehind.
+// It asserts on the zombies these hundred starts left, not on the zombies in
+// the table. The package runs its tests in parallel, so "the table is clean"
+// is a fact about the whole binary that this test cannot establish and has no
+// business failing on: a leak in a sibling test made this one red on main
+// while the sibling passed. TestMain owns that assertion now, once, after
+// everything has finished — which is also the only place it is deterministic.
 func TestNoZombiesAfterAHundredShortLivedStarts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts a hundred processes")
 	}
 	t.Parallel()
 
-	require.Empty(t, zombieChildren(t), "the test started with zombies already present")
+	before := map[int]bool{}
+	for _, pid := range zombieChildPIDs() {
+		before[pid] = true
+	}
 
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxConcurrent = 200 })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxConcurrent = 200 })
 
 	const runs = 100
-	require.Len(t, startShortLived(t, ts, "reaped", runs), runs)
+	records := startShortLived(t, ts, "reaped", runs)
+	require.Len(t, records, runs)
+
+	// Which pids this test is actually responsible for. Without this the
+	// failure message cannot tell "the supervisor did not reap" from "another
+	// test in this package left one lying around", and the two have nothing to
+	// do with each other — the first is #11's criterion failing, the second is
+	// a cleanup that killed a child and never collected it. main has already
+	// been red for the second while reading like the first.
+	mine := map[int]bool{}
+	for _, r := range records {
+		if pid := int(r.status().GetPid()); pid > 0 {
+			mine[pid] = true
+		}
+	}
 
 	// The wait that produced the exit status is the same call that reaps, so by
 	// the time the states have settled the reaping has happened. A short retry
 	// covers the scheduler, not a missing Wait.
-	var zombies []int
+	var ours, others []int
 	for range 50 {
-		zombies = zombieChildren(t)
-		if len(zombies) == 0 {
+		ours, others = nil, nil
+		for _, pid := range zombieChildPIDs() {
+			switch {
+			case mine[pid]:
+				ours = append(ours, pid)
+			case !before[pid]:
+				others = append(others, pid)
+			}
+		}
+		if len(ours) == 0 && len(others) == 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("%d zombie children left in the process table after %d starts: %v", len(zombies), runs, zombies)
+
+	require.Emptyf(t, ours,
+		"the supervisor left %d of its own %d children unreaped: %v — #11's criterion", len(ours), runs, ours)
+	t.Fatalf("%d zombie children appeared while this test ran but none of them is one of its own: %v — "+
+		"another test in this package started a process and killed it without collecting it", len(others), others)
 }
 
-// zombieChildren reads /proc and returns the pids of this process's children
-// that are in state Z.
-func zombieChildren(t *testing.T) []int {
-	t.Helper()
+// TestKillingAChildIsNotCollectingIt is the mechanism behind the failure that
+// kept main red, kept as a test because the explanation is counter-intuitive
+// and the next person to write a cleanup will reach for the same helper.
+//
+// A killed child stays in the process table until its parent collects it, and
+// platform.ProcessExists reports it as existing — correctly, and on purpose,
+// because for the pid-reuse guard a zombie does still hold the pid. So a
+// "wait for it to be gone" loop built on that can never finish for a child of
+// this binary, and every test using one held a zombie for its whole timeout
+// while the rest of the suite ran beside it.
+func TestKillingAChildIsNotCollectingIt(t *testing.T) {
+	t.Parallel()
 
-	entries, err := os.ReadDir("/proc")
+	exe, err := os.Executable()
 	require.NoError(t, err)
+	child := exec.Command(exe, "-helper", "sleep") //nolint:gosec // the command is this test binary
+	child.Env = helperEnviron()
+	require.NoError(t, child.Start())
+	pid := child.Process.Pid
+
+	require.NoError(t, child.Process.Kill())
+	waitFor(t, 10*time.Second, "the killed child to become a zombie", func() bool { return pidIsZombie(pid) })
+
+	require.True(t, pidAlive(pid), "a zombie still holds its pid, which is why a liveness check cannot see it go")
+	require.False(t, pidRunning(pid), "but it is not running, which is what a survivor check is asking")
+
+	// So the helper the suite waits with must not be built on liveness alone.
+	started := time.Now()
+	awaitGone(pid, 10*time.Second)
+	require.Less(t, time.Since(started), 2*time.Second,
+		"awaitGone spun on a zombie; every cleanup that calls it then holds one for its whole timeout, "+
+			"and a parallel test reading the process table is right to fail on it")
+
+	// Collecting it is what removes it.
+	require.Error(t, child.Wait(), "it was killed, so Wait reports the signal")
+	waitFor(t, 10*time.Second, "the collected child to leave the process table", func() bool { return !pidAlive(pid) })
+}
+
+// pidIsZombie reports whether a pid names a process that has exited and is
+// waiting to be collected.
+//
+// It is the difference between "gone" and "answers kill(pid, 0)". A zombie
+// holds its pid forever — which is exactly why platform.ProcessExists counts it
+// as existing, because for the pid-reuse guard it does — so a survivor check
+// built on that alone can never see a killed process leave. This repository has
+// been bitten by that once already, in #34.
+func pidIsZombie(pid int) bool {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat")) //nolint:gosec // reading the process table is the point
+	if err != nil {
+		return false
+	}
+	state, _, ok := parseStatStateAndPPID(data)
+	return ok && state == 'Z'
+}
+
+// zombieChildPIDs reads /proc and returns the pids of this process's children
+// that are in state Z.
+func zombieChildPIDs() []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
 
 	self := os.Getpid()
 	var zombies []int

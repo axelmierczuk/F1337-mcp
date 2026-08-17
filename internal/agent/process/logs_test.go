@@ -1,8 +1,13 @@
 package process
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -66,7 +71,7 @@ func TestStreamsAreDistinguishableAndOrdered(t *testing.T) {
 
 func TestRingBufferEvictsOldestFirst(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.ringBufferLines = 10 })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.ringBufferLines = 10 })
 
 	r := ts.startHelper("evicting", "echo", "50", "0", "line")
 	waitState(t, r, 10*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
@@ -99,15 +104,22 @@ func TestLogsSurviveTheProcessExiting(t *testing.T) {
 
 func TestFileRotationPrunesOldSegments(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.retainSegments = 2 })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.retainSegments = 2 })
 
-	spec := ts.helperSpec("rotating", "echo", "3000", "0", "rotate-me-with-some-padding-to-make-the-record-larger")
+	// A thousand lines of that length against a 16 KiB cap is a dozen
+	// rotations, which proves the rotation and the pruning as well as three
+	// thousand did and costs a third of the time on a runner that is already
+	// running every other package's tests.
+	spec := ts.helperSpec("rotating", "echo", "1000", "0", "rotate-me-with-some-padding-to-make-the-record-larger")
 	spec.maxLogBytes = 16 * 1024
 	r, err := ts.start(spec, false)
 	require.NoError(t, err)
 
-	waitState(t, r, 30*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
-	waitForLine(t, r, 10*time.Second, "rotate-me-with-some-padding-to-make-the-record-larger 2999")
+	waitState(t, r, 60*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
+	// Three thousand lines through the tailer, the rotation and the ring, on a
+	// runner already running every other package's tests. The budget is how
+	// long the assertion is willing to wait, not what it asserts.
+	waitForLine(t, r, 60*time.Second, "rotate-me-with-some-padding-to-make-the-record-larger 999")
 
 	segments := r.buf.segments()
 	require.Greater(t, len(segments), 1, "the log should have rotated at its cap")
@@ -126,7 +138,7 @@ func TestBackpressureOnAMillionLines(t *testing.T) {
 		t.Skip("emits a million lines")
 	}
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) {
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) {
 		c.ringBufferLines = 500
 		c.maxLogBytes = 128 * 1024
 		c.retainSegments = 2
@@ -141,9 +153,13 @@ func TestBackpressureOnAMillionLines(t *testing.T) {
 	started := time.Now()
 	r := ts.startHelper("firehose", "spew", fmt.Sprint(lines))
 
-	// The process is never blocked on the agent, so it exits on its own.
-	waitState(t, r, 60*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
-	require.Less(t, time.Since(started), 60*time.Second)
+	// The process is never blocked on the agent, so it exits on its own. The
+	// budget is generous because a million lines through a race-instrumented
+	// binary on a shared four-vCPU runner is genuinely slow; what is under test
+	// is that the process finishes at all rather than waiting on a reader, and
+	// a supervisor that blocks it does not finish in three minutes either.
+	waitState(t, r, 300*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
+	require.Less(t, time.Since(started), 300*time.Second)
 
 	runtime.GC()
 	var after runtime.MemStats
@@ -193,7 +209,7 @@ func TestFollowAlwaysReturnsAtItsDeadline(t *testing.T) {
 
 func TestFollowDurationIsClampedNotHonoured(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxFollowDuration = 250 * time.Millisecond })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 250 * time.Millisecond })
 
 	r := ts.startHelper("clamped", "silent")
 
@@ -216,7 +232,7 @@ func TestFollowDurationIsClampedNotHonoured(t *testing.T) {
 
 func TestFollowEndsWhenTheProcessExits(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxFollowDuration = 30 * time.Second })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 30 * time.Second })
 
 	r := ts.startHelper("exits-mid-follow", "echo", "3", "50", "working")
 
@@ -238,7 +254,7 @@ func TestFollowEndsWhenTheProcessExits(t *testing.T) {
 
 func TestTwoConcurrentFollowersBothReceiveOutput(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxFollowDuration = 5 * time.Second })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 5 * time.Second })
 
 	r := ts.startHelper("two-followers", "echo", "20", "20", "broadcast")
 
@@ -265,7 +281,7 @@ func TestTwoConcurrentFollowersBothReceiveOutput(t *testing.T) {
 
 func TestFollowStopsWhenTheCallerHangsUp(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxFollowDuration = 30 * time.Second })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 30 * time.Second })
 
 	r := ts.startHelper("hangup", "silent")
 
@@ -410,6 +426,230 @@ func TestLongLinesAreSplitNotDropped(t *testing.T) {
 	require.Equal(t, strings.Repeat("x", size), joined.String())
 }
 
+// gatedStream parks a follow inside its first Send until the test releases it,
+// which is how the test puts the process's exit and the follower's next look at
+// the state in a fixed order rather than a raced one.
+type gatedStream struct {
+	*recordingStream
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *gatedStream) Send(resp *sandboxdv1.GetProcessLogsResponse) error {
+	g.once.Do(func() {
+		close(g.entered)
+		<-g.release
+	})
+	return g.recordingStream.Send(resp)
+}
+
+// TestFollowDeliversTheFinalLinesOfAProcessThatExits.
+//
+// The supervisor lets the tailers finish reading what the process wrote in its
+// last breath *before* it records the exit, so that a follow ending on the exit
+// carries those lines — they are what make the crash diagnosable from the log
+// rather than only from the exit code. Ending the follow on the terminal state
+// alone throws them away again: by the time the state is observable they are
+// already sitting in this follower's queue, and the busier the host, the more
+// of them there are.
+func TestFollowDeliversTheFinalLinesOfAProcessThatExits(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 10 * time.Second })
+
+	r := ts.startHelper("last-words", "silent")
+	// One line for the replay to send, so the follow parks with its
+	// subscription already taken and nothing yet delivered from it.
+	r.buf.note("first")
+
+	gate := &gatedStream{
+		recordingStream: &recordingStream{},
+		entered:         make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- ts.streamLogs(context.Background(), r, logRequest{
+			sel: selector{tail: 10}, follow: true, followFor: 5 * time.Second,
+		}, gate)
+	}()
+	<-gate.entered
+
+	// The rest of what the process had to say, and then its exit, both while
+	// the follower is between reads of its queue.
+	r.buf.note("last words")
+	_, err := ts.gracefulStop(r, 2*time.Second, true, true)
+	require.NoError(t, err)
+	require.True(t, isTerminal(r.currentState()), "state was %s", stateName(r.currentState()))
+
+	close(gate.release)
+	require.NoError(t, <-done)
+
+	require.Contains(t, gate.texts(), "last words",
+		"a follow that ends on the exit must still carry what the process wrote before it")
+	require.NotNil(t, gate.summary)
+	require.False(t, gate.summary.GetFollowDeadlineReached(), "it ended on the exit, not on the deadline")
+	require.EqualValues(t, len(gate.texts()), gate.summary.GetLinesReturned(),
+		"the summary must count the lines the drain sent")
+}
+
+// TestDropsAfterTheLastDeliveredLineAreStillCounted.
+//
+// A drop count rides on the next line the follower is handed. A follower that
+// falls behind and never catches up is handed no next line — so the drops
+// after its last delivery have nothing to ride on, and they are the bulk of
+// them. The summary that omits them reports a hole smaller than the hole, and
+// a wrong number is worse than none because it looks like an answer.
+//
+// Everything here happens while the follower is parked, so the arithmetic is
+// exact rather than a race: 256 lines fit in its queue, every line after that
+// is a drop, and none of them will ever be attached to anything.
+func TestDropsAfterTheLastDeliveredLineAreStillCounted(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 10 * time.Second })
+
+	r := ts.startHelper("outran-its-reader-completely", "silent")
+	r.buf.note("first")
+
+	gate := &gatedStream{
+		recordingStream: &recordingStream{},
+		entered:         make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- ts.streamLogs(context.Background(), r, logRequest{
+			sel: selector{tail: 10}, follow: true, followFor: 5 * time.Second,
+		}, gate)
+	}()
+	<-gate.entered
+
+	const beyondTheQueue = 500
+	for i := range subscriberQueue + beyondTheQueue {
+		r.buf.note(fmt.Sprintf("flood %d", i))
+	}
+	_, err := ts.gracefulStop(r, 2*time.Second, true, true)
+	require.NoError(t, err)
+
+	close(gate.release)
+	require.NoError(t, <-done)
+
+	require.NotNil(t, gate.summary)
+	require.GreaterOrEqual(t, gate.summary.GetLinesDropped(), uint64(beyondTheQueue),
+		"the follower missed at least %d lines and has to be told so, even though no line it received could carry the count",
+		beyondTheQueue)
+}
+
+// TestReplayDoesNotReadTheWholeHistoryIntoMemory.
+//
+// The on-disk history is the one thing in this package with no bound on it: a
+// process may hold max_log_bytes times retain+1 segments, and answering one
+// GetProcessLogs by reading all of it means a single call can allocate more
+// than the agent's whole working set. It is not an exotic request either — the
+// disk is read whenever the ring cannot cover the caller's tail, which any
+// filter_pattern that matches rarely guarantees on every call.
+func TestReplayDoesNotReadTheWholeHistoryIntoMemory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log.jsonl")
+
+	const onDisk = 3 * maxReplayLines
+	f, err := os.Create(path) //nolint:gosec // the test's own temp directory
+	require.NoError(t, err)
+	w := bufio.NewWriterSize(f, 1<<20)
+	for i := range onDisk {
+		data, err := json.Marshal(logLine{
+			Seq:    uint64(i), //nolint:gosec // a loop index below onDisk
+			Stream: sandboxdv1.Stream_STREAM_STDOUT,
+			At:     time.Now(),
+			Text:   fmt.Sprintf("history %d", i),
+		})
+		require.NoError(t, err)
+		_, err = w.Write(append(data, '\n'))
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Flush())
+	require.NoError(t, f.Close())
+
+	file, err := newRotatingFile(path, 1<<30, 3)
+	require.NoError(t, err)
+	buf := newLogBuffer(8, file)
+	t.Cleanup(func() { _ = buf.close() })
+
+	// A ring holding only the newest handful, so replay knows there is history
+	// below it and goes to disk for the rest.
+	const inRing = 8
+	restored := make([]logLine, 0, inRing)
+	for i := onDisk; i < onDisk+inRing; i++ {
+		restored = append(restored, logLine{
+			Seq:    uint64(i), //nolint:gosec // a loop index below onDisk+inRing
+			Stream: sandboxdv1.Stream_STREAM_STDOUT,
+			At:     time.Now(),
+			Text:   fmt.Sprintf("history %d", i),
+		})
+	}
+	buf.restore(restored, 0)
+
+	r := &record{buf: buf}
+	lines, _ := r.replay(selector{tail: onDisk}, buf.ringLines())
+
+	require.NotEmpty(t, lines, "the history is still read; it is only bounded")
+	require.LessOrEqual(t, len(lines), maxReplayLines+inRing,
+		"one call materialised %d of the %d lines on disk; the agent's heap is not the size of a process's log",
+		len(lines), onDisk)
+	require.Equal(t, fmt.Sprintf("history %d", onDisk+inRing-1), lines[len(lines)-1].Text,
+		"and it is the newest lines that are kept")
+}
+
+// TestRawCaptureTruncationReportsWhatItDiscarded.
+//
+// The transport file is truncated in place because nothing else can bound a
+// file a process the agent does not control keeps appending to. Normally that
+// happens when the tailer has caught up and nothing is lost. Past the hard
+// ceiling it happens anyway, and then it throws away everything between where
+// the tailer got to and where the process got to — which, unlike the
+// stat-to-truncate race, is a quantity the agent knows. #13 asks for a gap in
+// the log to be visible rather than silent, and a measurable gap taken
+// silently is the only case that would not have been.
+func TestRawCaptureTruncationReportsWhatItDiscarded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outPath, errPath := rawPaths(dir)
+
+	const rawCap int64 = 4096
+	const unread int64 = 1000
+	size := rawCap*rawHardCapFactor + unread
+	require.NoError(t, os.WriteFile(outPath, bytes.Repeat([]byte("x"), int(size)), 0o600))
+	require.NoError(t, os.WriteFile(errPath, nil, 0o600))
+
+	buf := newLogBuffer(64, nil)
+	capt, err := newCapture(dir, buf, [2]int64{}, rawCap, time.Millisecond, time.Millisecond, time.Millisecond)
+	require.NoError(t, err)
+	t.Cleanup(capt.close)
+
+	// The tailer is rawCap bytes in and the process is way past the ceiling:
+	// the branch that discards rather than waits.
+	capt.stdout.offset.Store(rawCap)
+	capt.maybeTruncate(capt.stdout)
+
+	info, err := os.Stat(outPath)
+	require.NoError(t, err)
+	require.Zero(t, info.Size(), "past the hard ceiling the file is truncated without waiting to catch up")
+	require.EqualValues(t, 0, capt.stdout.offset.Load())
+
+	var noted string
+	for _, line := range buf.ringLines() {
+		if strings.Contains(line.Text, "had not been read yet") {
+			noted = line.Text
+		}
+	}
+	require.NotEmpty(t, noted, "a discard the agent measured has to be in the log, not only in this file's comments")
+	require.Contains(t, noted, strconv.FormatInt(size-rawCap, 10), "and it has to say how much")
+	require.Contains(t, noted, "stdout", "and which stream lost it")
+}
+
 func TestGetProcessLogsValidatesItsRequest(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t)
@@ -425,7 +665,7 @@ func TestGetProcessLogsValidatesItsRequest(t *testing.T) {
 // defaults, the RE2 compile, and the clamp.
 func TestGetProcessLogsThroughTheService(t *testing.T) {
 	t.Parallel()
-	svc := newTestService(t, func(c *supervisorConfig) { c.maxFollowDuration = 300 * time.Millisecond })
+	svc := newTestService(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 300 * time.Millisecond })
 
 	start, err := svc.StartProcess(context.Background(), &sandboxdv1.StartProcessRequest{
 		Argv: helperArgv(t, "echo", "5", "0", "served"),
@@ -505,16 +745,38 @@ func (s *fakeServerStream) Context() context.Context { return s.ctx }
 // missed because the buffer turned over; this is what one particular follower
 // missed because it could not keep up, which is counted per follower and
 // reported on the next line it does receive.
+//
+// This one failed on windows-latest with a drop count of zero, and the cause is
+// not Windows. A drop count travels on the *next* line the follower is handed,
+// so the counts sit at the back of a 256-deep queue behind the lines that were
+// delivered before the queue ever filled. A follower that has not worked
+// through those 256 has been told nothing yet — and on Windows, where a
+// one-millisecond sleep is nearer fifteen, it never does before the process
+// finishes. Two things had to be true for the count to survive that, and
+// neither was:
+//
+//   - a follow ending on the process's exit has to drain what is already
+//     queued for it, rather than returning on the state alone; and
+//   - the drops accumulated after the last delivery have to be counted too,
+//     because no line will ever carry them.
+//
+// Both are in the summary's contract, and the second is the larger number.
 func TestASlowFollowerIsDroppedAndTold(t *testing.T) {
 	t.Parallel()
-	ts := newTestSupervisor(t, func(c *supervisorConfig) { c.maxFollowDuration = 5 * time.Second })
+	ts := newTestSupervisor(t, func(c *testSupervisorOptions) { c.maxFollowDuration = 5 * time.Second })
 
 	stream := &recordingStream{}
 	// A follower that takes a millisecond per line cannot keep up with a
 	// process emitting fifty thousand of them.
 	stream.onLine = func(*sandboxdv1.LogLine) { time.Sleep(time.Millisecond) }
 
-	r := ts.startHelper("outruns-its-reader", "spew", "50000")
+	// Fifty thousand lines spread over about four seconds, so the flood is
+	// still flooding when the two-second follow ends. A single burst finishes
+	// in milliseconds on an idle machine and in rather more than two seconds on
+	// a loaded one, and a follower cannot fall behind a process that finished
+	// before it subscribed — which is the whole of why this test used to fail
+	// on Windows and once in five on Linux.
+	r := ts.startHelper("outruns-its-reader", "spew", "1000", "80", "50")
 
 	require.NoError(t, ts.streamLogs(context.Background(), r, logRequest{
 		sel:       selector{tail: 1},
@@ -525,12 +787,58 @@ func TestASlowFollowerIsDroppedAndTold(t *testing.T) {
 	require.NotNil(t, stream.summary)
 	require.Positive(t, stream.summary.GetLinesDropped(),
 		"a follower that fell behind must be told how much it missed")
+	// The inline half of the same guarantee — that a gap shows up on the line
+	// after it, not only in the summary — is asserted by
+	// TestADroppedRunIsReportedOnTheNextLineTheFollowerReceives, which induces
+	// the drops rather than racing a process for them. Asserting it here as
+	// well is what made this test fail on Windows for a reason that had nothing
+	// to do with the drop accounting: whether any *delivered* line carries a
+	// count depends on how far through a 256-deep queue the follower got before
+	// the process finished, and a one-millisecond sleep is nearer fifteen there.
+}
 
-	var reported uint64
-	for _, line := range stream.lines {
-		reported += line.GetDroppedBefore()
+// TestADroppedRunIsReportedOnTheNextLineTheFollowerReceives is the inline half
+// of the drop contract, with the timing taken out of it: the buffer is driven
+// directly, so the queue is filled, overrun and read at exactly the points the
+// assertions describe.
+func TestADroppedRunIsReportedOnTheNextLineTheFollowerReceives(t *testing.T) {
+	t.Parallel()
+
+	buf := newLogBuffer(4, nil)
+	_, sub := buf.snapshot()
+
+	// Exactly fills the follower's queue. Nothing has been dropped yet.
+	for i := range subscriberQueue {
+		buf.note(fmt.Sprintf("queued %d", i))
 	}
-	require.Positive(t, reported, "the gap has to be visible inline, not only in the summary")
+	// And now it overruns. These cannot be delivered, so they are counted
+	// against this follower and wait for a line to travel on.
+	const lost = 50
+	for i := range lost {
+		buf.note(fmt.Sprintf("lost %d", i))
+	}
+
+	first := <-sub.ch
+	require.Equal(t, "queued 0", first.line.Text)
+	require.Zero(t, first.dropped, "nothing had been dropped when this line was queued")
+
+	// One slot is free again, so the next line fits — and carries the whole run
+	// of drops that happened while there was no room for it.
+	buf.note("after the gap")
+
+	var carried uint64
+	var found bool
+	for range subscriberQueue + 1 {
+		d := <-sub.ch
+		if d.line.Text == "after the gap" {
+			carried, found = d.dropped, true
+			break
+		}
+		require.Zero(t, d.dropped, "line %q is from before the gap", d.line.Text)
+	}
+	require.True(t, found, "the line after the gap must have been delivered")
+	require.EqualValues(t, lost, carried,
+		"the gap has to be visible on the line that follows it, and it has to be the whole gap")
 }
 
 // TestListeningPortsAreReportedFromTheLivePID asserts the wiring, not the

@@ -13,6 +13,7 @@ import (
 	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/platform"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/security/jail"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/security/policy"
 )
 
 // init registers ProcessService with every sandboxd-agent daemon that links
@@ -39,7 +40,7 @@ type Service struct {
 // says survived the last agent. It satisfies agent.Factory.
 func New(deps agent.Deps) (agent.Service, error) {
 	log := deps.Log.With("service", "process")
-	sup, err := newSupervisor(defaultSupervisorConfig(deps.Config), log)
+	sup, err := newSupervisor(defaultSupervisorConfig(deps.Config), deps.Policy, log)
 	if err != nil {
 		return nil, err
 	}
@@ -66,8 +67,41 @@ func (s *Service) Shutdown(context.Context) error {
 	return s.sup.Close()
 }
 
+// errExecDisabled refuses to start a process on an agent configured not to run
+// commands.
+//
+// exec.enabled: false is the only configuration in which the path jail is a
+// boundary rather than a decoration — Config.JailEnforced is literally
+// !Exec.IsEnabled() — and it is that only because an agent that runs commands
+// reaches any path without FileService. StartProcess runs commands. An agent
+// that honoured the flag for ExecService and not here would hand an operator a
+// configured allowed_roots list, report itself confined through GetHostInfo,
+// and then run
+//
+//	argv: ["sh", "-c", "cat /etc/shadow > /tmp/x"]
+//
+// on request. That is the exact shape docs/security.md refuses: a control that
+// stops honest mistakes but not dishonest ones, while looking like a security
+// control, is worse than no control, because it is what people plan around.
+//
+// FailedPrecondition and the same wording as ExecService's refusal, because it
+// is the same setting and the same answer: the service is registered and the
+// caller is told which line of configuration turned it off, rather than getting
+// an Unimplemented that reads like a version mismatch.
+var errExecDisabled = status.Error(codes.FailedPrecondition,
+	"this agent runs with exec.enabled: false, so starting a supervised process is turned off too; "+
+		"it is the configuration in which allowed_roots is a real boundary, and a supervised process is a command")
+
+// execEnabled reports whether this agent is allowed to run commands at all.
+func (s *Service) execEnabled() bool {
+	return s.deps.Config == nil || s.deps.Config.Exec.IsEnabled()
+}
+
 // StartProcess spawns a supervised process.
 func (s *Service) StartProcess(ctx context.Context, req *sandboxdv1.StartProcessRequest) (*sandboxdv1.StartProcessResponse, error) {
+	if !s.execEnabled() {
+		return nil, errExecDisabled
+	}
 	spec, err := s.resolveStart(req)
 	if err != nil {
 		return nil, err
@@ -79,6 +113,13 @@ func (s *Service) StartProcess(ctx context.Context, req *sandboxdv1.StartProcess
 		// in CRASHED so its logs can be read — but the call still failed, and
 		// reporting it as a success with a status attached would have the
 		// caller poll a process that never started.
+		//
+		// A full agent is ResourceExhausted rather than FailedPrecondition:
+		// it is the one failure here that is worth retrying unchanged, and the
+		// two codes are how a caller tells "not now" from "not like this".
+		if errors.Is(err, policy.ErrTooManyProcesses) {
+			return nil, status.Errorf(codes.ResourceExhausted, "could not start %q: %v", spec.name, err)
+		}
 		return nil, status.Errorf(codes.FailedPrecondition, "could not start %q: %v", spec.name, err)
 	}
 
@@ -213,6 +254,11 @@ func (s *Service) GetProcessLogs(req *sandboxdv1.GetProcessLogsRequest, stream g
 	if sel.tail <= 0 {
 		sel.tail = s.sup.cfg.defaultTailLines
 	}
+	// Clamped rather than refused, the same way an over-long follow_duration
+	// gets the maximum: tail_lines is a uint32 on the wire, and a caller who
+	// sends four billion of them is asking the agent to hold four billion log
+	// lines in memory to answer one call.
+	sel.tail = min(sel.tail, maxReplayLines)
 	if since := req.GetSince(); since != nil {
 		sel.since = since.AsTime()
 	}
@@ -317,6 +363,13 @@ func portableSignal(sig sandboxdv1.SignalProcessRequest_Signal) (platform.Signal
 // RestartProcess stops a process and starts it again from the same spec,
 // keeping its process id and its log history.
 func (s *Service) RestartProcess(ctx context.Context, req *sandboxdv1.RestartProcessRequest) (*sandboxdv1.RestartProcessResponse, error) {
+	// A restart re-runs the same argv, so it is the same capability as a start
+	// and gets the same answer. A record can outlive the config change that
+	// disabled exec — it is re-adopted from the state directory — and reviving
+	// it would be a way back in.
+	if !s.execEnabled() {
+		return nil, errExecDisabled
+	}
 	r, err := s.record(req.GetProcessId())
 	if err != nil {
 		return nil, err

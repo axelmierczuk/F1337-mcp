@@ -22,6 +22,21 @@ import (
 // saying the deadline was reached — a bounded answer they can act on, rather
 // than an unbounded wait they cannot.
 
+// maxReplayLines bounds what one GetProcessLogs call materialises in memory.
+//
+// The on-disk history is the last thing in this package with no bound on it: a
+// process may hold max_log_bytes (32 MiB by default) times retain+1 segments,
+// and reading all of it to answer one request means a single call can allocate
+// well over a hundred megabytes on an agent whose actual job is running
+// someone's build. It is not a hypothetical request either — the disk is read
+// whenever the ring cannot cover the caller's tail, which any filter_pattern
+// that matches rarely guarantees.
+//
+// So a read looks at the most recent maxReplayLines lines of history and no
+// further, and tail_lines is clamped to the same figure. Both are far past
+// what a model reads and far below what the agent can afford.
+const maxReplayLines = 20_000
+
 // clampFollow resolves a requested follow duration against the agent's maximum.
 // Zero means "as long as you allow", which is the maximum, not forever.
 func (s *Supervisor) clampFollow(requested time.Duration) time.Duration {
@@ -61,7 +76,7 @@ func (r *record) replay(sel selector, snap []logLine) (lines []logLine, dropped 
 	// the whole reason a size-capped rotating file exists: a crash twenty
 	// minutes ago is still diagnosable after the ring has turned over.
 	if oldestAvailable > 0 && countMatching(candidates, sel) < sel.tail {
-		if disk, err := readSegments(r.buf.segments(), 0); err == nil && len(disk) > 0 {
+		if disk, err := readSegments(r.buf.segments(), maxReplayLines); err == nil && len(disk) > 0 {
 			older := make([]logLine, 0, len(disk))
 			for _, line := range disk {
 				if line.Seq < oldestAvailable {
@@ -166,6 +181,13 @@ func (s *Supervisor) streamLogs(ctx context.Context, r *record, req logRequest, 
 		if err != nil {
 			return err
 		}
+		// The drops no line will ever carry. dropped_before rides on the next
+		// line a follower receives, so a gap that opens after the last one has
+		// nothing to ride on — and that is the largest gap there is, because
+		// it is the one the follower never caught up from. Without this the
+		// summary reports a hole smaller than the hole, which is worse than
+		// reporting none: the number looks like an answer.
+		dropped += r.buf.takePending(sub)
 	}
 
 	return out.Send(&sandboxdv1.GetProcessLogsResponse{
@@ -203,7 +225,16 @@ func (s *Supervisor) followLines(ctx context.Context, r *record, req logRequest,
 		// already arrived.
 		changed, state := r.wait()
 		if isTerminal(state) {
-			return returned, dropped, false, nil
+			// Not before draining what is already queued. The supervisor lets
+			// the tailers finish reading the process's last output *before* it
+			// records the exit, precisely so a follow that ends on the exit
+			// carries the final lines — and those lines are sitting in this
+			// follower's queue by the time the terminal state is observable.
+			// Returning on the state alone throws away exactly the output that
+			// explains the crash, and does it more often the busier the host
+			// is, because the queue is longer.
+			followed, drops, err := drainSubscriber(req.sel, sub, out, &pending)
+			return returned + followed, dropped + drops, false, err
 		}
 
 		select {
@@ -240,6 +271,35 @@ func (s *Supervisor) followLines(ctx context.Context, r *record, req logRequest,
 			returned++
 
 		case <-changed:
+		}
+	}
+}
+
+// drainSubscriber empties a follower's queue without blocking, for the moment
+// the process has finished and there is nothing more coming.
+//
+// It cannot block: no line will ever be appended after the terminal transition
+// that brought us here, so a follow that waited for one would wait forever, and
+// the whole contract of this call is that it does not.
+func drainSubscriber(sel selector, sub *subscriber, out logSender, pending *uint64) (returned, dropped uint64, err error) {
+	for {
+		select {
+		case d, ok := <-sub.ch:
+			if !ok {
+				return returned, dropped, nil
+			}
+			dropped += d.dropped
+			*pending += d.dropped
+			if !sel.matches(d.line) {
+				continue
+			}
+			if err := sendLine(out, d.line, *pending); err != nil {
+				return returned, dropped, err
+			}
+			*pending = 0
+			returned++
+		default:
+			return returned, dropped, nil
 		}
 	}
 }

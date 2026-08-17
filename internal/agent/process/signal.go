@@ -128,11 +128,13 @@ func signalLeader(pid int, sig platform.Signal) error {
 
 // stopRecord performs a graceful stop: ask, wait, compel.
 //
-// disableRestart is set by every caller that stopped the process on purpose —
-// an explicit stop, a replace_existing, a forced remove — so the restart policy
-// does not immediately undo the thing that was just asked for.
-func (s *Supervisor) stopRecord(r *record, grace time.Duration, disableRestart bool) error {
-	_, err := s.gracefulStop(r, grace, disableRestart, true)
+// It always suppresses the restart policy, because every caller of it stopped
+// the process on purpose — an explicit stop, a replace_existing, a forced
+// remove — and the policy undoing the thing that was just asked for is the one
+// outcome none of them want. A stop that should be restarted afterwards is not
+// this function; it is gracefulStop, which takes the choice.
+func (s *Supervisor) stopRecord(r *record, grace time.Duration) error {
+	_, err := s.gracefulStop(r, grace, true, true)
 	return err
 }
 
@@ -276,7 +278,17 @@ func (s *Supervisor) restart(r *record, grace time.Duration) error {
 	r.restartsDisabled = false
 	r.mu.Unlock()
 
+	// The stop gave the slot back, so the start has to take one. At capacity it
+	// does not get one, and saying so is better than starting a process the
+	// operator's limit says there is no room for.
+	slot, err := s.acquireSlot()
+	if err != nil {
+		return err
+	}
+	r.holdSlot(slot)
+
 	if err := r.setState(sandboxdv1.ProcessState_PROCESS_STATE_RESTARTING, nil); err != nil {
+		r.dropSlot()
 		return err
 	}
 	if err := r.setState(sandboxdv1.ProcessState_PROCESS_STATE_STARTING, nil); err != nil {
