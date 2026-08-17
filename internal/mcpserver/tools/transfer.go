@@ -430,7 +430,7 @@ func (r *Registrar) runPush(ctx context.Context, files sandboxdv1.FileServiceCli
 	}
 
 	for _, entry := range plan.entries {
-		if !force && unchangedRemote(existing[entry.destination], entry) {
+		if !force && unchangedRemote(existing[transferKey(entry.rel)], entry) {
 			moved.unchanged++
 			continue
 		}
@@ -466,6 +466,8 @@ func (r *Registrar) runPush(ctx context.Context, files sandboxdv1.FileServiceCli
 // push again over a tree of a few thousand files, and a round trip each is the
 // difference between a second and a minute. A listing that fails for any
 // reason yields an empty index, which costs a re-send and never a wrong one.
+//
+// The index is keyed by [transferKey], never by an absolute path. See there.
 func (r *Registrar) remoteIndex(ctx context.Context, files sandboxdv1.FileServiceClient, plan *transferPlan, destination string) map[string]*sandboxdv1.FileMetadata {
 	index := map[string]*sandboxdv1.FileMetadata{}
 	callCtx, cancel := context.WithTimeout(ctx, r.deps.callTimeout())
@@ -477,23 +479,59 @@ func (r *Registrar) remoteIndex(ctx context.Context, files sandboxdv1.FileServic
 		}
 		stat, err := files.StatPath(callCtx, &sandboxdv1.StatPathRequest{Path: plan.entries[0].destination})
 		if err == nil && stat.GetExists() {
-			index[plan.entries[0].destination] = stat.GetMetadata()
+			index[transferKey(plan.entries[0].rel)] = stat.GetMetadata()
 		}
 		return index
 	}
 
 	// Every entry shares one destination root, so listing it once covers them
-	// all.
+	// all. The root is the argument the caller gave, which is also what the
+	// writes were composed from; the agent normalises it on its own side and
+	// reports back what it resolved to, which is what the entries are made
+	// relative to below.
 	resp, err := files.ListDirectory(callCtx, &sandboxdv1.ListDirectoryRequest{
 		Path: destination, Recursive: true, Limit: MaxTransferFiles, IncludeHidden: true,
 	})
 	if err != nil {
 		return index
 	}
+	root := resp.GetPath()
 	for _, entry := range resp.GetEntries() {
-		index[entry.GetPath()] = entry
+		index[transferKey(relativeTo(root, entry.GetPath()))] = entry
 	}
 	return index
+}
+
+// transferKey is how the two sides of a repeat push agree on which file is
+// which.
+//
+// It is a path *relative* to the transfer root, with separators normalised,
+// and both halves of that are load-bearing.
+//
+// Relative, because the absolute paths do not match and cannot be made to.
+// This side composes a destination from the caller's argument and the sandbox's
+// cached path separator; the sandbox answers with whatever its own walk
+// produced, rooted at the path its normalisation resolved to. On a Windows
+// sandbox those are `…\workspace/go.mod` and `…\workspace\go.mod` — the same
+// file, two strings. Keying on them made every file look new on the second
+// push, so a tree that had just been sent was sent again in full, silently,
+// on every push. The part both sides genuinely agree on is the path *within*
+// the tree.
+//
+// Separators normalised, because the same divergence appears inside the
+// relative part of a nested path: this side builds `cmd/app/main.go` and a
+// Windows sandbox reports `cmd\app\main.go`.
+//
+// Case is deliberately *not* folded. Whether a filesystem folds case is a
+// property of that filesystem, not of the platform — macOS usually folds,
+// Linux does not, and Windows can be configured either way — so folding here
+// would be a guess. Guessing wrong makes two files that differ only in case
+// share one key, and the second one is then skipped as unchanged when it is
+// not: a wrong answer. A redundant re-send is merely slow.
+func transferKey(rel string) string {
+	rel = strings.ReplaceAll(rel, `\`, "/")
+	rel = strings.TrimPrefix(rel, "./")
+	return strings.Trim(rel, "/")
 }
 
 // unchangedRemote reports whether the destination already holds this file.

@@ -230,6 +230,12 @@ func TestTransfer_ASymlinkOutOfTheSourceTreeIsSkippedAndReported(t *testing.T) {
 // TestTransfer_RepeatPushSkipsUnchangedFiles. push, edit, push again is the
 // workflow; re-sending an unchanged tree each time is the difference between
 // usable and not.
+//
+// When this fails, the cause is one of two mechanisms, and the unit tests in
+// tools/transfer_test.go separate them: TestTransferKey_… covers whether the
+// two sides agree which file is which, and TestUnchangedRemote_… covers
+// whether the destination looks older than the source. This test cannot tell
+// them apart — both produce a re-sent file — so read those first.
 func TestTransfer_RepeatPushSkipsUnchangedFiles(t *testing.T) {
 	local := localWorkspace(t)
 	f := newAgentFixture(t, backendOptions{})
@@ -269,6 +275,59 @@ func TestTransfer_RepeatPushSkipsUnchangedFiles(t *testing.T) {
 	fourth := structured[transferResult](t, f.ok("sandbox_transfer", forced))
 	assert.Equal(t, 2, fourth.Files)
 	assert.Zero(t, fourth.Unchanged)
+}
+
+// TestTransfer_RepeatPushSkipsUnchangedFilesWhateverTheDestinationIsSpelledLike.
+//
+// This is the Windows failure, reproduced portably. There, the tool composed
+// destination paths with the sandbox's cached separator while the agent's own
+// walk answered with backslashes, so the two sides described every file with
+// two different strings and nothing was ever recognised as already sent — a
+// tree re-uploaded in full on every push, silently, on one platform only.
+//
+// A separator cannot be varied portably (a backslash is an ordinary filename
+// character on Unix), but the *class* of bug can: any destination the agent
+// normalises to something other than the bytes it was given produces exactly
+// the same divergence. A path with a `..` segment in it does that on every
+// platform. If the identity ever goes back to being an absolute path, this
+// fails everywhere rather than only on the one runner nobody reads.
+func TestTransfer_RepeatPushSkipsUnchangedFilesWhateverTheDestinationIsSpelledLike(t *testing.T) {
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{})
+
+	project := filepath.Join(local, "project")
+	writeLocal(t, filepath.Join(project, "go.mod"), "module x\n", 0o644)
+	writeLocal(t, filepath.Join(project, "cmd", "app", "main.go"), "package main\n", 0o644)
+
+	// Two spellings of one directory: the plain one, and one the agent must
+	// clean before it means anything.
+	//
+	// Built by concatenation, not filepath.Join, which is the whole point —
+	// Join cleans, so a roundabout path handed to it arrives at the tool
+	// already collapsed and the test proves nothing. (It did, until a revert
+	// check showed it passing against the very bug it was written for.)
+	plain := f.path("workspace")
+	sep := string(filepath.Separator)
+	roundabout := plain + sep + ".." + sep + "workspace"
+
+	first := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+		"direction": "push", "source": project, "destination": plain, "recursive": true,
+	}))
+	require.Equal(t, 2, first.Files)
+
+	second := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+		"direction": "push", "source": project, "destination": roundabout, "recursive": true,
+	}))
+	assert.Zero(t, second.Files,
+		"the same tree under another spelling of the same destination must not be re-sent")
+	assert.Equal(t, 2, second.Unchanged)
+
+	// And the reverse order, so neither spelling is privileged.
+	third := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+		"direction": "push", "source": project, "destination": plain, "recursive": true,
+	}))
+	assert.Zero(t, third.Files)
+	assert.Equal(t, 2, third.Unchanged)
 }
 
 // ------------------------------------------------------------------ pull
