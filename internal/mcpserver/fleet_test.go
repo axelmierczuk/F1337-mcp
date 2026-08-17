@@ -41,6 +41,7 @@ type selectResult struct {
 	Platform      string   `json:"platform"`
 	PathSeparator string   `json:"path_separator"`
 	AllowedRoots  []string `json:"allowed_roots"`
+	Unconfined    bool     `json:"unconfined"`
 	Health        string   `json:"health"`
 	Note          string   `json:"note"`
 }
@@ -60,6 +61,7 @@ type infoResult struct {
 		DiskAvailable   string `json:"disk_available"`
 	} `json:"resources"`
 	AllowedRoots []string `json:"allowed_roots"`
+	Unconfined   bool     `json:"unconfined"`
 	Toolchains   []struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
@@ -285,6 +287,49 @@ func TestSelect_ReturnsHandlePlatformAndRoots(t *testing.T) {
 	assert.Equal(t, "/", out.PathSeparator)
 	assert.Equal(t, []string{"/home/build/workspace"}, out.AllowedRoots)
 	assert.Equal(t, "serving", out.Health)
+}
+
+// TestUnconfinedHost_ReadsAsEveryPathWritableNotNone.
+//
+// The path jail and ExecService are mutually exclusive — a caller with exec
+// writes anywhere its user can, so the jail is enforced only on an agent with
+// exec disabled — and such an agent reports no allowed roots. sandbox_select
+// returns roots precisely so the model learns where it may write, so the empty
+// case is the one that must be said out loud: an absent allowed_roots reads as
+// "nowhere is writable", which is the opposite of the truth and would stop a
+// model even trying.
+func TestUnconfinedHost_ReadsAsEveryPathWritableNotNone(t *testing.T) {
+	f := newFixture(t, fixtureOptions{})
+	f.add("open-box", "open-box.internal:8722", nil)
+
+	host := f.clients.host("open-box")
+	host.mu.Lock()
+	host.info.AllowedRoots = nil
+	host.mu.Unlock()
+
+	sel := structured[selectResult](t, f.ok("sandbox_select", map[string]any{"name": "open-box"}, ""))
+	assert.Empty(t, sel.AllowedRoots)
+	assert.True(t, sel.Unconfined, "an agent with no jail must say so, not just omit the roots")
+	assert.Contains(t, sel.Note, "unconfined")
+	assert.Contains(t, sel.Note, "writable", "the note must say every path is writable, not that none is")
+	assert.Contains(t, sel.Note, "exec", "and why: roots are only enforced with exec disabled")
+
+	info := structured[infoResult](t, f.ok("sandbox_info", map[string]any{"sandbox": "open-box"}, ""))
+	assert.Empty(t, info.AllowedRoots)
+	assert.True(t, info.Unconfined)
+	assert.Contains(t, info.Note, "unconfined")
+	// The optional-probe note still composes, and does not displace the one
+	// about where the model may write.
+	assert.Contains(t, info.Note, "include_toolchains")
+	assert.Less(t, strings.Index(info.Note, "unconfined"), strings.Index(info.Note, "include_toolchains"),
+		"which paths are writable outranks a note about an optional probe")
+
+	// A confined agent is unchanged: roots listed, no flag, no note about it.
+	f.add("closed-box", "closed-box.internal:8722", nil)
+	sel = structured[selectResult](t, f.ok("sandbox_select", map[string]any{"name": "closed-box"}, ""))
+	assert.Equal(t, []string{"/home/build/workspace"}, sel.AllowedRoots)
+	assert.False(t, sel.Unconfined)
+	assert.NotContains(t, sel.Note, "unconfined")
 }
 
 // TestSelect_UnknownNameListsValidNames: a model that mistypes a name needs

@@ -51,9 +51,11 @@ when the fleet has exactly one member.
 Every result carries "sandbox", the host that actually served the call. Check it
 if you are unsure where you are running.
 
-Paths are on the sandbox, not on this workstation, and the agent confines them to
-its allowed roots — sandbox_select and sandbox_info report them. Use
-sandbox_process_start, not sandbox_exec, for anything meant to outlive the call.
+Paths are on the sandbox, not on this workstation. sandbox_select and
+sandbox_info report the roots the agent allows writes under; if they instead
+report "unconfined", the agent enforces no path jail and every path is writable,
+which is not the same as none being writable. Use sandbox_process_start, not
+sandbox_exec, for anything meant to outlive the call.
 
 Registering a sandbox does not enroll it: minting credentials is an operator
 action via sandboxctl.`

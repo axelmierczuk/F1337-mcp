@@ -29,6 +29,22 @@ const maxSandboxNameLength = 128
 // operator action; the model needs to know that rather than retrying.
 const enrollmentHint = "No sandboxes are registered. Enrolling one mints credentials and is an operator action: `sandboxctl enroll mint --name <name> --address <host:port>`, then install the agent on the host (docs/quickstart.md). A host that is already enrolled but missing here can be registered with sandbox_add."
 
+// unconfinedNote is what a host with no allowed roots is reported as.
+//
+// An agent reports no roots when its path jail is off, and the jail is off
+// whenever ExecService is enabled: a caller with exec does not need
+// sandbox_write to leave the jail, it runs `sh -c 'echo x > /etc/passwd'`. So
+// the two are mutually exclusive, and roots are enforced only on an agent with
+// exec disabled.
+//
+// sandbox_select returns roots precisely so the model learns where it may
+// write. Answering that question with an absent list is the model-facing
+// version of the same false confidence the mutual exclusion exists to remove,
+// read from the other end: "no roots" is silently indistinguishable from
+// "nowhere is writable", and a model that concludes the host is read-only will
+// not even try. So the absence is stated, not implied.
+const unconfinedNote = "This sandbox is unconfined: the agent reports no allowed roots, so every path its user can reach is readable and writable. Roots are enforced only on an agent with exec disabled — with exec enabled a command can write anywhere regardless, so the jail is not applied."
+
 // registerFleet adds the five fleet tools.
 func registerFleet(r *Registrar) {
 	AddFleet(r, &mcp.Tool{
@@ -224,7 +240,12 @@ type SelectResult struct {
 	// correctly for a Windows sandbox from a Unix workstation.
 	PathSeparator string `json:"path_separator,omitempty"`
 	// AllowedRoots are the absolute paths the agent permits access under.
+	// Empty when Unconfined; read the two together, never this one alone.
 	AllowedRoots []string `json:"allowed_roots,omitempty"`
+	// Unconfined reports that the agent enforces no path jail, so every path
+	// is writable rather than none. It is stated explicitly because an absent
+	// allowed_roots reads exactly like "nowhere is writable".
+	Unconfined bool `json:"unconfined,omitempty"`
 	// Health is the sandbox's status right now.
 	Health string `json:"health"`
 	// Note explains a selection that succeeded without full detail.
@@ -272,8 +293,12 @@ func (r *Registrar) sandboxSelect(ctx context.Context, req *mcp.CallToolRequest,
 	out.PathSeparator = info.GetPlatform().GetPathSeparator()
 	out.AllowedRoots = info.GetAllowedRoots()
 	out.Health = healthServing
+	// select returns roots so the model learns where it may write, which makes
+	// the empty case the one that has to be said out loud rather than left to
+	// an absent field.
 	if len(out.AllowedRoots) == 0 {
-		out.Note = "The agent reports no path jail; every path on the host is reachable."
+		out.Unconfined = true
+		out.Note = unconfinedNote
 	}
 	return out, target.Name(), nil
 }
@@ -496,7 +521,12 @@ type InfoResult struct {
 	// Resources summarises capacity.
 	Resources InfoResources `json:"resources,omitzero"`
 	// AllowedRoots are the absolute paths the agent permits access under.
+	// Empty when Unconfined; read the two together, never this one alone.
 	AllowedRoots []string `json:"allowed_roots,omitempty"`
+	// Unconfined reports that the agent enforces no path jail, so every path
+	// is writable rather than none. It is stated explicitly because an absent
+	// allowed_roots reads exactly like "nowhere is writable".
+	Unconfined bool `json:"unconfined,omitempty"`
 	// Toolchains is populated only when include_toolchains was set.
 	Toolchains []InfoToolchain `json:"toolchains,omitempty"`
 	// Agent is the agent's version.
@@ -557,11 +587,14 @@ func (r *Registrar) sandboxInfo(ctx context.Context, _ *mcp.CallToolRequest, tar
 			Name: tc.GetName(), Version: tc.GetVersion(), Path: tc.GetPath(),
 		})
 	}
-	if !in.IncludeToolchains {
-		out.Note = "Toolchains not probed; pass include_toolchains to detect them."
-	}
 	if len(out.AllowedRoots) == 0 {
-		out.Note = strings.TrimSpace(out.Note + " The agent reports no path jail; every path on the host is reachable.")
+		out.Unconfined = true
+		out.Note = unconfinedNote
+	}
+	if !in.IncludeToolchains {
+		// Appended after, not before: which paths are writable outranks a note
+		// about an optional probe, and the model reads the front of a string.
+		out.Note = strings.TrimSpace(out.Note + " Toolchains not probed; pass include_toolchains to detect them.")
 	}
 
 	// The health probe is the cheap call and this one is the expensive one,
