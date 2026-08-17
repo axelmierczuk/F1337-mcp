@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -385,6 +387,38 @@ func TestSession_AProgramThatIgnoresTheHangupIsStillKilled(t *testing.T) {
 		}
 		return false, "pid " + strconv.Itoa(pid) + " ignored the hangup and survived the kill that should have followed"
 	})
+}
+
+// TestSession_TheTerminalIsClosedExactlyOnce pins the guard that keeps the
+// agent's own heap intact.
+//
+// A reaped session hangs its terminal up and then releases it, so two paths
+// reach the close. go-pty's Unix implementation makes the second one a no-op;
+// its ConPTY implementation calls ClosePseudoConsole unconditionally, which
+// destroys a console object that is already gone and corrupts the process heap.
+// That reached CI as an 0xC0000374 with no stack and no failing assertion,
+// which is the worst shape a bug can arrive in — so the guard gets a test that
+// names it rather than a comment alone.
+func TestSession_TheTerminalIsClosedExactlyOnce(t *testing.T) {
+	var closes atomic.Int32
+	closeTTY := sync.OnceValue(func() error {
+		closes.Add(1)
+		return nil
+	})
+	sess := &session{closeTTY: closeTTY}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = sess.closeTTY()
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int32(1), closes.Load(),
+		"the terminal was closed more than once; on Windows the second one takes the agent's heap with it")
 }
 
 // -------------------------------------------------------------- refusals

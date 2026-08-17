@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -110,6 +111,17 @@ type session struct {
 	tty  platform.PTY
 	send *sender
 
+	// closeTTY closes the terminal, exactly once however many paths reach it.
+	//
+	// Once is not a nicety. A session is torn down by hanging the terminal up
+	// and then releasing it, and on Unix the second close is harmless because
+	// go-pty guards it. The ConPTY implementation does not: its Close calls
+	// ClosePseudoConsole unconditionally, so a second one destroys a console
+	// object that is already gone and corrupts the agent's own heap. CI found
+	// this as an 0xC0000374 with no stack, on the first Windows run where a
+	// session got far enough to be reaped.
+	closeTTY func() error
+
 	// activity is when a byte last moved in either direction, in Unix
 	// nanoseconds.
 	//
@@ -149,8 +161,9 @@ func (s *Service) run(
 	}
 	// Closed on every path out, and it is not only cleanup: on Unix this is the
 	// terminal hanging up, which is what tells the far end the session ended.
-	// A second Close from the teardown below is a no-op.
-	defer func() { _ = tty.Close() }()
+	// Once, and through the same guard the teardown uses — see session.closeTTY.
+	closeTTY := sync.OnceValue(tty.Close)
+	defer func() { _ = closeTTY() }()
 
 	// Before the command starts, so the shell's first prompt is drawn at the
 	// operator's real width rather than at 80 columns and then reflowed.
@@ -214,7 +227,7 @@ func (s *Service) run(
 			"error", err)
 	}
 
-	sess := &session{svc: s, tty: tty, send: newSender(stream)}
+	sess := &session{svc: s, tty: tty, send: newSender(stream), closeTTY: closeTTY}
 	sess.touch()
 
 	if err := sess.send.within(sendStall, opened(tty, cmd.Process.Pid, spec.command.Argv)); err != nil {
@@ -337,7 +350,7 @@ func (s *Service) await(ctx context.Context, sess *session, waited <-chan error)
 // survives both, exactly as it does over ssh. That is a property of what they
 // asked for rather than a gap in this teardown.
 func (s *Service) reap(sess *session, group *platform.ProcessGroup, waited <-chan error) bool {
-	if err := sess.tty.Close(); err != nil {
+	if err := sess.closeTTY(); err != nil {
 		s.log.Debug("closing the session terminal reported an error; the session is being killed anyway", "error", err)
 	}
 
