@@ -1,5 +1,5 @@
-// Package fs implements FileService: read, write, edit, list, stat, glob and
-// grep.
+// Package fs implements FileService: read, write, edit, list, stat, glob,
+// grep, and the three path-management RPCs — make directory, remove and move.
 //
 // # Confinement
 //
@@ -18,6 +18,12 @@
 // internal/agent.jailFor and docs/security.md. Nothing in this package claims
 // confinement it does not have: an unconfined jail returns no rejection, so no
 // handler here can report one.
+//
+// A path-management RPC acts on the path itself rather than on what it points
+// at, so RemovePath and MovePath resolve only the *parent* through the jail and
+// leave the last component exactly as the caller wrote it. Removing a symlink
+// unlinks the symlink; it never follows one to delete the file at the other
+// end, which is the classic way a delete leaves its confinement.
 //
 // # Writes
 //

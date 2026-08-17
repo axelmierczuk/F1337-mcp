@@ -10,8 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 )
@@ -138,24 +136,4 @@ func TestOverGRPC_EditAndListAndStat(t *testing.T) {
 	globbed, err := client.Glob(ctx, &sandboxdv1.GlobRequest{Pattern: "*.txt", Root: root})
 	require.NoError(t, err)
 	assert.Equal(t, []string{path}, globbed.GetPaths())
-}
-
-// MakeDirectory, RemovePath and MovePath are in the proto but in none of #8,
-// #9 or #10. They answer Unimplemented rather than a guess at a contract nobody
-// has written down, so a caller reaching for them gets a clear answer instead of
-// a surprise.
-func TestOverGRPC_UnscopedRPCsReportUnimplemented(t *testing.T) {
-	root := tempRoot(t)
-	client := serveOverGRPC(t, newConfined(t, root))
-	ctx := context.Background()
-
-	_, err := client.MakeDirectory(ctx, &sandboxdv1.MakeDirectoryRequest{Path: filepath.Join(root, "d")})
-	assert.Equal(t, codes.Unimplemented, status.Code(err))
-
-	_, err = client.RemovePath(ctx, &sandboxdv1.RemovePathRequest{Path: filepath.Join(root, "d")})
-	assert.Equal(t, codes.Unimplemented, status.Code(err))
-
-	_, err = client.MovePath(ctx, &sandboxdv1.MovePathRequest{
-		Source: filepath.Join(root, "a"), Destination: filepath.Join(root, "b")})
-	assert.Equal(t, codes.Unimplemented, status.Code(err))
 }

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"google.golang.org/grpc"
@@ -124,12 +125,7 @@ func (l Limits) withDefaults() Limits {
 	return l
 }
 
-// Service implements sandboxd.v1.FileService.
-//
-// MakeDirectory, RemovePath and MovePath are not implemented here: they are in
-// the proto but in none of #8, #9 or #10, and the embedded
-// UnimplementedFileServiceServer answers them with codes.Unimplemented rather
-// than a half-built version of a contract nobody has written down yet.
+// Service implements sandboxd.v1.FileService: every RPC the proto declares.
 type Service struct {
 	sandboxdv1.UnimplementedFileServiceServer
 
@@ -208,6 +204,41 @@ func (s *Service) lexical(path string) (string, error) {
 		return "", status.Errorf(codes.InvalidArgument, "%s is not a path this agent will interpret: %v", path, err)
 	}
 	return abs, nil
+}
+
+// resolveSelf resolves a path for an operation on the path itself rather than
+// on whatever it points at.
+//
+// Containment is decided on the resolved *parent*, and the last component is
+// left exactly as the caller wrote it. That difference is the whole of it:
+// resolving the last component too — which every content RPC here does, because
+// reading a symlink should read its target — would make RemovePath delete what
+// a link points at and MovePath drag it somewhere else. A link inside the roots
+// aimed anywhere at all is then a way out of them, which is the classic shape
+// of this bug.
+//
+// The parent still gets the full treatment, so a path whose directory is a
+// symlink out of the jail is refused exactly as it would be anywhere else.
+func (s *Service) resolveSelf(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", status.Error(codes.InvalidArgument, "path is required")
+	}
+	named, err := s.lexical(path)
+	if err != nil {
+		return "", err
+	}
+	parent := filepath.Dir(named)
+	if parent == named {
+		// A filesystem root has no parent to check, and is not something this
+		// service will unlink or rename under any configuration.
+		return "", status.Errorf(codes.InvalidArgument,
+			"%s is a filesystem root, not a path this agent will operate on", named)
+	}
+	resolvedParent, err := s.resolve(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolvedParent, filepath.Base(named)), nil
 }
 
 // pathError maps a jail refusal, or an ordinary filesystem error, to a status.

@@ -78,6 +78,39 @@ func (l *pathLocks) lock(ctx context.Context, path string) (release func(), err 
 	}, nil
 }
 
+// lockBoth acquires the locks for two paths, for an operation with two
+// endpoints.
+//
+// They are taken in a fixed order rather than the caller's, because two moves
+// crossing — A to B and B to A at the same moment — would otherwise each hold
+// what the other is waiting for. Sorting the keys means every caller queues in
+// the same direction, so there is no cycle to deadlock on.
+func (l *pathLocks) lockBoth(ctx context.Context, a, b string) (release func(), err error) {
+	first, second := a, b
+	if lockKey(second) < lockKey(first) {
+		first, second = second, first
+	}
+	if lockKey(first) == lockKey(second) {
+		// The same file under two spellings. One lock, taken once: taking it
+		// twice would wait on itself forever.
+		return l.lock(ctx, first)
+	}
+
+	releaseFirst, err := l.lock(ctx, first)
+	if err != nil {
+		return nil, err
+	}
+	releaseSecond, err := l.lock(ctx, second)
+	if err != nil {
+		releaseFirst()
+		return nil, err
+	}
+	return func() {
+		releaseSecond()
+		releaseFirst()
+	}, nil
+}
+
 // lockKey normalises a resolved path for use as a map key. Two spellings that
 // name the same file must take the same lock, which on a case-insensitive
 // filesystem means folding case — otherwise "C:\Work\a.txt" and "c:\work\a.txt"
