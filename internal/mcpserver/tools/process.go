@@ -42,6 +42,12 @@ const (
 	maxLastLogLine = 120
 	// maxCommandChars bounds the rendered command line in a list row.
 	maxCommandChars = 120
+	// maxProcessName bounds the label a process was started under. It is the
+	// one string in a row that came from the caller rather than from the
+	// process, and it is bounded for the same reason the rest are: a name
+	// carrying a newline splits a row in two, and the whole claim of this
+	// listing is one line per process.
+	maxProcessName = 64
 	// maxRenderedLogBytes bounds a rendered log block. Beyond it the oldest
 	// lines are dropped and the omission is reported in `truncation`.
 	maxRenderedLogBytes = 96 * 1024
@@ -58,7 +64,44 @@ const (
 	// the deadline that fires is the agent's rather than ours — the agent's
 	// ends with a summary, ours ends with a timeout error.
 	followSlack = 15 * time.Second
+	// maxSecondsArgument bounds every seconds-valued argument before it becomes
+	// a Duration. An hour is far past anything useful — the agent clamps a
+	// follow to its own maximum and a grace period to its own — and the bound
+	// is what stops a caller's large number multiplying into a negative
+	// duration and an RPC deadline that has already expired.
+	maxSecondsArgument = 3600
 )
+
+// defaultGraceSeconds is the agent's own default graceful-stop grace period,
+// mirrored here for the same reason probeDeadline mirrors the probe timeout:
+// the deadline this side applies must never be the shorter of the two. A stop
+// that leaves grace_seconds unset still costs the agent this long before it
+// escalates, and a call that gave up first would report a timeout for a stop
+// that was working.
+const defaultGraceSeconds = 10
+
+// gracePeriodFor is what a graceful stop will actually cost the agent: the
+// argument when the caller named one, and the agent's own default when it did
+// not. An unset grace_seconds is not a zero grace, and sizing a deadline as
+// though it were is how a call gives up on a stop that is still working.
+func gracePeriodFor(graceSeconds int) time.Duration {
+	if graceSeconds > 0 {
+		return time.Duration(graceSeconds) * time.Second
+	}
+	return defaultGraceSeconds * time.Second
+}
+
+// signalDeadline bounds a sandbox_process_signal call.
+//
+// A graceful stop blocks on the agent for the whole grace period before it
+// answers, so the deadline has to clear it. Anything else answers immediately
+// and takes the ordinary call timeout.
+func signalDeadline(gracefulStop bool, graceSeconds int, callTimeout time.Duration) time.Duration {
+	if !gracefulStop {
+		return callTimeout
+	}
+	return max(callTimeout, gracePeriodFor(graceSeconds)+followSlack)
+}
 
 // probeAdvice is the one sentence in sandbox_process_start's description that
 // prevents a class of "the server is broken" misdiagnoses. A dev server that
@@ -230,7 +273,7 @@ func parsePolicy(s string) (sandboxdv1.RestartPolicy, error) {
 func processLine(st *sandboxdv1.ProcessStatus, now time.Time) ProcessLine {
 	line := ProcessLine{
 		ProcessID:      st.GetProcessId(),
-		Name:           st.GetName(),
+		Name:           clip(st.GetName(), maxProcessName),
 		State:          stateString(st.GetState()),
 		PID:            st.GetPid(),
 		Command:        clip(strings.Join(st.GetArgv(), " "), maxCommandChars),
@@ -746,17 +789,25 @@ func renderProcessTable(rows []ProcessLine) string {
 // writeRow writes one padded row, without trailing whitespace: the last column
 // is not padded, because a table of twenty rows pays for every trailing space
 // twenty times.
+//
+// The row is trimmed as well as unpadded. An empty last cell leaves the
+// second-to-last column's padding hanging off the end, and a listing where no
+// process has produced output yet — which is every listing taken just after a
+// fleet of services was started — is exactly the case where every row ends that
+// way.
 func writeRow(b *strings.Builder, cells []string, widths []int) {
+	var row strings.Builder
 	for i, cell := range cells {
 		if i == len(cells)-1 {
-			b.WriteString(cell)
+			row.WriteString(cell)
 			break
 		}
-		b.WriteString(cell)
+		row.WriteString(cell)
 		for pad := widths[i] - len(cell) + 2; pad > 0; pad-- {
-			b.WriteByte(' ')
+			row.WriteByte(' ')
 		}
 	}
+	b.WriteString(strings.TrimRight(row.String(), " "))
 	b.WriteByte('\n')
 }
 
@@ -846,7 +897,7 @@ func (r *Registrar) processLogs(ctx context.Context, _ *mcp.CallToolRequest, tar
 	// timeout error and no logs at all, so ours must be the later of the two.
 	timeout := r.deps.callTimeout()
 	if in.Follow {
-		follow := time.Duration(in.FollowSeconds) * time.Second
+		follow := time.Duration(min(in.FollowSeconds, maxSecondsArgument)) * time.Second
 		if in.FollowSeconds <= 0 {
 			follow = defaultFollowSeconds * time.Second
 		}
@@ -1069,6 +1120,7 @@ func (r *Registrar) processSignal(ctx context.Context, _ *mcp.CallToolRequest, t
 	if in.GraceSeconds < 0 {
 		return ProcessSignalResult{}, fmt.Errorf("grace_seconds %d is negative", in.GraceSeconds)
 	}
+	graceSeconds := min(in.GraceSeconds, maxSecondsArgument)
 
 	req := &sandboxdv1.SignalProcessRequest{
 		ProcessId:      in.ProcessID,
@@ -1076,8 +1128,8 @@ func (r *Registrar) processSignal(ctx context.Context, _ *mcp.CallToolRequest, t
 		DisableRestart: in.DisableRestart,
 		ProcessGroup:   in.ProcessGroup,
 	}
-	if in.GraceSeconds > 0 {
-		req.GracePeriod = durationpb.New(time.Duration(in.GraceSeconds) * time.Second)
+	if graceSeconds > 0 {
+		req.GracePeriod = durationpb.New(time.Duration(graceSeconds) * time.Second)
 	}
 	if !in.GracefulStop {
 		sig, err := parseSignal(in.Signal)
@@ -1092,12 +1144,7 @@ func (r *Registrar) processSignal(ctx context.Context, _ *mcp.CallToolRequest, t
 		return ProcessSignalResult{}, err
 	}
 
-	// A graceful stop blocks for the grace period before answering, so the
-	// deadline has to clear it or the call fails while the stop is working.
-	timeout := r.deps.callTimeout()
-	if grace := time.Duration(in.GraceSeconds) * time.Second; in.GracefulStop && grace+followSlack > timeout {
-		timeout = grace + followSlack
-	}
+	timeout := signalDeadline(in.GracefulStop, graceSeconds, r.deps.callTimeout())
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -1183,6 +1230,7 @@ func (r *Registrar) processRestart(ctx context.Context, _ *mcp.CallToolRequest, 
 	if in.GraceSeconds < 0 {
 		return ProcessRestartResult{}, fmt.Errorf("grace_seconds %d is negative", in.GraceSeconds)
 	}
+	graceSeconds := min(in.GraceSeconds, maxSecondsArgument)
 
 	client, err := r.processClient(target)
 	if err != nil {
@@ -1198,12 +1246,14 @@ func (r *Registrar) processRestart(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 
 	req := &sandboxdv1.RestartProcessRequest{ProcessId: in.ProcessID, WaitForReady: wait}
-	if in.GraceSeconds > 0 {
-		req.GracePeriod = durationpb.New(time.Duration(in.GraceSeconds) * time.Second)
+	if graceSeconds > 0 {
+		req.GracePeriod = durationpb.New(time.Duration(graceSeconds) * time.Second)
 	}
 
-	// Stop plus probe, both of which block on the agent.
-	timeout := r.deps.callTimeout() + time.Duration(in.GraceSeconds)*time.Second
+	// Stop plus probe, both of which block on the agent. An unset grace_seconds
+	// still costs the agent its own default before it escalates, so the
+	// deadline is sized from that rather than from the zero the caller sent.
+	timeout := r.deps.callTimeout() + gracePeriodFor(graceSeconds)
 	if wait {
 		timeout += 30 * time.Second
 	}

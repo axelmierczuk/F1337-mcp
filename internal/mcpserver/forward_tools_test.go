@@ -328,6 +328,65 @@ func TestForward_StopClosesTheListenerAndDropsConnections(t *testing.T) {
 	assert.Error(t, err, "an in-flight connection must be dropped rather than left hanging")
 }
 
+// The stop call a forward hands back has to be the call that stops it.
+// remote_host is part of the forward's identity, so a suggestion that omits it
+// looks up the loopback forward of the same port, finds nothing, and fails —
+// which reads to a caller as the forward having closed itself.
+func TestForward_TheStopCallItSuggestsActuallyStopsIt(t *testing.T) {
+	// A host on the allow list, taking the same path a real off-box target
+	// takes, while still reaching a server this test can stand up.
+	f := newLiveFixture(t, liveAgentOptions{forwardAllowedHosts: []string{"localhost"}})
+	remote := startHTTPServer(t, "named host")
+
+	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+		"remote_port": remote.port,
+		"remote_host": "localhost",
+	})
+	require.Equal(t, "named host", httpGet(t, "http://"+out.LocalAddress+"/"))
+	assert.Contains(t, out.Note, "remote_host",
+		"a forward whose key carries a remote_host must say so in the call that stops it")
+
+	// The suggestion without it does not work, and is not what was suggested.
+	msg := f.liveFails("sandbox_forward", map[string]any{"remote_port": remote.port, "stop": true})
+	assert.Contains(t, msg, "no forward is open")
+
+	// The suggestion as given does.
+	stopped := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{
+		"remote_port": remote.port,
+		"remote_host": "localhost",
+		"stop":        true,
+	})
+	assert.True(t, stopped.Stopped)
+	assert.Empty(t, stopped.Active)
+}
+
+// Deregistering a sandbox has to take its forwards with it. The pooled channel
+// behind them is closed on removal, so what would be left is a local port that
+// accepts a connection and drops it — the one outcome a caller cannot diagnose,
+// and the reason opening a forward preflights at all.
+func TestForward_RemovingTheSandboxClosesItsForwards(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{})
+	remote := startHTTPServer(t, "about to go")
+
+	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remote.port})
+	require.Equal(t, "about to go", httpGet(t, "http://"+out.LocalAddress+"/"))
+
+	removed := liveOK[tools.RemoveResult](f, "sandbox_remove", map[string]any{"name": liveSandboxName})
+	assert.Contains(t, removed.ForwardsClosed, out.LocalAddress,
+		"the result must name the forwards it closed rather than leaving them to be discovered")
+	assert.Contains(t, removed.Note, "forward")
+
+	// The port is released, provably: something else can take it.
+	eventually(t, 10*time.Second, "the forward's local port to be released", func() bool {
+		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(out.LocalPort)))
+		if err != nil {
+			return false
+		}
+		_ = lis.Close()
+		return true
+	})
+}
+
 func TestForward_StopWithNoSuchForwardListsWhatIsOpen(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "open")

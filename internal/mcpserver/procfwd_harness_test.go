@@ -271,9 +271,17 @@ func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
 	})
 	t.Cleanup(func() { _ = auditLog.Close() })
 
+	// The one concurrency limiter the daemon shares between ExecService and the
+	// supervisor. It is not optional: newSupervisor refuses a nil one, because a
+	// cap each service counted for itself let an agent configured for 32 run 32
+	// of each.
+	limiter, err := policy.New(policy.Config{Caps: policy.Caps{MaxConcurrent: cfg.Process.MaxConcurrent}})
+	require.NoError(t, err)
+
 	deps := agent.Deps{
 		Config:    cfg,
 		Jail:      jail.Unconfined(),
+		Policy:    limiter,
 		Log:       slog.New(slog.NewTextHandler(&testWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		Status:    agent.NewStatus(),
 		Audit:     auditLog,

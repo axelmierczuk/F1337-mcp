@@ -119,6 +119,57 @@ func TestProcessLine_BoundsAgentSuppliedText(t *testing.T) {
 	assert.NotContains(t, line.LastLogLine, "\n", "a newline in one field would break the table")
 }
 
+// The name is the one string in a row that came from the caller rather than
+// from the process, and it was the one string not bounded. A newline in it
+// splits a row in two, which breaks the only claim this listing makes.
+func TestProcessLine_BoundsTheProcessName(t *testing.T) {
+	now := time.Now()
+	line := processLine(&sandboxdv1.ProcessStatus{
+		Name:  "web\ndev\r\nlisten 0.0.0.0",
+		State: sandboxdv1.ProcessState_PROCESS_STATE_RUNNING,
+		Pid:   17,
+	}, now)
+	assert.NotContains(t, line.Name, "\n", "a newline in a name would split its row in two")
+	assert.NotContains(t, line.Name, "\r")
+
+	long := processLine(&sandboxdv1.ProcessStatus{
+		Name:  strings.Repeat("n", 4000),
+		State: sandboxdv1.ProcessState_PROCESS_STATE_RUNNING,
+	}, now)
+	assert.LessOrEqual(t, len(long.Name), maxProcessName+4)
+
+	// And the table built from it stays one line per process.
+	table := renderProcessTable([]ProcessLine{line, long})
+	rows := 0
+	for _, l := range strings.Split(strings.TrimSpace(table), "\n") {
+		if strings.HasPrefix(l, "running") {
+			rows++
+		}
+	}
+	assert.Equal(t, 2, rows, "one row per process: %q", table)
+}
+
+// A row whose last column is empty must not carry the previous column's
+// padding. That is every row of a listing taken just after a fleet of services
+// was started, which is when a listing is most often taken.
+func TestRenderProcessTable_DoesNotPadARowWithNoLastLogLine(t *testing.T) {
+	now := time.Now()
+	rows := []ProcessLine{
+		processLine(&sandboxdv1.ProcessStatus{
+			Name: "quiet", State: sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, Pid: 11,
+			StartedAt: timestamppb.New(now.Add(-time.Minute)),
+		}, now),
+		processLine(&sandboxdv1.ProcessStatus{
+			Name: "talkative", State: sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, Pid: 12,
+			StartedAt: timestamppb.New(now.Add(-time.Minute)), LastLogLine: "listening on :8080",
+		}, now),
+	}
+
+	for _, line := range strings.Split(renderProcessTable(rows), "\n") {
+		assert.Falsef(t, strings.HasSuffix(line, " "), "row carries trailing padding: %q", line)
+	}
+}
+
 func TestProcessLine_SortsListeningPorts(t *testing.T) {
 	line := processLine(&sandboxdv1.ProcessStatus{ListeningPorts: []uint32{9229, 3000, 5173}}, time.Now())
 	assert.Equal(t, []uint32{3000, 5173, 9229}, line.ListeningPorts)
@@ -286,6 +337,40 @@ func TestReadyProbeArgs_NilIsNoProbe(t *testing.T) {
 
 func TestProbeDeadline_FallsBackToTheAgentDefault(t *testing.T) {
 	assert.Equal(t, 30*time.Second, probeDeadline(&sandboxdv1.ReadyProbe{}))
+}
+
+// ------------------------------------------------------------- deadlines
+
+// A graceful stop blocks on the agent for the whole grace period before it
+// answers, and an unset grace_seconds is not a zero grace — the agent applies
+// its own default. Sizing the deadline from the argument alone is how a call
+// gives up on a stop that is still working and reports a timeout for it.
+func TestSignalDeadline_ClearsTheGraceTheAgentWillActuallyTake(t *testing.T) {
+	const callTimeout = 15 * time.Second
+
+	// Unset: the agent's own default, plus the same slack an explicit one gets.
+	assert.GreaterOrEqualf(t,
+		signalDeadline(true, 0, callTimeout),
+		defaultGraceSeconds*time.Second+followSlack,
+		"an unset grace_seconds still costs the agent %ds before it escalates", defaultGraceSeconds)
+
+	// Explicit and larger: it wins.
+	assert.Equal(t, 90*time.Second+followSlack, signalDeadline(true, 90, callTimeout))
+
+	// Explicit and smaller: the argument is honoured, and the ordinary call
+	// timeout is still the floor.
+	assert.Equal(t, time.Second+followSlack, signalDeadline(true, 1, callTimeout))
+	assert.Equal(t, 60*time.Second, signalDeadline(true, 1, 60*time.Second))
+
+	// Not a graceful stop: nothing blocks on the agent.
+	assert.Equal(t, callTimeout, signalDeadline(false, 0, callTimeout))
+	assert.Equal(t, callTimeout, signalDeadline(false, 600, callTimeout))
+}
+
+func TestGracePeriodFor_UsesTheAgentDefaultOnlyWhenUnset(t *testing.T) {
+	assert.Equal(t, defaultGraceSeconds*time.Second, gracePeriodFor(0))
+	assert.Equal(t, defaultGraceSeconds*time.Second, gracePeriodFor(-5))
+	assert.Equal(t, 45*time.Second, gracePeriodFor(45))
 }
 
 // ---------------------------------------------------------------- enums

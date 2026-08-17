@@ -96,6 +96,20 @@ func (k forwardKey) remoteLabel() string {
 	return net.JoinHostPort(host, strconv.Itoa(k.remotePort))
 }
 
+// stopCall renders the sandbox_forward call that tears this forward down.
+//
+// remote_host is part of the key, so it has to be part of the call: a forward
+// opened with one and torn down without it looks up the loopback forward of the
+// same port, finds nothing, and fails. The instruction a result hands back has
+// to be the instruction that works — a wrong one costs a turn and reads as the
+// forward having closed itself.
+func (k forwardKey) stopCall() string {
+	if k.remoteHost == "" {
+		return fmt.Sprintf("sandbox_forward(remote_port=%d, stop=true)", k.remotePort)
+	}
+	return fmt.Sprintf("sandbox_forward(remote_port=%d, remote_host=%q, stop=true)", k.remotePort, k.remoteHost)
+}
+
 // forwardManager owns every open forward for the life of the MCP server.
 type forwardManager struct {
 	log *slog.Logger
@@ -205,6 +219,36 @@ func (m *forwardManager) stop(key forwardKey) (*activeForward, bool) {
 	return f, true
 }
 
+// stopForSandbox tears down every forward reaching one sandbox and returns
+// their local addresses.
+//
+// It exists for sandbox_remove. A forward outlives the call that opened it, so
+// deregistering the sandbox it points at would otherwise leave a local port
+// that still accepts connections and drops every one of them — the pooled
+// channel behind it is closed on removal — which is precisely the "accepts and
+// then dies" failure the preflight exists to prevent, arrived at from the other
+// end.
+func (m *forwardManager) stopForSandbox(sandbox string) []string {
+	m.mu.Lock()
+	var stopping []*activeForward
+	for key, f := range m.forwards {
+		if key.sandbox == sandbox {
+			stopping = append(stopping, f)
+			delete(m.forwards, key)
+		}
+	}
+	m.mu.Unlock()
+
+	// Outside the lock: closing joins per-connection goroutines.
+	addresses := make([]string, 0, len(stopping))
+	for _, f := range stopping {
+		f.close()
+		addresses = append(addresses, f.localAddr)
+	}
+	sort.Strings(addresses)
+	return addresses
+}
+
 // add registers a started forward, refusing once the manager is closed or
 // full.
 func (m *forwardManager) add(f *activeForward) error {
@@ -260,7 +304,7 @@ type ForwardArgs struct {
 	// RemoteHost is the host on the sandbox's network.
 	RemoteHost string `json:"remote_host,omitempty" jsonschema:"host to connect to from the sandbox; defaults to the sandbox's own loopback, and anything else must be allowed in the agent's configuration"`
 	// Stop tears the forward down.
-	Stop bool `json:"stop,omitempty" jsonschema:"close the existing forward for this remote_port instead of opening one"`
+	Stop bool `json:"stop,omitempty" jsonschema:"close the existing forward for this remote_port instead of opening one; pass the same remote_host it was opened with, because a forward is identified by both"`
 }
 
 // ForwardLine is one open forward.
@@ -361,8 +405,8 @@ func (r *Registrar) startForward(ctx context.Context, target *selection.Target, 
 	// lets it carry on.
 	if existing, ok := r.forwards.get(key); ok {
 		if localPort != 0 && localPort != existing.localPort {
-			return ForwardResult{}, fmt.Errorf("%s on sandbox %s is already forwarded to %s. Stop that forward first with sandbox_forward(remote_port=%d, stop=true) if it should move to local port %d",
-				key.remoteLabel(), key.sandbox, existing.localAddr, key.remotePort, localPort)
+			return ForwardResult{}, fmt.Errorf("%s on sandbox %s is already forwarded to %s. Stop that forward first with %s if it should move to local port %d",
+				key.remoteLabel(), key.sandbox, existing.localAddr, key.stopCall(), localPort)
 		}
 		return ForwardResult{
 			LocalAddress: existing.localAddr,
@@ -439,10 +483,10 @@ func (r *Registrar) startForward(ctx context.Context, target *selection.Target, 
 		RemotePort:   key.remotePort,
 		RemoteHost:   key.remoteHost,
 		Active:       r.forwards.list(),
-		Note: fmt.Sprintf("%s on sandbox %s is now reachable at %s on this workstation — http://%s if it serves HTTP. Equivalent to `ssh -L %d:%s:%d %s`. It stays open until you call sandbox_forward(remote_port=%d, stop=true) or this MCP server exits. The listener is bound to loopback, so it is not reachable from another machine.",
+		Note: fmt.Sprintf("%s on sandbox %s is now reachable at %s on this workstation — http://%s if it serves HTTP. Equivalent to `ssh -L %d:%s:%d %s`. It stays open until you call %s or this MCP server exits. The listener is bound to loopback, so it is not reachable from another machine.",
 			key.remoteLabel(), key.sandbox, f.localAddr, f.localAddr,
 			f.localPort, hostOrLocalhost(key.remoteHost), key.remotePort, key.sandbox,
-			key.remotePort),
+			key.stopCall()),
 	}, nil
 }
 
@@ -516,17 +560,34 @@ func preflight(ctx context.Context, client sandboxdv1.ForwardServiceClient, key 
 func (r *Registrar) acceptLoop(ctx context.Context, f *activeForward, client sandboxdv1.ForwardServiceClient, target *selection.Target) {
 	defer f.wg.Done()
 
+	backoff := time.Duration(0)
 	for {
 		conn, err := f.listener.Accept()
 		if err != nil {
-			// A closed listener is how a forward ends; anything else on a
-			// listener this process owns is worth a line but not a panic.
-			if ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
-				f.note("accepting a local connection: " + err.Error())
-				r.deps.logger().Warn("forward accept failed", "local", f.localAddr, "error", err)
+			// A closed listener, or a torn-down forward, is how this ends.
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
 			}
-			return
+			// Anything else is transient until proven otherwise, and giving up
+			// on it would leave a forward that is still listed as open, still
+			// holding its port, and permanently deaf. A workstation that hits
+			// its descriptor limit for a second — which is what EMFILE is, and
+			// the kernel hands it straight back here — must not silently cost
+			// the model the tunnel it is working through. Backed off so a
+			// listener that is genuinely broken costs one syscall a second
+			// rather than a spin.
+			backoff = nextAcceptBackoff(backoff)
+			f.note("accepting a local connection: " + err.Error())
+			r.deps.logger().Warn("forward accept failed, retrying",
+				"local", f.localAddr, "retry_in", backoff, "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+				continue
+			}
 		}
+		backoff = 0
 
 		f.mu.Lock()
 		f.accepted++
@@ -547,6 +608,24 @@ func (r *Registrar) acceptLoop(ctx context.Context, f *activeForward, client san
 					"sandbox", target.Name(), "local", f.localAddr, "error", err)
 			}
 		}()
+	}
+}
+
+// Bounds on how fast a failing listener is retried.
+const (
+	minAcceptBackoff = 5 * time.Millisecond
+	maxAcceptBackoff = time.Second
+)
+
+// nextAcceptBackoff doubles a retry delay up to the cap.
+func nextAcceptBackoff(current time.Duration) time.Duration {
+	switch {
+	case current <= 0:
+		return minAcceptBackoff
+	case current >= maxAcceptBackoff:
+		return maxAcceptBackoff
+	default:
+		return min(current*2, maxAcceptBackoff)
 	}
 }
 

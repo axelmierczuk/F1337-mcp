@@ -627,6 +627,70 @@ func TestAudit_RefusalByDisabledServiceIsRecorded(t *testing.T) {
 	assert.Len(t, records(t, svc), 1)
 }
 
+// The third rule that can refuse a connection. It is recorded as an error
+// rather than a denial, the same way exec records its own concurrency cap —
+// "denied" is the policy refusing a target, and this is the agent running out
+// of room — but it names the setting either way, because an operator reading a
+// refusal needs to know which knob produced it.
+func TestAudit_RefusalByTheConnectionCapIsRecorded(t *testing.T) {
+	port := echoServer(t)
+	svc := newService(t, agent.ForwardConfig{
+		AllowedHosts:   []string{"build-host.internal"},
+		MaxConnections: 1,
+	})
+	svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	}
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	// One connection holds the only slot.
+	first, opened, err := open(ctx, t, client, 8080, "build-host.internal")
+	require.NoError(t, err)
+	require.True(t, opened.GetSuccess(), opened.GetError())
+
+	_, _, err = open(ctx, t, client, 8080, "build-host.internal")
+	require.Error(t, err)
+	require.Equal(t, codes.ResourceExhausted, status.Code(err))
+
+	rec := waitForRecord(t, svc)
+	assert.Equal(t, "forward.max_connections", rec.Rule,
+		"a refusal must name the configuration that decided it")
+	assert.Equal(t, policy.OutcomeError, rec.Outcome)
+	assert.Equal(t, "build-host.internal", rec.RemoteHost)
+	assert.Empty(t, rec.ResolvedAddress, "nothing was dialed for the refused connection")
+	assert.Zero(t, rec.BytesToRemote)
+
+	// And the slot comes back, so the cap bounds what is in flight rather than
+	// what has ever been carried.
+	require.NoError(t, first.CloseSend())
+	for {
+		if _, err := first.Recv(); err != nil {
+			break
+		}
+	}
+	eventually(t, func() bool { return svc.active.Load() == 0 })
+	_, opened, err = open(ctx, t, client, 8080, "build-host.internal")
+	require.NoError(t, err)
+	assert.True(t, opened.GetSuccess(), opened.GetError())
+}
+
+// eventually polls until cond holds or a generous deadline passes.
+func eventually(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition never held")
+}
+
 // A permitted target that does not answer is still a connection attempt off
 // this machine, and the record says so rather than omitting the attempt.
 func TestAudit_FailedDialToAPermittedHostIsRecorded(t *testing.T) {

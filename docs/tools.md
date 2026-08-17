@@ -76,7 +76,10 @@ Deregister a sandbox locally. Does not uninstall the agent.
 
 Clears the sticky selection of **every** client pointing at it, not just the
 caller's — a selection left aimed at a sandbox that no longer exists is worse
-than no selection.
+than no selection. It also closes any [port forwards](#sandbox_forward)
+reaching it and reports them in `forwards_closed`: the channel behind them is
+dropped on removal, so what would be left is a local port that accepts a
+connection and then drops it.
 
 ### `sandbox_info`
 Full detail for one sandbox: platform, kernel, CPU and memory, disk, detected
@@ -473,7 +476,12 @@ sandbox_forward(remote_port=3000, local_port=3000)
 | `remote_port` | int | **Required.** Port on the sandbox. |
 | `local_port` | int | 0 (the default) picks a free port and reports it. |
 | `remote_host` | string | Defaults to loopback on the sandbox. |
-| `stop` | bool | Tear down the forward for this `remote_port`. |
+| `stop` | bool | Tear down the forward for this `remote_port` **and `remote_host`**. |
+
+A forward is identified by its sandbox, `remote_host` and `remote_port`
+together, so a `stop` that omits the `remote_host` the forward was opened with
+names a different forward and finds nothing. The call that stops a forward is
+in the result that opened it.
 
 Returns `local_address`, plus `active_forwards`: every forward this MCP server
 holds, on every sandbox, in the result of **every** call — so the model can see
