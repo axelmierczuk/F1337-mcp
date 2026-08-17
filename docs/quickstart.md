@@ -119,6 +119,74 @@ fleetctl enroll mint --name gpu-01 --address gpu-01.internal:8722 \
   --label gpu=a100 --label arch=amd64
 ```
 
+## Upgrading from sandboxd
+
+The project was called `sandboxd` before it was called `fleet`. If you enrolled
+hosts under the old name, nothing is lost and nothing has to be done urgently —
+but the names moved, and it is worth moving your state to match.
+
+**Nothing breaks if you do nothing.** Both binaries read the old locations when
+the new ones are absent: `SANDBOXD_CONFIG_DIR` is still honoured when
+`FLEET_CONFIG_DIR` is unset, and a populated `~/.config/sandboxd` is used when
+`~/.config/fleet` does not exist. You get one warning per process saying which
+old name is in use and what to do about it. The old names will be removed
+eventually, so treat the warning as a deadline you set yourself.
+
+Migrating is a move, done while nothing is running. It is not done for you: the
+directory holds private keys, and a daemon that quietly relocated them on first
+start would be doing something you did not ask for and could not undo.
+
+On your workstation, with `fleet-mcp` and `fleetctl serve` stopped:
+
+```sh
+mv ~/.config/sandboxd ~/.config/fleet
+```
+
+If you set the environment variable anywhere — a shell profile, an `mcp.json`
+`env` block, a CI secret — rename it too:
+
+```diff
+-  "SANDBOXD_CONFIG_DIR": "${HOME}/.config/sandboxd"
++  "FLEET_CONFIG_DIR": "${HOME}/.config/fleet"
+```
+
+On each enrolled host, with the agent stopped (`fleet-agent service stop`):
+
+```sh
+sudo mv /etc/sandboxd     /etc/fleet       # config, certificate, key, CA bundle
+sudo mv /var/lib/sandboxd /var/lib/fleet   # supervised process state
+sudo mv /var/log/sandboxd /var/log/fleet   # audit log
+```
+
+macOS uses `/Library/Application Support/sandboxd` and `/Library/Logs/sandboxd`;
+Windows uses `%ProgramData%\sandboxd`. Move each to its `fleet` equivalent.
+
+The agent's config names these paths explicitly, so edit `/etc/fleet/agent.yaml`
+after the move and update `tls.certificate`, `tls.private_key`, `tls.ca_bundle`,
+`audit.path` and `state_dir`. Then re-register the service, which rewrites the
+unit under the new name, and start it:
+
+```sh
+sudo fleet-agent service install
+sudo fleet-agent service start
+```
+
+**Do not create the new directory before you are ready to move.** An empty
+`~/.config/fleet` next to a populated `~/.config/sandboxd` is the one case worth
+avoiding — though even then the resolver treats an empty directory as absent and
+keeps using the populated one, precisely so a stray `mkdir` cannot make a fleet
+look like it vanished.
+
+Two things deliberately keep the old name, and you should not change them:
+
+- **`require_client_ou: "sandboxd-control"`** in every agent config. This is
+  stamped into every certificate your CA has issued and is checked at every
+  connection. Changing it means re-enrolling every host on the same day.
+- **The `sandboxd.v1` gRPC package.** It is internal to the wire protocol and
+  never appears in anything you configure.
+
+You do not need to re-enroll, re-issue certificates, or re-create your CA.
+
 ## Troubleshooting
 
 **Agent does not appear in `fleet_list`.**

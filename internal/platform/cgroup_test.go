@@ -70,12 +70,12 @@ func TestReadCgroupLimits(t *testing.T) {
 		{
 			name: "a parent slice is tighter than the leaf",
 			files: map[string]string{
-				"proc/self/cgroup":                                           "0::/system.slice/fleet.service\n",
-				"sys/fs/cgroup/system.slice/memory.max":                      "1073741824\n",
-				"sys/fs/cgroup/system.slice/memory.current":                  "104857600\n",
+				"proc/self/cgroup":                                        "0::/system.slice/fleet.service\n",
+				"sys/fs/cgroup/system.slice/memory.max":                   "1073741824\n",
+				"sys/fs/cgroup/system.slice/memory.current":               "104857600\n",
 				"sys/fs/cgroup/system.slice/fleet.service/memory.max":     "4294967296\n",
 				"sys/fs/cgroup/system.slice/fleet.service/memory.current": "1048576\n",
-				"sys/fs/cgroup/system.slice/cpu.max":                         "50000 100000\n",
+				"sys/fs/cgroup/system.slice/cpu.max":                      "50000 100000\n",
 				"sys/fs/cgroup/system.slice/fleet.service/cpu.max":        "400000 100000\n",
 			},
 			want: cgroupLimits{
@@ -384,12 +384,12 @@ func TestReadCgroupLimitsV1(t *testing.T) {
 			files: map[string]string{
 				"proc/self/cgroup": "5:memory:/system.slice/fleet.service\n" +
 					"3:cpu,cpuacct:/system.slice/fleet.service\n",
-				"sys/fs/cgroup/memory/system.slice/memory.limit_in_bytes":                   "1073741824\n",
-				"sys/fs/cgroup/memory/system.slice/memory.usage_in_bytes":                   "104857600\n",
+				"sys/fs/cgroup/memory/system.slice/memory.limit_in_bytes":                "1073741824\n",
+				"sys/fs/cgroup/memory/system.slice/memory.usage_in_bytes":                "104857600\n",
 				"sys/fs/cgroup/memory/system.slice/fleet.service/memory.limit_in_bytes":  "4294967296\n",
 				"sys/fs/cgroup/memory/system.slice/fleet.service/memory.usage_in_bytes":  "1048576\n",
-				"sys/fs/cgroup/cpu,cpuacct/system.slice/cpu.cfs_quota_us":                   "50000\n",
-				"sys/fs/cgroup/cpu,cpuacct/system.slice/cpu.cfs_period_us":                  "100000\n",
+				"sys/fs/cgroup/cpu,cpuacct/system.slice/cpu.cfs_quota_us":                "50000\n",
+				"sys/fs/cgroup/cpu,cpuacct/system.slice/cpu.cfs_period_us":               "100000\n",
 				"sys/fs/cgroup/cpu,cpuacct/system.slice/fleet.service/cpu.cfs_quota_us":  "400000\n",
 				"sys/fs/cgroup/cpu,cpuacct/system.slice/fleet.service/cpu.cfs_period_us": "100000\n",
 			},

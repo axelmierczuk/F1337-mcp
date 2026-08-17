@@ -86,7 +86,7 @@ func Init(dir string, force bool) (*CA, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   "fleet fleet CA",
+			CommonName:   "fleet CA",
 			Organization: []string{"fleet"},
 		},
 		NotBefore:             now.Add(-5 * time.Minute),

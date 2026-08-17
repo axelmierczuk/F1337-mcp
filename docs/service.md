@@ -143,6 +143,41 @@ rather than failing, and restarts the service if it was running. That is what
 lets an installer script be re-run safely and what lets you change `--user` or
 `--hardening` without uninstalling first.
 
+## A service installed before the fleet rebrand
+
+The service used to register as `sandboxd-agent`. It now registers as
+`fleet-agent`, and **the `service` subcommands only know the new name.** On a
+host where the old service is still installed, that means:
+
+- `fleet-agent service status` reports it as not installed, while the old
+  service is running perfectly well beside it.
+- `fleet-agent service uninstall` will not remove it.
+- `fleet-agent service install` registers a *second* service pointing at the
+  same config and state. Both would start at boot and fight over the same
+  supervised processes.
+
+So remove the old one first, using the old name, with the platform's own tools:
+
+```sh
+# Linux
+sudo systemctl disable --now sandboxd-agent
+sudo rm /etc/systemd/system/sandboxd-agent.service && sudo systemctl daemon-reload
+
+# macOS
+sudo launchctl bootout system /Library/LaunchDaemons/sandboxd-agent.plist
+sudo rm /Library/LaunchDaemons/sandboxd-agent.plist
+
+# Windows, elevated
+sc.exe stop sandboxd-agent
+sc.exe delete sandboxd-agent
+```
+
+Then `sudo fleet-agent service install`. Your enrollment is untouched by any of
+this — the identity lives in the config directory, not in the service
+registration. See the migration steps in
+[quickstart.md](quickstart.md#upgrading-from-sandboxd), which also move the
+directories the unit points at.
+
 ## Manual verification
 
 CI cannot install services — it does not run as root, and a GitHub runner has

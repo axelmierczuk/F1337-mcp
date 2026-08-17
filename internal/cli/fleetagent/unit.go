@@ -303,7 +303,7 @@ func (p UnitParams) ServiceConfig() *service.Config {
 	return &service.Config{
 		Name:        ServiceName,
 		DisplayName: "fleet agent",
-		Description: "Runs commands and serves files for a fleet fleet over mTLS gRPC.",
+		Description: "Runs commands and serves files for a fleet over mTLS gRPC.",
 		Executable:  p.Executable,
 		Arguments:   p.Arguments(),
 		UserName:    p.User,
