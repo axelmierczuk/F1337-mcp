@@ -7,6 +7,35 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
+// Health names, as every view of the fleet reports them: the MCP server's
+// fleet_list and fleet_info, and `fleetctl list` and `fleetctl info`. They
+// live here, beside the type that produces them, so the operator's word for a
+// sandbox's state and the model's word for it cannot drift apart — which is
+// the whole reason both read health through this package.
+const (
+	HealthServing     = "serving"
+	HealthDegraded    = "degraded"
+	HealthDraining    = "draining"
+	HealthUnreachable = "unreachable"
+	// HealthUnknown means nothing has probed this sandbox yet — not that the
+	// probe failed.
+	HealthUnknown = "unknown"
+)
+
+// HealthName renders a gRPC health status as one of the names above.
+func HealthName(status sandboxdv1.HealthResponse_Status) string {
+	switch status {
+	case sandboxdv1.HealthResponse_STATUS_SERVING:
+		return HealthServing
+	case sandboxdv1.HealthResponse_STATUS_DEGRADED:
+		return HealthDegraded
+	case sandboxdv1.HealthResponse_STATUS_DRAINING:
+		return HealthDraining
+	default:
+		return HealthUnknown
+	}
+}
+
 // HealthStatus is the most recent result of probing a sandbox's
 // HostService.Health, cached so fleet_list can report status without a
 // round trip per sandbox.
