@@ -15,3 +15,16 @@ var AuthorizePeerForTest = authorizePeer
 // standing between "every record names its host" and an operator finding out it
 // does not when the records are already off-box.
 var AuditForTest = auditFor
+
+// PinSystemConfigDirForTest fixes what SystemConfigDir resolves to and returns a
+// function restoring the previous resolver.
+//
+// It exists because the platforms that nest state and logs inside the config
+// directory must derive them from the *resolved* directory, and that is not
+// observable otherwise: the roots are compiled-in absolute paths on macOS, so a
+// test cannot arrange for the new and old names to resolve differently.
+func PinSystemConfigDirForTest(dir string) (restore func()) {
+	previous := systemConfigDir
+	systemConfigDir = func() string { return dir }
+	return func() { systemConfigDir = previous }
+}
