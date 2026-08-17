@@ -181,6 +181,31 @@ func TestList_FiltersByLabel(t *testing.T) {
 	assert.Contains(t, text, "key=value")
 }
 
+// TestList_ReportsAStaleSelectionRatherThanEchoingIt. Echoing a sandbox that
+// does not appear in the very list being returned reads as a bug in the tool;
+// saying the selection is gone is what the model can act on.
+func TestList_ReportsAStaleSelectionRatherThanEchoingIt(t *testing.T) {
+	f := newFixture(t, fixtureOptions{})
+	f.add("build-box", "build-box.internal:8722", map[string]string{"arch": "amd64"})
+	f.add("gpu-01", "gpu-01.internal:8722", nil)
+	f.ok("sandbox_select", map[string]any{"name": "gpu-01"}, "")
+
+	// Removed underneath the server, as sandboxctl would.
+	require.NoError(t, f.fleet.Remove("gpu-01"))
+
+	out := structured[listResult](t, f.ok("sandbox_list", map[string]any{}, ""))
+	assert.Empty(t, out.Sandbox, "the echo must not name a sandbox that is not in the list")
+	assert.Contains(t, out.Hint, "gpu-01")
+	assert.Contains(t, out.Hint, "no longer registered")
+
+	// A label filter that excludes the selection is not the same thing: it is
+	// still selected, just not shown.
+	f.ok("sandbox_select", map[string]any{"name": "build-box"}, "")
+	out = structured[listResult](t, f.ok("sandbox_list", map[string]any{"label": "arch=arm64"}, ""))
+	assert.Equal(t, "build-box", out.Sandbox)
+	assert.NotContains(t, out.Hint, "no longer registered")
+}
+
 // TestList_TwentySandboxesStayCompact guards the size of a result that lands
 // in model context on every fleet check.
 func TestList_TwentySandboxesStayCompact(t *testing.T) {

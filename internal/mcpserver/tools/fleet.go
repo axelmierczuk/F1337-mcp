@@ -118,6 +118,19 @@ func (r *Registrar) sandboxList(ctx context.Context, req *mcp.CallToolRequest, i
 		return ListResult{}, "", err
 	}
 
+	// The selection is checked against the whole inventory, before the label
+	// filter narrows it: a selected sandbox that a filter excluded is still
+	// selected, and only one that is genuinely gone is stale.
+	identity := d.Resolver.IdentityFor(req)
+	selected, _, err := d.Resolver.Selected(identity)
+	if err != nil {
+		return ListResult{}, "", err
+	}
+	stale := ""
+	if selected != "" && !containsName(sandboxes, selected) {
+		stale, selected = selected, ""
+	}
+
 	if in.Label != "" {
 		key, value, err := parseLabelFilter(in.Label)
 		if err != nil {
@@ -130,12 +143,6 @@ func (r *Registrar) sandboxList(ctx context.Context, req *mcp.CallToolRequest, i
 			}
 		}
 		sandboxes = filtered
-	}
-
-	identity := d.Resolver.IdentityFor(req)
-	selected, _, err := d.Resolver.Selected(identity)
-	if err != nil {
-		return ListResult{}, "", err
 	}
 
 	health := r.healthFor(ctx, sandboxes, in.Refresh)
@@ -170,6 +177,8 @@ func (r *Registrar) sandboxList(ctx context.Context, req *mcp.CallToolRequest, i
 		out.Hint = fmt.Sprintf("No sandbox carries the label %q. Call sandbox_list without a filter to see every registered sandbox.", in.Label)
 	case len(out.Sandboxes) == 0:
 		out.Hint = enrollmentHint
+	case stale != "":
+		out.Hint = fmt.Sprintf("The previously selected sandbox %q is no longer registered. Call sandbox_select to choose another.", stale)
 	case selected == "":
 		out.Hint = "No sandbox is selected. Call sandbox_select before any tool that acts on a host."
 	}
@@ -177,6 +186,16 @@ func (r *Registrar) sandboxList(ctx context.Context, req *mcp.CallToolRequest, i
 	// The echo for sandbox_list is the selected sandbox; empty is the honest
 	// answer when nothing is selected, and the hint above says so.
 	return out, selected, nil
+}
+
+// containsName reports whether a sandbox of this name is registered.
+func containsName(sandboxes []registry.Sandbox, name string) bool {
+	for _, sb := range sandboxes {
+		if sb.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ------------------------------------------------------------- select
