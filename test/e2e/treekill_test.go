@@ -54,6 +54,18 @@ func TestExecTimeoutKillsTheWholeProcessTree(t *testing.T) {
 	if len(procs) != 3 {
 		t.Fatalf("expected three levels of the tree to announce themselves, got %v from:\n%s", procs, res.Stdout)
 	}
+	// Only when the scenario failed, and then only because it failed: the tree
+	// sleeps forever, so an agent that did not kill it leaves three processes on
+	// the machine for every run. Nothing is signalled on the passing path, where
+	// these pids are already gone and could belong to somebody else.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, p := range procs {
+			killPID(p.pid)
+		}
+	})
 
 	// Checked before anything is asserted about the group, because it is what
 	// makes those assertions mean anything. The leader reported its own group
