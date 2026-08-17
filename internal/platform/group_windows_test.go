@@ -323,6 +323,45 @@ func TestJobObject_AdoptedLeaderKeepsItsPid(t *testing.T) {
 			"kill time terminates whatever holds it by then", pid)
 }
 
+// TestJobObject_FailedReAdoptDoesNotKeepTheOldIsolationClaim covers the one
+// piece of group state that is not replaced when a group takes on a new
+// process.
+//
+// Adopt overwrites the pid and the leader handle, so after it fails the group
+// is holding a pid it never pinned — which terminate correctly refuses to act
+// on. What it used to leave alone was isolated, and that flag is what decides
+// whose answer the caller gets: with it set, terminate treats the job going
+// down as the guarantee and drops the leader's error. A job the new pid was
+// never assigned to would then report a successful kill for a process nothing
+// touched, and a supervisor reading that stops trying to stop it. That is the
+// same failure-reported-as-success TestJobObject_UnassignedLeaderIsNotReportedAsKilled
+// pins for a first Adopt; this is the path that reaches it with a true already
+// in the field.
+func TestJobObject_FailedReAdoptDoesNotKeepTheOldIsolationClaim(t *testing.T) {
+	t.Parallel()
+
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+	defer group.Close()
+
+	// A real, assigned child first: this is what puts a true in isolated.
+	sleeperInGroup(t, group)
+	require.True(t, group.Isolated(), "the child must be inside the job object")
+
+	// Then a second Adopt that cannot succeed. In the field this is a pid whose
+	// process exited before the assignment landed, or a host where the agent is
+	// itself inside a job that forbids nesting.
+	dead := deadPID(t)
+	require.Error(t, group.Adopt(&os.Process{Pid: dead}),
+		"adopting a pid that names nothing must fail")
+
+	require.False(t, group.Isolated(),
+		"nothing was assigned to the job, so the group must not go on claiming a process tree it does not have")
+	require.ErrorIs(t, group.Kill(), platform.ErrProcessNotFound,
+		"the job holds nothing that answers for this pid, so the leader's own answer is the caller's; "+
+			"reporting success here tells a supervisor it killed something it never reached")
+}
+
 // TestJobObject_KillRacingClose covers the job handle's lifetime.
 //
 // Kill and Close are both public, and `defer g.Close()` next to a Kill from a

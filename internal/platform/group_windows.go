@@ -110,6 +110,49 @@ func openLeader(pid uint32, access uint32) (windows.Handle, error) {
 	return h, nil
 }
 
+// pinLeader opens the leader handle and then proves that the handle names the
+// process the caller meant, rather than whatever held the pid by the time
+// OpenProcess ran.
+//
+// Adopt needs no such proof: os/exec is still holding a handle of its own
+// there, so the pid cannot have been reissued between the caller learning it
+// and this package pinning it. The re-adoption path has no equivalent. Nothing
+// holds the pid between StatProcess reading it and OpenProcess resolving it,
+// and a number Windows has taken back off the free list inside that window
+// resolves to an uninvolved process — which the group would then be holding a
+// PROCESS_TERMINATE handle to, and would terminate on the next Kill. That is
+// the defect this file exists to remove, one call earlier than where it used to
+// live; the window is microseconds rather than the life of the group, but the
+// free list is exactly what makes microseconds enough.
+//
+// The proof is start identity: the creation FILETIME read back through the
+// pinned handle, against the one read from the pid a moment earlier. It is the
+// comparison SameProcess makes and rests on the same property #15 does — a
+// reused pid cannot also reproduce the instant the process it replaced was
+// created. A mismatch is reported as ErrProcessNotFound, because the process
+// the caller asked about is gone; every caller of this path already reads that
+// as "already exited" and stops.
+func pinLeader(pid uint32, startID string) (windows.Handle, error) {
+	h, err := openLeader(pid, leaderAccess)
+	if err != nil {
+		return 0, err
+	}
+
+	creation, err := creationTime(h)
+	if err != nil {
+		_ = windows.CloseHandle(h)
+		return 0, fmt.Errorf("platform: reading the start identity of pid %d: %w", pid, err)
+	}
+	if startIDFrom(creation) != startID {
+		// The pid was reissued between the two calls. Let the handle go
+		// without ever having acted on it, and without ever having told a
+		// caller this group could signal something.
+		_ = windows.CloseHandle(h)
+		return 0, fmt.Errorf("platform: pid %d was reused before it could be pinned: %w", pid, ErrProcessNotFound)
+	}
+	return h, nil
+}
+
 func newProcessGroup(cfg GroupConfig) (*ProcessGroup, error) {
 	var namePtr *uint16
 	if cfg.Name != "" {
@@ -153,7 +196,8 @@ func openProcessGroup(pid int, name string) (*ProcessGroup, error) {
 	if pid <= 0 {
 		return nil, fmt.Errorf("platform: invalid pid %d", pid)
 	}
-	if _, err := StatProcess(pid); err != nil {
+	info, err := StatProcess(pid)
+	if err != nil {
 		return nil, err
 	}
 
@@ -161,7 +205,6 @@ func openProcessGroup(pid int, name string) (*ProcessGroup, error) {
 	// handle to give back.
 	var namePtr *uint16
 	if name != "" {
-		var err error
 		namePtr, err = windows.UTF16PtrFromString(name)
 		if err != nil {
 			return nil, fmt.Errorf("platform: invalid job object name %q: %w", name, err)
@@ -170,12 +213,14 @@ func openProcessGroup(pid int, name string) (*ProcessGroup, error) {
 
 	g := &ProcessGroup{pid: uint32(pid)} //nolint:gosec // pid is positive, checked above
 
-	// Pin it now, for the reason Adopt does: StatProcess has just established
-	// that this pid is a live process, and a handle is what keeps that true
-	// afterwards. A failure is remembered rather than returned, because what
+	// Pin it now, for the reason Adopt does: a handle is what keeps this pid
+	// naming this process afterwards. Unlike Adopt, nothing was holding the pid
+	// while StatProcess and OpenProcess ran, so the handle has to be checked
+	// against the identity StatProcess saw before it can be trusted — see
+	// pinLeader. A failure is remembered rather than returned, because what
 	// this call owes its caller is a decision about the job — the leader's own
 	// error is the one Signal has always reported, at the moment it is asked.
-	if h, err := openLeader(g.pid, leaderAccess); err != nil {
+	if h, err := pinLeader(g.pid, info.StartID); err != nil {
 		g.leaderErr = err
 	} else {
 		g.leader = h
@@ -263,6 +308,14 @@ func (g *ProcessGroup) ConfigurePTYCommand(cmd *pty.Cmd) {
 // comment for the assignment race this cannot close, and for why the handle is
 // opened here rather than at the moment it is used.
 //
+// It must be called before anything waits on p, and that is a requirement
+// rather than a convention. Adopt resolves p.Pid exactly once, and what makes
+// that resolution safe is os/exec still holding a handle of its own — which
+// Wait closes. Called after a Wait, Adopt can pin, assign to the job, and later
+// terminate a process that merely inherited the number. There is no way for it
+// to detect that from the inside: an os.Process carries no identity beyond the
+// pid, so the caller owns this one.
+//
 // When it returns an error the group still knows the child's pid but has not
 // assigned it, so Signal and Kill fall back to the leader alone and report the
 // leader's own result. Isolated stays false; a supervisor that ignores this
@@ -282,6 +335,13 @@ func (g *ProcessGroup) Adopt(p *os.Process) error {
 	}
 
 	g.pid = uint32(p.Pid) //nolint:gosec // pid is positive, checked above
+	// Isolation describes the pid being taken on now, not whatever the group
+	// held before. Carrying a previous Adopt's true past this point would let
+	// terminate treat the job as the guarantee for a process that never reached
+	// it, and drop the leader's error as though the job had covered it — a live
+	// process reported as killed, which is the one answer this file must never
+	// give.
+	g.isolated = false
 	if g.leader != 0 {
 		// A second Adopt replaces the first. Nothing in this repository does
 		// that, but leaving the old handle open would reserve a pid nothing is
