@@ -416,6 +416,37 @@ func TestSignalDeadline_ClearsTheGraceTheAgentWillActuallyTake(t *testing.T) {
 	assert.Equal(t, callTimeout, signalDeadline(false, 600, callTimeout))
 }
 
+// A restart waits for the probe too, and this side never saw that probe: the
+// process was started by an earlier call and ProcessStatus does not report what
+// it was. So the allowance has to be at least the agent's own default rather
+// than a shorter guess, and a caller who started the process with a longer
+// probe timeout has to be able to say so — otherwise the call gives up first
+// and reports a timeout for a restart that is still going.
+func TestRestartProbeAllowance_NeverGivesUpBeforeTheAgentDoes(t *testing.T) {
+	// Unset: the agent's own default, which is what it will actually spend.
+	assert.GreaterOrEqual(t, restartProbeAllowance(0), defaultProbeTimeout+followSlack,
+		"a restart of a process with a probe costs the agent its default probe timeout before it answers")
+
+	// Named, and longer: it wins, because that is what the agent was told at
+	// start and what it will wait out here.
+	assert.GreaterOrEqual(t, restartProbeAllowance(120), 120*time.Second,
+		"a probe the caller says takes two minutes must not be cut off after the default")
+
+	// Named, and shorter: the default is still the floor, because the argument
+	// describes the process rather than the caller's patience and getting it
+	// wrong low must not shorten the deadline below what the agent spends.
+	assert.GreaterOrEqual(t, restartProbeAllowance(1), time.Second+followSlack)
+
+	// And bounded the same way every other seconds argument is: a huge one
+	// cannot multiply into a deadline that has already expired.
+	for _, seconds := range []float64{maxSecondsArgument + 1, 1e9, 9223372030, 1e18} {
+		got := restartProbeAllowance(seconds)
+		assert.Positivef(t, got, "ready_timeout_seconds=%g gave an allowance in the past", seconds)
+		assert.LessOrEqualf(t, got, maxSecondsArgument*time.Second+followSlack,
+			"ready_timeout_seconds=%g must be bounded, not taken at its word", seconds)
+	}
+}
+
 func TestGracePeriodFor_UsesTheAgentDefaultOnlyWhenUnset(t *testing.T) {
 	assert.Equal(t, defaultGraceSeconds*time.Second, gracePeriodFor(0))
 	assert.Equal(t, defaultGraceSeconds*time.Second, gracePeriodFor(-5))

@@ -1,6 +1,8 @@
 package agent_test
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,6 +68,31 @@ func TestForwardConfig_AllowedHostsAreMatchedCaseInsensitively(t *testing.T) {
 	assert.False(t, cfg.HostAllowed("build-host.internal.evil.test"),
 		"the match is on the whole host, not a prefix")
 	assert.False(t, cfg.HostAllowed(""))
+}
+
+// Every audit record names the sandbox it came from — docs/security.md says so
+// as a fact, and these files are shipped off-box and read together. The name
+// comes from the config, enrolment writes it, and a hand-written config that
+// omits it loses that silently. Silently is the part this fixes.
+func TestAudit_WarnsWhenRecordsWouldNotNameTheHost(t *testing.T) {
+	warnings := func(cfg *agent.Config) string {
+		t.Helper()
+		var buf bytes.Buffer
+		log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		cfg.Audit.Path = filepath.Join(t.TempDir(), "audit.jsonl")
+		cfg.Audit.Enabled = true
+		audit := agent.AuditForTest(cfg, log)
+		t.Cleanup(func() { _ = audit.Close() })
+		return buf.String()
+	}
+
+	unnamed := warnings(&agent.Config{})
+	assert.Contains(t, unnamed, "AUDIT RECORDS WILL NOT NAME THIS HOST")
+	assert.Contains(t, unnamed, "name is not set")
+
+	named := warnings(&agent.Config{Name: "build-box"})
+	assert.NotContains(t, named, "AUDIT RECORDS WILL NOT NAME THIS HOST",
+		"an agent that names itself has nothing to warn about")
 }
 
 // The shipped example documents the forward section; this is what stops it

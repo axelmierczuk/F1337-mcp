@@ -228,6 +228,78 @@ func TestCarry_ReleasesAConnectionWhoseStreamEnded(t *testing.T) {
 	}
 }
 
+// quietStream is a stream that opens and then says nothing until its RPC
+// context is cancelled, which is what a real one does while the sandbox-side
+// server sits idle. It is the other half of the pair: carriedStream ends on its
+// own, this one never does.
+type quietStream struct {
+	grpc.ClientStream
+	ctx    context.Context //nolint:containedctx // it stands in for the RPC context a real stream carries
+	opened bool
+}
+
+func (s *quietStream) Send(*sandboxdv1.ForwardRequest) error { return nil }
+func (s *quietStream) CloseSend() error                      { return nil }
+
+func (s *quietStream) Recv() (*sandboxdv1.ForwardResponse, error) {
+	if !s.opened {
+		s.opened = true
+		return &sandboxdv1.ForwardResponse{
+			Event: &sandboxdv1.ForwardResponse_Opened{Opened: &sandboxdv1.ForwardOpened{Success: true}},
+		}, nil
+	}
+	<-s.ctx.Done()
+	return nil, s.ctx.Err()
+}
+
+type quietClient struct{}
+
+func (quietClient) Forward(ctx context.Context, _ ...grpc.CallOption) (grpc.BidiStreamingClient[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], error) {
+	return &quietStream{ctx: ctx}, nil
+}
+
+// resetConn is a local connection whose read side has failed the way a client
+// killed mid-request does: a reset, which is neither io.EOF nor net.ErrClosed
+// and is not something the connection recovers from.
+type resetConn struct{ net.Conn }
+
+func (c *resetConn) Read([]byte) (int, error) {
+	return 0, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
+}
+
+// A connection whose local client died must be released without waiting for the
+// sandbox-side server to notice.
+//
+// A half-close is EOF and must not end the connection — the response still has
+// to come back — but a *failed* read is the client being gone, and there is
+// nothing left to deliver to. Without ending the connection there, the
+// receiving pump stays parked in stream.Recv until the sandbox-side server
+// happens to close: one goroutine, one descriptor, one gRPC stream and one slot
+// against the agent's forward.max_connections, held per aborted request on
+// exactly the long-lived forward where they accumulate. A server that neither
+// writes nor closes when its peer half-closes — anything waiting for the rest
+// of a message — never gets there at all.
+func TestCarry_ReleasesAConnectionWhoseLocalClientDied(t *testing.T) {
+	_, server := tcpPair(t)
+
+	r := NewRegistrar(nil, Deps{})
+	f := &activeForward{key: forwardKey{sandbox: "build-box", remotePort: 3000}, localAddr: "127.0.0.1:1"}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.carry(t.Context(), f, quietClient{}, &resetConn{Conn: server})
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reading from the local connection",
+			"the client's own failure is the cause, and is what belongs in the forward's last_error")
+	case <-time.After(20 * time.Second):
+		t.Fatal("carry never returned: an aborted local connection holds its stream, its socket and the agent's connection slot until the sandbox-side server happens to close")
+	}
+}
+
 // ------------------------------------------------------------- the stop call
 
 // The instruction a forward hands back has to be the one that works. remote_host

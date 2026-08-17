@@ -133,10 +133,14 @@ type Record struct {
 	// RemoteHost is empty when the caller named no host, which means loopback.
 	RemoteHost string `json:"remote_host,omitempty"`
 	RemotePort uint32 `json:"remote_port,omitempty"`
-	// ResolvedAddress is the host:port the agent actually dialed. It is empty
-	// when the connection never got that far — refused by configuration, or a
-	// name that did not resolve — which is how a reader tells "resolved to
-	// this" apart from "never resolved".
+	// ResolvedAddress is the address the connection actually went to, taken
+	// from the socket rather than from the request: an allow-listed host is
+	// dialed by name, so a field filled in from what was asked for would only
+	// ever restate RemoteHost and could never show a name that resolved
+	// somewhere unexpected — which is the case it exists for. It is empty when
+	// the connection never got that far — refused by configuration, or a name
+	// that did not resolve — which is how a reader tells "resolved to this"
+	// apart from "never resolved".
 	ResolvedAddress string `json:"resolved_address,omitempty"`
 	// LocalAddress is the local end of the agent's own outbound socket. It is
 	// what joins this record to the host's netflow, conntrack or firewall log,

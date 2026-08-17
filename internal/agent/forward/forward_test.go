@@ -585,9 +585,9 @@ func TestAudit_PermittedNonLoopbackForwardIsRecorded(t *testing.T) {
 	port := echoServer(t)
 	svc := newService(t, agent.ForwardConfig{AllowedHosts: []string{"build-host.internal"}})
 	// The allow list matches on the name, so the dial goes to the name. It is
-	// pointed back at loopback here so the connection actually completes and
-	// the byte counts are real — the address the service chose is asserted on
-	// through the record's resolved_address rather than here.
+	// pointed back at loopback here so the connection actually completes, the
+	// byte counts are real, and the name and the address genuinely differ —
+	// which is the whole point of recording both.
 	svc.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
@@ -625,10 +625,17 @@ func TestAudit_PermittedNonLoopbackForwardIsRecorded(t *testing.T) {
 	assert.False(t, rec.Time.IsZero())
 
 	// What was asked for, and what it became. Both, because they are different
-	// facts and an investigation needs each.
+	// facts and an investigation needs each — and "what it became" has to come
+	// from the socket, not from the request. An allow-listed host is dialed by
+	// name, so a resolved_address filled in from the target would restate
+	// remote_host and never show a name that resolved somewhere unexpected,
+	// which is the one case the field exists for.
 	assert.Equal(t, "build-host.internal", rec.RemoteHost)
 	assert.Equal(t, uint32(8080), rec.RemotePort)
-	assert.Equal(t, "build-host.internal:8080", rec.ResolvedAddress)
+	assert.Equal(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), rec.ResolvedAddress,
+		"resolved_address must be where the packets went, not the name they were addressed to")
+	assert.NotEqual(t, "build-host.internal:8080", rec.ResolvedAddress,
+		"a resolved address that is the requested host and port again answers nothing")
 	assert.NotEmpty(t, rec.LocalAddress, "the local socket is what joins this to the host's own network logs")
 
 	// Volume, in both directions, and nothing else about it.
@@ -806,7 +813,12 @@ func TestAudit_FailedDialToAPermittedHostIsRecorded(t *testing.T) {
 	rec := onlyRecord(t, svc)
 	assert.Equal(t, policy.OutcomeError, rec.Outcome)
 	assert.Equal(t, "build-host.internal", rec.RemoteHost)
-	assert.Equal(t, "build-host.internal:8080", rec.ResolvedAddress)
+	// Where it went, for a connection that did not answer either. The dialer
+	// resolved the name and put the address it tried in the error it returned;
+	// that is the only place it survives, and it is what an operator reading
+	// "a permitted target did not answer" needs.
+	assert.Equal(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(dead)), rec.ResolvedAddress,
+		"a failed dial still knows where it went")
 	assert.NotEmpty(t, rec.Error)
 }
 

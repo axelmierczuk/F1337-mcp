@@ -682,10 +682,25 @@ func (r *Registrar) carry(ctx context.Context, f *activeForward, client sandboxd
 
 	// Local to sandbox. The local client closing its write side ends this
 	// direction and only this direction: the response still has to come back.
+	//
+	// A local socket that *failed* is a different event, and it is why this
+	// cancels where a clean half-close must not. localToStream reports EOF —
+	// which is both a half-close and this side's own teardown closing the
+	// socket underneath it — as no error at all, so a non-nil error here means
+	// the local client is gone rather than merely finished: killed mid-request,
+	// or reset. There is nobody left to deliver a response to, and without the
+	// cancel the receiving pump stays parked in stream.Recv until the
+	// sandbox-side server happens to close — holding one goroutine, one
+	// descriptor, one gRPC stream and one slot against the agent's
+	// forward.max_connections. A server that neither writes nor closes when its
+	// peer half-closes never gets there at all, and an aborted request is
+	// ordinary traffic on a forward that stays open for hours.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		sendErr = localToStream(conn, stream)
+		if sendErr = localToStream(conn, stream); sendErr != nil {
+			cancel()
+		}
 	}()
 
 	// Sandbox to local. A close *event* does not stop the other direction: a
@@ -710,10 +725,17 @@ func (r *Registrar) carry(ctx context.Context, f *activeForward, client sandboxd
 	}()
 
 	wg.Wait()
-	if recvErr != nil {
-		return recvErr
+	// The local socket failing is a cause rather than a consequence, so it is
+	// the one to report: this side's own teardown closes that socket with
+	// net.ErrClosed, which localToStream reports as no error, so a non-nil
+	// sendErr is always the client's own failure and never a knock-on of the
+	// stream ending. It is what a reader of the forward's last_error needs —
+	// "connection reset by peer" rather than "the forward stream ended:
+	// context canceled", which is this function describing its own cleanup.
+	if sendErr != nil {
+		return sendErr
 	}
-	return sendErr
+	return recvErr
 }
 
 // forwardSender is the send half of the client stream, narrowed so a test can

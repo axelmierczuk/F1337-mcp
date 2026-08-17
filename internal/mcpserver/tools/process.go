@@ -609,6 +609,29 @@ func (r *Registrar) processStart(ctx context.Context, _ *mcp.CallToolRequest, ta
 	return out, nil
 }
 
+// restartProbeAllowance is how long a restart's deadline must clear for the
+// readiness probe alone.
+//
+// The start path sizes this from the probe the caller just supplied. A restart
+// re-runs the probe the process already has, which this side never saw and
+// which ProcessStatus does not report — so a flat allowance here is a guess,
+// and the guess has to be the agent's own default rather than a shorter one:
+// the deadline this side applies must never be the shorter of the two, or the
+// call reports a timeout for a restart that is still working and the caller
+// concludes the process is stuck when it is starting. A caller that started the
+// process with a longer probe timeout says so, and gets a deadline that clears
+// it.
+func restartProbeAllowance(readyTimeoutSeconds float64) time.Duration {
+	if d := secondsToDuration(readyTimeoutSeconds); d > 0 {
+		return d + followSlack
+	}
+	return defaultProbeTimeout + followSlack
+}
+
+// defaultProbeTimeout is the agent's own default readiness-probe timeout,
+// mirrored here so a deadline sized without knowing the probe still clears it.
+const defaultProbeTimeout = 30 * time.Second
+
 // probeDeadline is how long the agent may block waiting for this probe.
 func probeDeadline(probe *sandboxdv1.ReadyProbe) time.Duration {
 	if d := probe.GetTimeout().AsDuration(); d > 0 {
@@ -616,7 +639,7 @@ func probeDeadline(probe *sandboxdv1.ReadyProbe) time.Duration {
 	}
 	// The agent's own default, mirrored here so the deadline this side applies
 	// is never the shorter of the two.
-	return 30 * time.Second
+	return defaultProbeTimeout
 }
 
 // recentLogs fetches the tail of a process's output for a readiness failure.
@@ -897,6 +920,13 @@ func (r *Registrar) processLogs(ctx context.Context, _ *mcp.CallToolRequest, tar
 	}
 	if in.TailLines < 0 {
 		return ProcessLogsResult{}, fmt.Errorf("tail_lines %d is negative", in.TailLines)
+	}
+	// Named rather than quietly turned into the default, the way grace_seconds
+	// and the probe's two seconds arguments already are. A caller who sent a
+	// negative bound got the number wrong, and a call that silently follows for
+	// twenty seconds instead teaches them it was accepted.
+	if in.FollowSeconds < 0 {
+		return ProcessLogsResult{}, fmt.Errorf("follow_seconds %d is negative", in.FollowSeconds)
 	}
 
 	req := &sandboxdv1.GetProcessLogsRequest{
@@ -1225,6 +1255,8 @@ type ProcessRestartArgs struct {
 	// WaitForReady blocks until the probe passes again. Unset means "yes, if
 	// the process has a probe".
 	WaitForReady *bool `json:"wait_for_ready,omitempty" jsonschema:"wait for the readiness probe to pass again before returning; defaults to true when the process has a probe"`
+	// ReadyTimeoutSeconds is how long the probe may take after the restart.
+	ReadyTimeoutSeconds float64 `json:"ready_timeout_seconds,omitempty" jsonschema:"how long the readiness probe may take after the restart; defaults to 30, the agent's own probe default. Set it to the ready_probe.timeout_seconds this process was started with if that was longer, or this call gives up before the agent does"`
 }
 
 // ProcessRestartResult is the sandbox_process_restart result.
@@ -1252,6 +1284,9 @@ func (r *Registrar) processRestart(ctx context.Context, _ *mcp.CallToolRequest, 
 	if in.GraceSeconds < 0 {
 		return ProcessRestartResult{}, fmt.Errorf("grace_seconds %d is negative", in.GraceSeconds)
 	}
+	if in.ReadyTimeoutSeconds < 0 {
+		return ProcessRestartResult{}, fmt.Errorf("ready_timeout_seconds %g is negative", in.ReadyTimeoutSeconds)
+	}
 	graceSeconds := min(in.GraceSeconds, maxSecondsArgument)
 
 	client, err := r.processClient(target)
@@ -1277,7 +1312,7 @@ func (r *Registrar) processRestart(ctx context.Context, _ *mcp.CallToolRequest, 
 	// deadline is sized from that rather than from the zero the caller sent.
 	timeout := r.deps.callTimeout() + gracePeriodFor(graceSeconds)
 	if wait {
-		timeout += 30 * time.Second
+		timeout += restartProbeAllowance(in.ReadyTimeoutSeconds)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

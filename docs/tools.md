@@ -218,7 +218,7 @@ Buffered output, optionally following new output.
 | `since` | timestamp | |
 | `filter_pattern` | string | RE2. |
 | `follow` | bool | Stream new output after the replay. |
-| `follow_seconds` | int | Bound on following, default 20. Clamped to the agent's maximum. |
+| `follow_seconds` | int | Bound on following, default 20. Clamped to the agent's maximum; a negative one is refused rather than treated as the default. |
 
 Following is **always bounded**. A call that never returns cannot be
 distinguished from a hung agent, and the model cannot recover from it. A process
@@ -282,6 +282,13 @@ Stop and start again from the same spec, optionally waiting for readiness.
 | `process_id` | string | **Required.** |
 | `grace_seconds` | int | |
 | `wait_for_ready` | bool | Defaults to true. |
+| `ready_timeout_seconds` | number | How long the probe may take after the restart. Defaults to 30, the agent's own probe default. |
+
+A restart re-runs the probe the process already has, and this side never saw
+it — `sandbox_process_list` does not report a process's probe. So the call's
+deadline is sized from the agent's default, and a process started with a longer
+`ready_probe.timeout_seconds` needs the same number here, or the call gives up
+before the agent does and reports a timeout for a restart that is still working.
 
 The `process_id` is preserved and so is the log history: a restart is the same
 process, not a similar one. `restart_count` is deliberately **not** incremented

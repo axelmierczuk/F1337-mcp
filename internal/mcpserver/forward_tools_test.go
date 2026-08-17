@@ -615,7 +615,16 @@ func TestForward_NonLoopbackForwardIsAudited(t *testing.T) {
 	assert.Equal(t, liveSandboxName, rec.Sandbox)
 	assert.Equal(t, "localhost", rec.RemoteHost, "what the caller asked for")
 	assert.Equal(t, uint32(remote.port), rec.RemotePort) //nolint:gosec // a kernel-assigned port is in range
-	assert.NotEmpty(t, rec.ResolvedAddress, "what it became")
+
+	// What it became, and it has to be an address rather than the name again.
+	// A listed host is dialed by name, so this is the one field that can show a
+	// name resolving somewhere it should not have — and it can only do that if
+	// it comes from the socket.
+	resolvedHost, resolvedPort, err := net.SplitHostPort(rec.ResolvedAddress)
+	require.NoErrorf(t, err, "resolved_address %q must be an address", rec.ResolvedAddress)
+	assert.NotNil(t, net.ParseIP(resolvedHost),
+		"resolved_address must name the address the packets went to, not the host that was requested")
+	assert.Equal(t, strconv.Itoa(remote.port), resolvedPort)
 	assert.NotEmpty(t, rec.LocalAddress)
 	assert.Positive(t, rec.BytesToRemote, "the request")
 	assert.Positive(t, rec.BytesFromRemote, "the response")
@@ -694,6 +703,12 @@ func auditRecords(t *testing.T, path string) []policy.Record {
 // hours across many connections is where those accumulate, and the failure is
 // invisible until the MCP server is slowly using a gigabyte — so the count has
 // to come back down, not merely stay plausible.
+//
+// This one measures what teardown releases, and only that: it stops the forward
+// before it counts, and stopping a forward cancels everything under it. A hold
+// that exists only while the forward is running is invisible here by
+// construction — see TestForward_ReleasesEveryConnectionWhileItStaysOpen, which
+// is the assertion that can see one.
 func TestForward_NoGoroutineLeakAcrossManyConnections(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
@@ -732,6 +747,169 @@ func TestForward_NoGoroutineLeakAcrossManyConnections(t *testing.T) {
 	goleak.VerifyNone(t, baseline)
 }
 
+// The measurement the assertion above cannot make.
+//
+// TestForward_NoGoroutineLeakAcrossManyConnections stops the forward before it
+// counts, and stopping a forward cancels everything running under it — so it
+// structurally cannot see a hold that exists only while the forward is open,
+// which is what both of the connection-lifetime leaks found so far were. This
+// one counts with the forward still serving, after enough connections of enough
+// shapes that a per-connection hold would be unmistakable rather than plausible:
+// completed ones, ones whose far side is reset mid-request, and idle ones that
+// never say anything at all.
+//
+// It counts descriptors as well as goroutines. goleak does not see a socket,
+// and a forward that returns every goroutine while keeping every descriptor
+// still stops working after a few thousand connections — just with a different
+// error message.
+func TestForward_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{})
+	echo := startEchoServer(t)
+	// A server that answers nothing and resets the connection instead, which is
+	// what a server crashing mid-request looks like from the agent's socket.
+	crashing := startResettingServer(t)
+	// And a server that will volunteer nothing at all: it never reads, never
+	// writes, and never closes. Nothing on the sandbox side will ever end one of
+	// these connections, so what ends it has to be this side noticing that its
+	// own client is gone.
+	parked, releaseParked := startParkedServer(t)
+
+	echoForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": echo.port})
+	crashForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": crashing.port})
+	parkedForward := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": parked.port})
+
+	// One of each first, so gRPC's own long-lived goroutines and the pool's own
+	// descriptors are in the baseline rather than counted as a hold.
+	roundTrip(t, echoForward.LocalAddress, "warmup")
+	abortedRoundTrip(t, crashForward.LocalAddress)
+	resetRoundTrip(t, parkedForward.LocalAddress)
+	waitForNoOpenConnections(t, f, echo.port, crashing.port, parked.port)
+
+	baseline := goleak.IgnoreCurrent()
+	descriptorsBefore, canCountDescriptors := openDescriptors()
+
+	const (
+		sequential = 120
+		concurrent = 60
+		aborted    = 60
+		killed     = 40
+		idle       = 40
+	)
+
+	for i := range sequential {
+		roundTrip(t, echoForward.LocalAddress, fmt.Sprintf("sequential-%d", i))
+	}
+
+	// Overlapping, because the sequential case cannot show a hold that only
+	// happens when accepts interleave.
+	var wg sync.WaitGroup
+	for i := range concurrent {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			roundTrip(t, echoForward.LocalAddress, fmt.Sprintf("concurrent-%d", i))
+		}()
+	}
+	wg.Wait()
+
+	// The far side killed mid-request. This is the ordinary way a forwarded
+	// connection dies, not an exotic one, and it is the path on which the agent
+	// has to volunteer that the socket failed — nothing else would ever ask.
+	// Concurrently, so that an agent which stopped volunteering that the socket
+	// had failed would cost this test one client deadline rather than sixty.
+	for range aborted {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			abortedRoundTrip(t, crashForward.LocalAddress)
+		}()
+	}
+	wg.Wait()
+
+	// And this side killed mid-request, against a server that will never
+	// volunteer anything: ^C on a curl, a closed browser tab, a client process
+	// killed. Nothing on the sandbox side ends these, so a connection still
+	// counted here is one held for the life of the forward.
+	for range killed {
+		resetRoundTrip(t, parkedForward.LocalAddress)
+	}
+
+	// And connections that do nothing, held open. A browser's keep-alive
+	// connection through a forward is exactly this: parked, with a send pump
+	// parked in conn.Read waiting for a client that has no reason to speak.
+	held := make([]net.Conn, 0, idle)
+	for range idle {
+		conn, err := net.DialTimeout("tcp", echoForward.LocalAddress, 10*time.Second)
+		require.NoError(t, err)
+		held = append(held, conn)
+	}
+	eventually(t, 30*time.Second, "the idle connections to be counted as carried", func() bool {
+		return openConnections(f, echo.port) == idle
+	})
+	for _, conn := range held {
+		require.NoError(t, conn.Close())
+	}
+
+	// Now the count, with every forward still open and still listening.
+	waitForNoOpenConnections(t, f, echo.port, crashing.port, parked.port)
+
+	// The stand-in server's own sockets go first, and only now: the forward has
+	// already been observed releasing every connection, so what is left to count
+	// is the forward's, not the fixture's.
+	releaseParked()
+
+	goleak.VerifyNone(t, baseline)
+
+	if canCountDescriptors {
+		descriptorsAfter, _ := openDescriptors()
+		// Slack, not equality: the fixture's own gRPC connection and the agent's
+		// listeners move a little underneath this. What it must not do is grow
+		// with the connections that just went through.
+		assert.LessOrEqualf(t, descriptorsAfter, descriptorsBefore+16,
+			"descriptors grew from %d to %d across %d forwarded connections; goleak does not see a socket",
+			descriptorsBefore, descriptorsAfter, sequential+concurrent+aborted+killed+idle)
+	}
+
+	// And the forward still works, so none of the above was achieved by
+	// breaking it.
+	roundTrip(t, echoForward.LocalAddress, "still serving")
+}
+
+// waitForNoOpenConnections waits until every named forward reports nothing in
+// flight, asked of the running server rather than of a torn-down one.
+func waitForNoOpenConnections(t *testing.T, f *liveFixture, remotePorts ...int) {
+	t.Helper()
+	for _, port := range remotePorts {
+		eventually(t, 60*time.Second, fmt.Sprintf("forward to port %d to release every connection", port), func() bool {
+			return openConnections(f, port) == 0
+		})
+	}
+}
+
+// openConnections asks the forward listing how many connections it is carrying
+// right now. A repeated call for an open forward reuses it, so this is a
+// question rather than an action.
+func openConnections(f *liveFixture, remotePort int) int {
+	out := liveOK[tools.ForwardResult](f, "sandbox_forward", map[string]any{"remote_port": remotePort})
+	for _, line := range out.Active {
+		if line.RemotePort == remotePort {
+			return line.OpenNow
+		}
+	}
+	return -1
+}
+
+// openDescriptors counts this process's open descriptors, and reports whether
+// the platform can be asked at all — Windows cannot, and skipping the count
+// there is better than a count that means something else.
+func openDescriptors() (int, bool) {
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		return 0, false
+	}
+	return len(entries), true
+}
+
 // ---------------------------------------------------------------- helpers
 
 type remoteServer struct{ port int }
@@ -768,6 +946,71 @@ func startReadThenReplyServer(t *testing.T, reply string) remoteServer {
 		}
 		_, _ = conn.Write([]byte(reply))
 	})
+}
+
+// startResettingServer reads a request and then resets the connection instead
+// of answering it, which is what a server crashing mid-request does to its
+// socket. Whether the agent sees that as ECONNRESET or as a tidy EOF is the
+// platform's choice; both have to end the forwarded connection.
+func startResettingServer(t *testing.T) remoteServer {
+	return startTCPServer(t, func(conn net.Conn) {
+		buf := make([]byte, 64)
+		_, _ = conn.Read(buf)
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			// Linger zero makes Close send an RST rather than a FIN.
+			_ = tcp.SetLinger(0)
+		}
+		_ = conn.Close()
+	})
+}
+
+// startParkedServer accepts and holds: it never reads, never writes and never
+// closes. It is the sandbox-side server that has not got a complete request yet
+// — a database connection, anything framed — and it is what makes a local
+// client's own death the only thing that can end the forwarded connection.
+//
+// Deliberately not built on startTCPServer: one accept goroutine and no
+// goroutine per connection, so this fixture's own goroutines and descriptors
+// are a constant rather than something a leak count has to allow for. The
+// returned function releases the sockets it is holding, for the same reason.
+func startParkedServer(t *testing.T) (remoteServer, func()) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	var (
+		mu     sync.Mutex
+		held   []net.Conn
+		accept sync.WaitGroup
+	)
+	accept.Add(1)
+	go func() {
+		defer accept.Done()
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+
+	release := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+		held = nil
+	}
+	t.Cleanup(func() {
+		_ = lis.Close()
+		accept.Wait()
+		release()
+	})
+	return remoteServer{port: lis.Addr().(*net.TCPAddr).Port}, release
 }
 
 // startGreetThenCloseServer writes and closes immediately, so the local client
@@ -844,6 +1087,41 @@ func roundTrip(t *testing.T, address, payload string) {
 	got, err := io.ReadAll(conn)
 	require.NoError(t, err)
 	require.Equal(t, payload, string(got))
+}
+
+// abortedRoundTrip sends a request whose far side is reset before it answers,
+// and reads the connection out. The local client behaves — it notices the end
+// and hangs up — because that is what every real one does, and it is what lets
+// the agent's own handler unwind.
+func abortedRoundTrip(t *testing.T, address string) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(30*time.Second)))
+
+	// Both are allowed to fail: the point is that the connection ends, not how.
+	_, _ = conn.Write([]byte("a request nobody is going to answer"))
+	_, _ = io.ReadAll(conn)
+}
+
+// resetRoundTrip opens a connection through the forward, sends a request, and
+// then kills the local client the way ^C or a closed browser tab does: a reset
+// rather than a graceful close, so the forward learns the client is gone rather
+// than that it has finished sending.
+func resetRoundTrip(t *testing.T, address string) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	require.NoError(t, err)
+
+	tcp, ok := conn.(*net.TCPConn)
+	require.True(t, ok)
+	// Linger zero makes Close send an RST, which the forward's read of this
+	// socket sees as a failure rather than as the EOF a half-close produces.
+	require.NoError(t, tcp.SetLinger(0))
+
+	_, _ = conn.Write([]byte("a request the client will not wait for"))
+	require.NoError(t, conn.Close())
 }
 
 // routableAddress returns a non-loopback IPv4 address of this host, or "" if

@@ -358,6 +358,38 @@ func TestProcessLogs_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 	stop(t, f, started.Process.ProcessID)
 }
 
+// Every seconds-valued argument in this group is refused by name when it is
+// negative, rather than quietly becoming a default. A caller who sent one got
+// the number wrong, and a call that silently substitutes its own teaches them
+// the argument was accepted — which is the same class of quiet acceptance the
+// probe's two float arguments were fixed for.
+func TestProcessTools_RefuseANegativeSecondsArgument(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{})
+	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("bounded", "silent"))
+
+	for _, tc := range []struct {
+		tool     string
+		args     map[string]any
+		argument string
+	}{
+		{"sandbox_process_logs", map[string]any{
+			"process_id": started.Process.ProcessID, "follow": true, "follow_seconds": -5,
+		}, "follow_seconds"},
+		{"sandbox_process_restart", map[string]any{
+			"process_id": started.Process.ProcessID, "ready_timeout_seconds": -1,
+		}, "ready_timeout_seconds"},
+		{"sandbox_process_signal", map[string]any{
+			"process_id": started.Process.ProcessID, "graceful_stop": true, "grace_seconds": -1,
+		}, "grace_seconds"},
+	} {
+		msg := f.liveFails(tc.tool, tc.args)
+		assert.Containsf(t, msg, tc.argument, "%s must name the argument it refused", tc.tool)
+		assert.Containsf(t, msg, "negative", "%s must say why", tc.tool)
+	}
+
+	stop(t, f, started.Process.ProcessID)
+}
+
 // ---------------------------------------------------------------- signal
 
 // A graceful stop has to report whether it escalated, because "stopped" and

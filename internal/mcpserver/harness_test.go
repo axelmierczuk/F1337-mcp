@@ -187,10 +187,6 @@ func (c *fakeClients) Host(name, _ string) (sandboxdv1.HostServiceClient, error)
 // the fleet-wide echo walks can call the exec, file and transfer tools. What
 // those tools actually do is tested against the real agent services over
 // bufconn; see agentbackend_test.go.
-// Exec and Files answer with the canned clients in execfiles_fakes_test.go, so
-// the fleet-wide echo walks can call the exec, file and transfer tools. What
-// those tools actually do is tested against the real agent services over
-// bufconn; see agentbackend_test.go.
 func (c *fakeClients) Exec(string, string) (sandboxdv1.ExecServiceClient, error) {
 	return fakeExec{}, nil
 }

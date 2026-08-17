@@ -546,10 +546,10 @@ func (s *Service) connect(ctx context.Context, addresses []string) (net.Conn, st
 		conn, err := s.dial(dialCtx, "tcp", address)
 		cancel()
 		if err == nil {
-			return conn, address, nil
+			return conn, peerAddress(conn, address), nil
 		}
 		if firstErr == nil {
-			firstErr, firstAddress = err, address
+			firstErr, firstAddress = err, dialedAddress(err, address)
 		}
 		if ctx.Err() != nil {
 			break
@@ -559,6 +559,35 @@ func (s *Service) connect(ctx context.Context, addresses []string) (net.Conn, st
 		firstErr = errors.New("no address to connect to")
 	}
 	return nil, firstAddress, firstErr
+}
+
+// peerAddress is where the connection actually went, which is not always where
+// it was pointed.
+//
+// An allow-listed host is dialed by *name* — see [Service.resolveTarget] — and
+// that name is the only thing about the target the caller already told us. The
+// record's resolved_address exists to answer the other question: a name that
+// resolved somewhere unexpected is the case worth seeing, and a field that
+// echoed the name back could never show it. The socket knows, so ask the
+// socket.
+func peerAddress(conn net.Conn, dialed string) string {
+	if addr := conn.RemoteAddr(); addr != nil {
+		return addr.String()
+	}
+	return dialed
+}
+
+// dialedAddress is the same answer for a dial that failed. The dialer resolved
+// the name itself and put the address it tried in the net.OpError it returns,
+// which is the only place that survives the failure — and "a permitted target
+// that did not answer" is a line an operator reads for where it went, not for
+// what it was called.
+func dialedAddress(err error, attempted string) string {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Addr != nil {
+		return opErr.Addr.String()
+	}
+	return attempted
 }
 
 // dialMessage strips the layers a net.OpError wraps a refusal in, so the

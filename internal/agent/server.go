@@ -252,6 +252,17 @@ func auditFor(cfg *Config, log *slog.Logger) *policy.Audit {
 			"consequence", "this agent records nothing about the commands it runs or the files it writes")
 		return auditLog
 	}
+	if cfg.Name == "" {
+		// docs/security.md states as a fact that every record names the host it
+		// came from, and the records are shipped off-box and read together — a
+		// line that does not name its machine cannot be acted on. Enrolment
+		// writes `name`, so a real agent has one; a hand-written configuration
+		// that omits it would otherwise lose that silently, which is the way it
+		// was found.
+		log.Warn("AUDIT RECORDS WILL NOT NAME THIS HOST",
+			"reason", "name is not set in the agent configuration",
+			"consequence", "records from this agent cannot be told apart from another's once they are shipped off-box")
+	}
 	if err := auditLog.Preflight(); err != nil {
 		level := "commands will run unrecorded"
 		if auditLog.Required() {
