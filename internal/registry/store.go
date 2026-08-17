@@ -47,13 +47,21 @@ type Registry struct {
 // directory (mode 0700) if it does not exist. If a file already exists at
 // path, it is parsed eagerly so a truncated or malformed registry is
 // reported immediately rather than on first use.
+//
+// That eager parse takes the same cross-process lock every other access takes.
+// It reads a file concurrent writers replace by rename, and a read outside the
+// lock races that rename: on Windows a handle opened for reading carries no
+// FILE_SHARE_DELETE, so the overlap fails either this read with a sharing
+// violation or the writer's MoveFileEx — and a caller whose Open failed never
+// makes the write it opened the registry to make. enroll.OpenTokenStore, the
+// sibling implementation of this same pattern, has always taken the lock here.
 func Open(path string) (*Registry, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("registry: create config directory for %s: %w", path, err)
 	}
 	r := &Registry{path: path}
 	if _, err := os.Stat(path); err == nil {
-		if _, err := r.load(); err != nil {
+		if err := r.read(func(*state) error { return nil }); err != nil {
 			return nil, err
 		}
 	} else if !os.IsNotExist(err) {
