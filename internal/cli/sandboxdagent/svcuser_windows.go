@@ -61,6 +61,11 @@ func ensureServiceUser(name string, _ bool) error {
 	return nil
 }
 
+// serviceAccessByOwnership records that access on Windows is governed by ACLs
+// rather than by an owner, so nothing `install` does to ownership would grant
+// it. See grantServiceUserAccess.
+const serviceAccessByOwnership = false
+
 // chownToServiceUser is a no-op on Windows.
 //
 // Directory access is governed by ACLs rather than an owner, and the
@@ -69,3 +74,11 @@ func ensureServiceUser(name string, _ bool) error {
 // a custom account must grant it access to the allowed roots itself, which is
 // documented in docs/service.md.
 func chownToServiceUser(string, string) error { return nil }
+
+// grantServiceUserAccess is a no-op on Windows, for the same reason.
+//
+// %ProgramData%\sandboxd inherits an ACL that already admits the built-in
+// service identities, and there is no Unix-style 0600 to undo: `enroll` writes
+// the key with the same inherited ACL. An install under a custom account has to
+// be granted access by hand — docs/service.md says so.
+func grantServiceUserAccess(string, string, []string) error { return nil }

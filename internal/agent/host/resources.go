@@ -3,6 +3,8 @@ package host
 import (
 	"os"
 	"runtime"
+	"sync/atomic"
+	"time"
 )
 
 // Resources is what the host can actually offer, as opposed to what the
@@ -34,6 +36,54 @@ func ProbeResources(diskPath string) Resources {
 		res.CPUCores = uint32(runtime.NumCPU()) //nolint:gosec // core count does not overflow uint32
 	}
 	return res
+}
+
+var (
+	// diskProbeTimeout bounds the one measurement in this package that can
+	// block indefinitely.
+	diskProbeTimeout = 2 * time.Second
+	// diskUsage is the platform's filesystem measurement, indirected so the
+	// bound below can be tested against a probe that really does not return.
+	diskUsage = disk
+	// diskProbeRunning is set while a measurement is outstanding.
+	diskProbeRunning atomic.Bool
+)
+
+// probeDisk measures the filesystem at path, giving up after diskProbeTimeout.
+//
+// statfs and GetDiskFreeSpaceEx block in the kernel, uninterruptibly, on an
+// unresponsive mount — an NFS server that stopped answering, an autofs target
+// that never appears. Nothing in Go cancels that: no context, no deadline, no
+// signal. Left unbounded it is the one call on the GetHostInfo path that can
+// never return, and every caller that hits it pins an OS thread there for the
+// life of the daemon.
+//
+// So the wait is bounded, and at most one measurement is outstanding at a time.
+// The bound alone would still let a polling control plane strand one thread per
+// call; the second condition is what makes the cost of a dead mount constant
+// rather than proportional to how often anyone asks.
+//
+// Giving up reports zero, which is what every other figure here does when it
+// cannot be determined.
+func probeDisk(path string) (total, available uint64) {
+	if !diskProbeRunning.CompareAndSwap(false, true) {
+		return 0, 0
+	}
+	done := make(chan [2]uint64, 1)
+	go func() {
+		t, a := diskUsage(path)
+		diskProbeRunning.Store(false)
+		done <- [2]uint64{t, a}
+	}()
+
+	timer := time.NewTimer(diskProbeTimeout)
+	defer timer.Stop()
+	select {
+	case got := <-done:
+		return got[0], got[1]
+	case <-timer.C:
+		return 0, 0
+	}
 }
 
 // resourceDiskPath picks the filesystem whose free space is worth reporting:

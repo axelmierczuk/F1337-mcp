@@ -48,6 +48,39 @@ func TestJail_ContainsAndRejects(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrOutsideJail)
 }
 
+// #6's second criterion: "/root/../etc/passwd" is rejected.
+//
+// It is the traversal every jail is asked about first, and it is the one that
+// must not be answered by scanning the string for "..". The check happens on the
+// resolved path — which is why the symlink cases below still hold — so this
+// asserts the outcome rather than the mechanism: whatever the request spells,
+// what it resolves to is outside the root.
+func TestJail_ParentTraversalIsRejected(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	root := filepath.Join(base, "root")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(base, "secret"), []byte("s"), 0o600))
+
+	j, err := agent.NewJail([]string{root})
+	require.NoError(t, err)
+
+	for _, path := range []string{
+		filepath.Join(root, "..", "secret"),
+		filepath.Join(root, "sub", "..", "..", "secret"),
+		root + string(filepath.Separator) + "..",
+		filepath.Join(root, "..", "..", "..", "..", "etc", "passwd"),
+	} {
+		_, err := j.Resolve(path)
+		require.ErrorIs(t, err, agent.ErrOutsideJail, path)
+	}
+
+	// And a "..' that stays inside is not refused for containing the string.
+	got, err := j.Resolve(filepath.Join(root, "sub", "..", "sub", "file"))
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(root, "sub", "file"), got)
+}
+
 // The case the naive implementation gets wrong: a symlink inside the jail
 // whose target is outside it. Rejecting ".." before resolution would let this
 // straight through.

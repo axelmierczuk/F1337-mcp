@@ -265,9 +265,21 @@ func runEnroll(out io.Writer, f enrollFlags) error {
 // runs as a dedicated account that cannot read root's home directory — an
 // unelevated one writes to the operator's own config directory, which is the
 // only place it can.
+//
+// The result is always absolute. agent.yaml records the certificate, key, CA
+// bundle, state and audit paths, and Load resolves any relative one of those
+// against the config file's own directory — so a relative --dir writes
+// "out/agent.crt" into "out/agent.yaml", which the daemon then reads as
+// "out/out/agent.crt" and cannot find. Making the directory absolute here is
+// what keeps the file the enrollment wrote and the file the daemon reads the
+// same file.
 func resolveAgentDir(flagValue string) (string, error) {
 	if flagValue != "" {
-		return flagValue, nil
+		abs, err := filepath.Abs(flagValue)
+		if err != nil {
+			return "", fmt.Errorf("resolve --dir %s: %w", flagValue, err)
+		}
+		return abs, nil
 	}
 	if isElevated() {
 		return agent.SystemConfigDir(), nil

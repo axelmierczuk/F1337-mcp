@@ -37,7 +37,7 @@ func platformResources(diskPath string) Resources {
 		CPUCores: uint32(runtime.NumCPU()), //nolint:gosec // core count does not overflow uint32
 	}
 	res.MemoryTotalBytes, res.MemoryAvailableBytes = memory()
-	res.DiskTotalBytes, res.DiskAvailableBytes = disk(diskPath)
+	res.DiskTotalBytes, res.DiskAvailableBytes = probeDisk(diskPath)
 	return res
 }
 

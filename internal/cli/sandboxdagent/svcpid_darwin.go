@@ -1,6 +1,7 @@
 package sandboxdagent
 
 import (
+	"context"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -13,7 +14,12 @@ import (
 // parameter: there is one job this command may ask about, and that is the one
 // it registered.
 func servicePID() (int, bool) {
-	out, err := exec.Command("launchctl", "list", ServiceName).Output()
+	// Bounded for the same reason as the systemd query: `service status` must
+	// answer even when the service manager does not.
+	ctx, cancel := context.WithTimeout(context.Background(), servicePIDTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "launchctl", "list", ServiceName).Output()
 	if err != nil {
 		return 0, false
 	}

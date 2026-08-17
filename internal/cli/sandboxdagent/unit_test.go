@@ -86,7 +86,7 @@ func TestSystemdUnit_HardeningLevels(t *testing.T) {
 	strict := p.SystemdUnit()
 	assert.Contains(t, strict, "ProtectSystem=strict")
 	assert.NotContains(t, strict, "ProtectSystem=full")
-	assert.Contains(t, strict, "ReadWritePaths=/home/build/workspace /var/lib/sandboxd /var/log/sandboxd")
+	assert.Contains(t, strict, "ReadWritePaths=-/home/build/workspace /var/lib/sandboxd /var/log/sandboxd")
 
 	p.Hardening = sandboxdagent.HardeningNone
 	none := p.SystemdUnit()
@@ -95,6 +95,36 @@ func TestSystemdUnit_HardeningLevels(t *testing.T) {
 	assert.NotContains(t, none, "ProtectSystem")
 	// Still correct where correctness is not optional.
 	assert.Contains(t, none, "KillMode=process")
+}
+
+// An allowed root that does not exist yet must not stop the service starting.
+//
+// systemd fails a unit's whole mount namespace when a ReadWritePaths= entry is
+// absent, and a root the operator creates after enrolling is a shape this agent
+// deliberately supports — it is the same case the jail resolves through its
+// nearest existing ancestor. systemd's "-" prefix is what reconciles the two.
+// The state and log directories are created by `install`, so one of those
+// missing is a real fault and is left to fail.
+func TestSystemdUnit_StrictToleratesARootThatDoesNotExistYet(t *testing.T) {
+	p := params()
+	p.Hardening = sandboxdagent.HardeningStrict
+	p.AllowedRoots = []string{"/home/build/workspace", "/srv/not-created-yet"}
+
+	unit := p.SystemdUnit()
+	assert.Contains(t, unit, "ReadWritePaths=-/home/build/workspace -/srv/not-created-yet /var/lib/sandboxd /var/log/sandboxd")
+
+	for _, line := range strings.Split(unit, "\n") {
+		if !strings.HasPrefix(line, "ReadWritePaths=") {
+			continue
+		}
+		for _, entry := range strings.Fields(strings.TrimPrefix(line, "ReadWritePaths=")) {
+			if entry == "/var/lib/sandboxd" || entry == "/var/log/sandboxd" {
+				continue
+			}
+			assert.True(t, strings.HasPrefix(entry, "-"),
+				"an allowed root must be optional to systemd, or a root created later stops the service starting: %s", entry)
+		}
+	}
 }
 
 // PrivateTmp is skipped when an allowed root lives under /tmp — as it does in

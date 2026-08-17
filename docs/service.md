@@ -48,6 +48,24 @@ roots.** On Linux and macOS that is ordinary ownership. On Windows it is ACLs,
 and `install` does not set them: grant the service account access to the roots
 yourself.
 
+### The enrollment material changes hands
+
+`enroll` writes `agent.yaml` and the private key at `0600`, into a `0700`
+directory when it runs elevated, owned by whoever ran it. `install` is the step
+that decides the daemon will run as somebody else — so on Linux and macOS it
+hands that account the config, certificate, key, and CA bundle, and the
+directory holding them.
+
+The directory only changes hands when it is one `enroll` created (`/etc/sandboxd`,
+`/Library/Application Support/sandboxd`, or the per-user enrollment directory).
+Point `--config` somewhere else and `install` gives away the four files but
+leaves the directory alone, and says so: `--config /etc/agent.yaml` must not
+turn into `chown sandboxd /etc`. Make that directory traversable by the service
+account yourself.
+
+On Windows nothing is chowned: access there is by ACL, and `%ProgramData%\sandboxd`
+already admits the built-in service identities.
+
 ## Hardening
 
 `--hardening` selects how much the service manager is asked to constrain the
@@ -55,7 +73,9 @@ daemon:
 
 - `standard` (default) — `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`.
 - `strict` — `ProtectSystem=strict` with the allowed roots, the state directory,
-  and the log directory as `ReadWritePaths`.
+  and the log directory as `ReadWritePaths`. The roots carry systemd's `-`
+  prefix, so a root you have not created yet is skipped rather than failing the
+  unit's mount namespace and with it the whole service.
 - `none` — no confinement directives.
 
 This is deliberately conservative. The agent's job is running arbitrary

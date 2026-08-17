@@ -172,8 +172,11 @@ changes that. What the script does do:
 
 - Verifies the artifact's SHA-256 against the checksum file published with the
   same release, and refuses to install on a mismatch.
-- Supports `--ca-fingerprint` to pin the control plane.
-- Warns when it is enrolling without pinning, or installing without a path jail.
+- **Requires `--ca-fingerprint` alongside `--token`**, and refuses before it
+  downloads anything. `enroll` has always refused to run unpinned, so an
+  installer that warned and carried on could only fail later, after installing a
+  binary on a host that never joined the fleet.
+- Warns, every time, that `--root` is not a jail on an exec-enabled agent.
 
 Releases carry build provenance attestations. To skip the pipe entirely,
 download the archive, verify it against `checksums.txt`, and run the binary

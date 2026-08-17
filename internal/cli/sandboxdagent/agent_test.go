@@ -274,6 +274,49 @@ func TestEnroll_WithoutNameUsesTheTokensReservation(t *testing.T) {
 	require.NoError(t, leaf.VerifyHostname("127.0.0.1"))
 }
 
+// A relative --dir must still produce a config the daemon can load.
+//
+// agent.yaml names the certificate, key, CA bundle, state directory and audit
+// path, and Load resolves any relative one of those against the config file's
+// own directory. Writing them relative therefore doubles the directory:
+// "out/agent.crt" inside "out/agent.yaml" is read back as "out/out/agent.crt",
+// and the daemon fails to start on a certificate it wrote itself.
+func TestEnroll_RelativeDirWritesLoadablePaths(t *testing.T) {
+	dir := t.TempDir()
+	cp := startControlPlane(t, dir)
+	token, _, err := cp.tokens.Mint(enroll.MintOptions{Name: "build-box"})
+	require.NoError(t, err)
+
+	// --dir is interpreted against the working directory, so run from one the
+	// test owns rather than from the package directory.
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	var out bytes.Buffer
+	code := sandboxdagent.Main([]string{"enroll",
+		"--server", cp.address,
+		"--token", token,
+		"--ca-fingerprint", ca.FormatFingerprint(cp.ca.Fingerprint()),
+		"--dir", "enrollment",
+	}, &out)
+	require.Equal(t, 0, code, out.String())
+
+	cfg, err := agent.Load(filepath.Join(dir, "enrollment", "agent.yaml"))
+	require.NoError(t, err)
+	for _, path := range []string{cfg.TLS.Certificate, cfg.TLS.PrivateKey, cfg.TLS.CABundle} {
+		assert.FileExists(t, path, "the daemon must find the material enroll just wrote")
+	}
+	// Compared against the resolved working directory: --dir is made absolute
+	// through it, and on macOS /var is a symlink to /private/var.
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(resolvedDir, "enrollment", "state"), cfg.StateDir)
+	assert.DirExists(t, filepath.Join(resolvedDir, "enrollment"),
+		"a relative --dir must not have written a second level of the same name")
+}
+
 // The agent asks for what it was told to listen on; the control plane decides
 // what it is certified for. Asking is not receiving.
 func TestEnroll_AgentCannotWidenItsOwnCertificate(t *testing.T) {

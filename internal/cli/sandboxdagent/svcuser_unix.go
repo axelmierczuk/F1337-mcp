@@ -120,20 +120,56 @@ func ensureServiceUser(name string, create bool) error {
 	return fmt.Errorf("create service account %q: %w\n\nCreate it manually and re-run, or pass --user with an existing account", name, lastErr)
 }
 
+// serviceAccessByOwnership records that on Unix, giving the service account
+// access to a file is a matter of ownership — which `install` can do. On
+// Windows it is ACLs, which it does not touch.
+const serviceAccessByOwnership = true
+
+// grantServiceUserAccess makes the enrollment material readable by the account
+// the daemon will run as.
+//
+// files are given to it outright: they are the agent's own certificate, key, CA
+// bundle and config, written 0600 by whoever ran `enroll`. dir, when non-empty,
+// is a directory `enroll` created — it has to change hands too, because a file
+// inside a 0700 directory owned by somebody else is not readable however its
+// own mode reads. An empty dir means the caller judged the directory not
+// sandboxd's to reassign.
+//
+// Ownership rather than a group and a wider mode: the account is already the
+// one every command this agent runs executes as, so it can read the key by
+// definition — it is the key it serves with. Widening the mode instead would
+// hand the same material to every other member of that group.
+func grantServiceUserAccess(name, dir string, files []string) error {
+	uid, gid, err := lookupServiceIDs(name)
+	if err != nil {
+		return err
+	}
+	if uid == 0 {
+		// The superuser already reads everything, and chowning to root on a
+		// read-only or foreign-owned mount can fail for no useful reason.
+		return nil
+	}
+
+	for _, path := range files {
+		if err := os.Chown(path, uid, gid); err != nil {
+			return fmt.Errorf("give %s access to %s: %w\n\nThe daemon reads this file as %s and will not start without it", name, path, err, name)
+		}
+	}
+	if dir == "" {
+		return nil
+	}
+	if err := os.Chown(dir, uid, gid); err != nil {
+		return fmt.Errorf("give %s access to %s: %w", name, dir, err)
+	}
+	return nil
+}
+
 // chownToServiceUser gives the account ownership of a directory the daemon
 // must be able to write as itself.
 func chownToServiceUser(dir, name string) error {
-	u, err := user.Lookup(name)
+	uid, gid, err := lookupServiceIDs(name)
 	if err != nil {
-		return fmt.Errorf("look up %q: %w", name, err)
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return fmt.Errorf("parse uid %q for %q: %w", u.Uid, name, err)
-	}
-	gid, err := strconv.Atoi(u.Gid)
-	if err != nil {
-		return fmt.Errorf("parse gid %q for %q: %w", u.Gid, name, err)
+		return err
 	}
 	// Walk, because MkdirAll may have created intermediate directories that
 	// the daemon needs to traverse and write beneath.
@@ -143,4 +179,21 @@ func chownToServiceUser(dir, name string) error {
 		}
 		return os.Chown(path, uid, gid)
 	})
+}
+
+// lookupServiceIDs resolves the service account to the numeric ids chown takes.
+func lookupServiceIDs(name string) (uid, gid int, err error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, 0, fmt.Errorf("look up %q: %w", name, err)
+	}
+	uid, err = strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse uid %q for %q: %w", u.Uid, name, err)
+	}
+	gid, err = strconv.Atoi(u.Gid)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse gid %q for %q: %w", u.Gid, name, err)
+	}
+	return uid, gid, nil
 }

@@ -13,7 +13,7 @@ func platformResources(diskPath string) Resources {
 		LoadAverage1m: loadAverage1m(),
 	}
 	res.MemoryTotalBytes, res.MemoryAvailableBytes = memory()
-	res.DiskTotalBytes, res.DiskAvailableBytes = disk(diskPath)
+	res.DiskTotalBytes, res.DiskAvailableBytes = probeDisk(diskPath)
 	return res
 }
 

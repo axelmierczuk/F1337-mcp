@@ -1,6 +1,7 @@
 package sandboxdagent
 
 import (
+	"context"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -21,7 +22,13 @@ const systemdUnitName = ServiceName + ".service"
 // service manager directly. A zero MainPID means systemd knows the unit but is
 // not running it.
 func servicePID() (int, bool) {
-	out, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", systemdUnitName).Output()
+	// Bounded: `service status` is what an installer script branches on, and a
+	// systemd or D-Bus that has stopped answering must make the PID unavailable
+	// rather than make the command hang.
+	ctx, cancel := context.WithTimeout(context.Background(), servicePIDTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "systemctl", "show", "-p", "MainPID", "--value", systemdUnitName).Output()
 	if err != nil {
 		return 0, false
 	}

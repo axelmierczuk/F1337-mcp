@@ -201,16 +201,30 @@ func (p UnitParams) systemdHardening() []string {
 // readWritePaths is every directory that must stay writable under
 // ProtectSystem=strict: the roots the agent serves, plus its own state and
 // logs.
+//
+// The roots carry systemd's "-" prefix, which means "ignore this one if it does
+// not exist". Without it a unit naming a directory that is not there fails to
+// set up its mount namespace and the service will not start at all — and a root
+// that does not exist yet is a shape this agent deliberately supports: an
+// installer may name a workspace the operator creates afterwards, which is the
+// same case the jail resolves through its nearest existing ancestor. The state
+// and log directories are not prefixed: `install` creates them, so one of those
+// missing is a real fault and worth failing on.
 func (p UnitParams) readWritePaths() []string {
 	seen := map[string]bool{}
 	var paths []string
-	for _, path := range append(append([]string{}, p.AllowedRoots...), p.StateDir, p.LogDir) {
+	add := func(path, prefix string) {
 		if path == "" || seen[path] {
-			continue
+			return
 		}
 		seen[path] = true
-		paths = append(paths, path)
+		paths = append(paths, prefix+path)
 	}
+	for _, root := range p.AllowedRoots {
+		add(root, "-")
+	}
+	add(p.StateDir, "")
+	add(p.LogDir, "")
 	sort.Strings(paths)
 	return paths
 }

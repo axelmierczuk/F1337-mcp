@@ -121,6 +121,32 @@ func runServiceInstall(out io.Writer, configPath, userName string, level Hardeni
 		}
 	}
 
+	// The account the daemon runs as also has to be able to read what it was
+	// enrolled with. `enroll` writes agent.yaml and the private key at 0600,
+	// into a 0700 directory when it runs elevated, owned by whoever ran it —
+	// and `install` is what changes the account underneath them. Without this
+	// step the advertised one-line install (enroll as root, install, start)
+	// registers a service cleanly and then fails every start on "permission
+	// denied" opening its own certificate.
+	configDir := filepath.Dir(params.ConfigPath)
+	grantDir := ""
+	if enrollmentDirIsOurs(configDir) {
+		grantDir = configDir
+	}
+	if err := grantServiceUserAccess(params.User, grantDir, enrollmentMaterial(cfg, params.ConfigPath)); err != nil {
+		return err
+	}
+	if grantDir == "" && serviceAccessByOwnership {
+		// Handing over a directory the operator chose is not this command's
+		// call to make: --config /etc/agent.yaml would make that directory
+		// /etc. The files inside it were given away individually; the
+		// traversal has to be granted by whoever owns the directory.
+		p.Printf("NOTE: %s is not a directory sandboxd created, so its ownership was left\n", configDir)
+		p.Printf("      alone — the files inside it were handed over, but %s still has to\n", params.User)
+		p.Println("      be able to traverse it. If the daemon cannot read its config, run:")
+		p.Printf("        chown %s %s\n", params.User, configDir)
+	}
+
 	svc, err := service.New(&program{}, params.ServiceConfig())
 	if err != nil {
 		return fmt.Errorf("prepare service definition: %w", err)
@@ -145,6 +171,14 @@ func runServiceInstall(out io.Writer, configPath, userName string, level Hardeni
 	}
 
 	if err := svc.Install(); err != nil {
+		if installed {
+			// The replacement is not atomic on any of the three service
+			// managers, so a failure here leaves the host with no service at
+			// all. Say that, rather than letting an operator read "install
+			// failed" as "nothing happened".
+			return fmt.Errorf("install service: %w\n\nThe previous definition was already removed, so %s is now not installed. Re-run `service install` once the cause above is fixed",
+				err, ServiceName)
+		}
 		return fmt.Errorf("install service: %w", err)
 	}
 
@@ -393,6 +427,43 @@ func buildUnitParams(configPath, userName string, level Hardening) (UnitParams, 
 		StopTimeout:  defaultStopTimeout,
 		Hardening:    level,
 	}, cfg, nil
+}
+
+// enrollmentMaterial is every file the daemon must be able to read as whichever
+// account it ends up running as: its config, and the three TLS files the config
+// names.
+//
+// `enroll` writes all four with the permissions of whoever ran it — 0600 for
+// the config and the private key — and `install` is the step that decides the
+// daemon will run as somebody else. Nothing else reconciles the two.
+func enrollmentMaterial(cfg *agent.Config, configPath string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, 4)
+	for _, path := range []string{configPath, cfg.TLS.Certificate, cfg.TLS.PrivateKey, cfg.TLS.CABundle} {
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out
+}
+
+// enrollmentDirIsOurs reports whether dir is a directory `enroll` created for
+// the agent, and which `install` may therefore hand to the service account.
+//
+// Individual files can be given away wherever they live. The directory holding
+// them cannot: making it traversable means changing its ownership, and
+// `--config /etc/agent.yaml` would make that directory /etc. So only the two
+// locations enroll writes to are eligible, and anything else is reported to the
+// operator instead of quietly reassigned.
+func enrollmentDirIsOurs(dir string) bool {
+	dir = filepath.Clean(dir)
+	if dir == filepath.Clean(agent.SystemConfigDir()) {
+		return true
+	}
+	userDir, err := agent.UserConfigDir()
+	return err == nil && dir == filepath.Clean(userDir)
 }
 
 // isSuperuser reports whether name is the platform's all-powerful account.
