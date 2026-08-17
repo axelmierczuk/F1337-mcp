@@ -120,11 +120,25 @@ func TestWriteEditReadRoundTrip(t *testing.T) {
 	}
 
 	// An edit that matches nothing must fail rather than silently do nothing,
-	// and one that matches twice must fail rather than pick.
-	if msg := s.fails("fleet_edit", map[string]any{
+	// and one that matches twice must fail rather than pick — the uniqueness
+	// requirement in docs/tools.md is what stops an ambiguous match quietly
+	// editing the wrong line, and it is only a requirement if something fails
+	// when it is broken.
+	missing := s.fails("fleet_edit", map[string]any{
 		"path": path, "old_string": "beta with trailing space ", "new_string": "x",
-	}); msg == "" {
-		t.Fatal("editing a string that is no longer present should have failed")
+	})
+	if !contains(missing, "does not appear") {
+		t.Fatalf("editing a string that is no longer present should say so, got: %s", missing)
+	}
+	ambiguous := s.fails("fleet_edit", map[string]any{
+		"path": path, "old_string": "a\n", "new_string": "a!\n",
+	})
+	if !contains(ambiguous, "replace_all") {
+		t.Fatalf("an ambiguous edit should be refused with the way to ask for all of them, got: %s", ambiguous)
+	}
+	after := structured[readResult](t, s.ok("fleet_read", map[string]any{"path": path, "raw": true}))
+	if contains(decodeBase64(t, after.ContentBase64), "a!") {
+		t.Fatal("a refused ambiguous edit changed the file anyway")
 	}
 
 	want := strings.Replace(original, "beta with trailing space ", "beta edited", 1)
