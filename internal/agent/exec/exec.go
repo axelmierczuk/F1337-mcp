@@ -139,6 +139,14 @@ func policyDescription(p *policy.Policy) string {
 	return "restricted by allow_commands/deny_commands, which are operational guardrails and not a security boundary"
 }
 
+// DefaultWorkingDir is where a command that names no directory runs on this
+// host.
+//
+// Exported for ShellService, so a session that names no working directory
+// starts in the same place a command would. See defaultWorkingDir for why it is
+// the home directory rather than the daemon's own.
+func DefaultWorkingDir() string { return defaultWorkingDir(BaseEnv()) }
+
 // defaultWorkingDir is where a command with no working_dir runs.
 //
 // The account's home directory, because that is where a toolchain expects to

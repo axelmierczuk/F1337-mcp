@@ -44,6 +44,26 @@ var localeVars = []string{"LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES"}
 // BaseEnv returns the documented base environment for this host.
 func BaseEnv() []string { return buildBaseEnv(os.Getenv) }
 
+// Environment is the environment a command runs with: the base above, with the
+// caller's KEY=VALUE entries applied on top. A malformed entry is an error; see
+// checkEnvEntry.
+//
+// It is exported for ShellService, which starts a command on the same host,
+// under the same account, and must therefore start it from the same
+// environment. The alternative was a second copy of this allowlist, and an
+// allowlist that exists to keep the daemon's credentials out of a caller's
+// command is the last thing that should have two versions.
+func Environment(overrides []string) ([]string, error) { return mergeEnv(BaseEnv(), overrides) }
+
+// EnvValue returns the value of name in env, and whether it was present. Keys
+// are compared the way the platform's environment compares them.
+//
+// Exported alongside [Environment] and for the same caller: resolving an
+// executable means searching the PATH the child will run with, not the
+// daemon's, and reading it back out of a merged environment is how that PATH is
+// found.
+func EnvValue(env []string, name string) (string, bool) { return envValue(env, name) }
+
 // buildBaseEnv is BaseEnv with the lookup injected, so the allowlist can be
 // asserted from a test on any platform rather than only on the one it matters
 // for.

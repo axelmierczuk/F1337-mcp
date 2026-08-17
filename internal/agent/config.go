@@ -62,6 +62,7 @@ type Config struct {
 	AllowedRoots []string `yaml:"allowed_roots"`
 
 	Exec    ExecConfig    `yaml:"exec"`
+	Shell   ShellConfig   `yaml:"shell"`
 	Process ProcessConfig `yaml:"process"`
 	Forward ForwardConfig `yaml:"forward"`
 	Audit   AuditConfig   `yaml:"audit"`
@@ -140,6 +141,37 @@ func (e ExecConfig) IsEnabled() bool { return e.Enabled == nil || *e.Enabled }
 // security control is worse than no check, because it is what operators plan
 // around — so the jail is wired in only where it is real.
 func (c *Config) JailEnforced() bool { return !c.Exec.IsEnabled() }
+
+// ShellConfig bounds the interactive shell (#43).
+type ShellConfig struct {
+	// Enabled turns ShellService on. It defaults to true, and turning it off
+	// is a convenience rather than a boundary: a caller who can call
+	// ExecService can already run whatever it likes on this host, so an
+	// operator who wants that stopped wants exec.enabled: false, which turns
+	// this off too. What this setting buys is an agent that runs commands for
+	// a model and refuses to hand anybody an interactive terminal.
+	//
+	// A pointer because the default is true: a plain bool cannot tell
+	// "enabled: false" from a key the operator never wrote.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// IdleTimeout ends a session that has carried no bytes in either
+	// direction for this long.
+	//
+	// Both directions, deliberately. A session watching a long build produces
+	// no keystrokes for an hour and is not abandoned; one whose operator shut
+	// their laptop produces nothing either way. Counting only input would reap
+	// the first, which kills a running job because nobody typed.
+	//
+	// Zero means the default. There is no value that disables it: an
+	// interactive session holds a pseudo-terminal, a process tree and a
+	// concurrency slot on somebody's machine, and "forever" is not a bound. An
+	// operator who needs longer sessions sets a longer timeout.
+	IdleTimeout Duration `yaml:"idle_timeout,omitempty"`
+}
+
+// IsEnabled reports whether ShellService is on. An unset field means yes.
+func (s ShellConfig) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
 
 // ProcessConfig bounds the background process supervisor (#11–#15).
 type ProcessConfig struct {
@@ -351,6 +383,16 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Exec.MaxOutputBytes <= 0 {
 		c.Exec.MaxOutputBytes = 2 * 1024 * 1024
+	}
+	if c.Shell.Enabled == nil {
+		enabled := true
+		c.Shell.Enabled = &enabled
+	}
+	if c.Shell.IdleTimeout <= 0 {
+		// Half an hour: long enough that an operator who walked away from a
+		// prompt mid-task comes back to it, short enough that a forgotten
+		// session does not hold a shell open on a machine over a weekend.
+		c.Shell.IdleTimeout = Duration(30 * time.Minute)
 	}
 	if c.Process.MaxConcurrent <= 0 {
 		c.Process.MaxConcurrent = 32
