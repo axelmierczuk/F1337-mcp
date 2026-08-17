@@ -80,10 +80,10 @@ func helperMain(mode string, args []string) int {
 		return 0
 
 	case "spawn":
-		// spawn <pidfile>: start a child that outlives this process on its
-		// own, print its pid, and wait. The child writes its pid to the file
-		// and gets no inherited pipes, so the test can find it without the
-		// agent's output drain depending on it.
+		// spawn <pidfile>: start a child, record both pids in the file, print
+		// something so the caller knows the child exists, and wait. The child
+		// gets no inherited pipes, so a test can find it without the agent's
+		// output drain depending on when it exits.
 		return spawnHelper(arg(args, ""))
 
 	case "env":
@@ -132,12 +132,16 @@ func arg(args []string, fallback string) string {
 	return fallback
 }
 
-// spawnHelper starts a grandchild and reports its pid, then sleeps.
+// spawnHelper starts a grandchild and records both pids, then sleeps.
 //
 // The grandchild is started without inheriting this process's stdout, so it
 // cannot hold the agent's output pipe open. What it does hold is membership of
 // the process group, which is the whole point: killing the leader alone leaves
-// it running, and the test asserts it does not.
+// it running, and the tests assert it does not.
+//
+// Both pids go in the file — this process's and its child's — so a test can
+// check that the command itself is gone as well as its descendant. One line
+// each, written in a single call so a reader either sees both or neither.
 func spawnHelper(pidFile string) int {
 	self, err := os.Executable()
 	if err != nil {
@@ -151,7 +155,8 @@ func spawnHelper(pidFile string) int {
 		return 1
 	}
 	if pidFile != "" {
-		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		pids := fmt.Sprintf("%d\n%d\n", os.Getpid(), child.Process.Pid)
+		if err := os.WriteFile(pidFile, []byte(pids), 0o600); err != nil {
 			return 1
 		}
 	}

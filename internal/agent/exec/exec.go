@@ -234,7 +234,13 @@ func (s *Service) Exec(req *sandboxdv1.ExecRequest, stream sandboxdv1.ExecServic
 		return s.fail(rec, codes.NotFound, "%s", lookupErr)
 	}
 
-	release, err := s.policy.Acquire(ctx)
+	// A slot in the agent-wide process limit. The wait for one is bounded by
+	// the command's own timeout: waiting longer than the command was allowed to
+	// run for turns a busy agent into a hung tool call, and a caller that set no
+	// deadline of its own would otherwise wait indefinitely for a slot.
+	acquireCtx, cancelAcquire := context.WithTimeout(ctx, timeout)
+	release, err := s.policy.Acquire(acquireCtx)
+	cancelAcquire()
 	if err != nil {
 		return s.fail(rec, codes.ResourceExhausted, "%s", err)
 	}
@@ -368,8 +374,17 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 		// `sh -c 'sleep 100 &'` leaves one behind on every platform. Exec is
 		// one-shot by contract (docs/tools.md points anything longer-lived at
 		// sandbox_process_start), so the call takes its tree with it.
-		if err := group.Kill(); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
-			s.log.Debug("sweeping the process group after exec", "error", err)
+		//
+		// Only when the child really leads its own group, though. Without that
+		// the group has degraded to "signal this one pid", and by this point
+		// Wait has reaped it — so the pid may already belong to something
+		// else, and the sweep would kill an unrelated process. There is
+		// nothing left to sweep in that case anyway: a leader that never got
+		// its own group had no group for its descendants to be in.
+		if group.Isolated() {
+			if err := group.Kill(); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
+				s.log.Debug("sweeping the process group after exec", "error", err)
+			}
 		}
 		if err := group.Close(); err != nil {
 			s.log.Debug("closing the process group after exec", "error", err)

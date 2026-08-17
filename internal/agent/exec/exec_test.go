@@ -307,7 +307,11 @@ func TestExec_StdinIsWrittenThenClosed(t *testing.T) {
 func TestExec_TimeoutKillsTheCommandAndReportsIt(t *testing.T) {
 	h := newHarness(t)
 
-	req := helperReq("sleep", "60")
+	// The spawn helper rather than a bare sleep, so the pid the agent killed
+	// can be checked against the OS afterwards. It sleeps for ten minutes;
+	// anything still alive at the end of this test is a survivor.
+	pidFile := filepath.Join(t.TempDir(), "pids")
+	req := helperReq("spawn", pidFile)
 	req.Timeout = durationpb.New(500 * time.Millisecond)
 
 	started := time.Now()
@@ -318,8 +322,11 @@ func TestExec_TimeoutKillsTheCommandAndReportsIt(t *testing.T) {
 	require.NotNil(t, res)
 	require.True(t, res.GetTimedOut())
 	// Ordering, not duration: the call must return long before the command's
-	// own 60 seconds, without asserting how long the kill took.
+	// own ten minutes, without asserting how long the kill took.
 	require.Less(t, time.Since(started), 30*time.Second)
+
+	leader, _ := readPIDs(t, pidFile)
+	requireProcessGone(t, leader)
 
 	records := h.records(t)
 	require.Len(t, records, 1)
@@ -341,8 +348,9 @@ func TestExec_TimeoutKillsTheWholeProcessGroup(t *testing.T) {
 	// The pid is read from the file the grandchild's parent wrote, not from
 	// the agent's report of what it killed: asking the API whether it killed
 	// the tree would pass whether or not it did.
-	pid := readPID(t, pidFile)
-	requireProcessGone(t, pid)
+	leader, child := readPIDs(t, pidFile)
+	requireProcessGone(t, leader)
+	requireProcessGone(t, child)
 }
 
 func TestExec_CancellingTheCallKillsTheCommand(t *testing.T) {
@@ -367,7 +375,9 @@ func TestExec_CancellingTheCallKillsTheCommand(t *testing.T) {
 		t.Fatal("Exec did not return after its caller cancelled")
 	}
 
-	requireProcessGone(t, readPID(t, pidFile))
+	leader, child := readPIDs(t, pidFile)
+	requireProcessGone(t, leader)
+	requireProcessGone(t, child)
 
 	records := h.records(t)
 	require.Len(t, records, 1)
@@ -566,6 +576,29 @@ func TestExec_ConcurrencyCapIsEnforced(t *testing.T) {
 	require.Equal(t, codes.ResourceExhausted, status.Code(err))
 
 	release()
+}
+
+// A full agent refuses rather than queueing a caller indefinitely.
+//
+// The wait for a slot is bounded by the command's own timeout: a caller with no
+// deadline of its own would otherwise wait forever behind a busy agent, which
+// is a hung tool call rather than a cap.
+func TestExec_ConcurrencyWaitIsBoundedByTheCommandsOwnTimeout(t *testing.T) {
+	h := newHarness(t, withCaps(policy.Caps{
+		DefaultTimeout: 300 * time.Millisecond,
+		MaxTimeout:     time.Minute,
+		MaxOutputBytes: 1 << 20,
+		MaxConcurrent:  1,
+	}))
+
+	release, err := h.svc.policy.Acquire(context.Background())
+	require.NoError(t, err)
+	defer release()
+
+	// No deadline on the call at all: the bound has to come from the request.
+	_, err = h.run(t, helperReq("echo", "hi"))
+	require.Error(t, err)
+	require.Equal(t, codes.ResourceExhausted, status.Code(err))
 }
 
 // --- policy ---------------------------------------------------------------
@@ -806,19 +839,24 @@ func TestExec_MalformedEnvironmentEntryIsRefused(t *testing.T) {
 
 // --- helpers --------------------------------------------------------------
 
-func readPID(t *testing.T, path string) int {
+// readPIDs waits for the spawn helper to record its own pid and its child's.
+func readPIDs(t *testing.T, path string) (leader, child int) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		data, err := os.ReadFile(path)
 		if err == nil {
-			pid, convErr := strconv.Atoi(strings.TrimSpace(string(data)))
-			if convErr == nil && pid > 0 {
-				return pid
+			fields := strings.Fields(string(data))
+			if len(fields) == 2 {
+				leader, leaderErr := strconv.Atoi(fields[0])
+				child, childErr := strconv.Atoi(fields[1])
+				if leaderErr == nil && childErr == nil && leader > 0 && child > 0 {
+					return leader, child
+				}
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the helper never recorded a child pid in %s", path)
+			t.Fatalf("the helper never recorded its pids in %s", path)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
