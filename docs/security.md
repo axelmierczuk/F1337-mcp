@@ -80,6 +80,23 @@ operator                control plane              new host
   whatever certificate the control plane presents, and a network attacker can
   impersonate it. The installer warns when you omit it.
 
+## The account the agent runs as
+
+Every command the agent executes runs as the account the daemon runs as, and
+every file it writes is owned by it. **Running the agent as root means every
+sandbox command a model issues runs as root**, and the path jail is the only
+thing between it and the rest of the machine.
+
+So `service install` does not default to a superuser: a dedicated `sandboxd`
+system account on Linux, the invoking user on macOS, and `NT
+AUTHORITY\NetworkService` rather than `LocalSystem` on Windows. `--user root`
+is available, warns loudly, and is a decision rather than a default. See
+[docs/service.md](service.md).
+
+The systemd unit sets `KillMode=process` and the launchd job sets
+`AbandonProcessGroup`. Those are not hardening — they are what stops a routine
+`systemctl restart` from killing every background process the agent supervises.
+
 ## Filesystem confinement
 
 Paths are resolved to absolute form, symlinks are resolved, and only then is
