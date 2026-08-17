@@ -211,8 +211,18 @@ func TestExecIsAudited(t *testing.T) {
 	s := f.connect(t)
 	s.ok("fleet_select", map[string]any{"name": a.name})
 
+	// The command's output has to be distinguishable from its argv, or the last
+	// assertion in this test cannot tell which of the two the log captured. So
+	// the command prints a file: the path is in argv and identifies the record,
+	// while the contents exist nowhere but on the command's stdout.
 	const marker = "audited-command"
-	s.ok("fleet_exec", map[string]any{"argv": []string{"echo", marker}})
+	const outputOnly = "this-text-exists-only-as-command-output"
+	printed := filepath.Join(a.home, marker+".txt")
+	writeFile(t, printed, []byte(outputOnly+"\n"))
+	ran := structured[execResult](t, s.ok("fleet_exec", map[string]any{"argv": []string{"cat", printed}}))
+	if !contains(ran.Stdout, outputOnly) {
+		t.Fatalf("the command did not print the marker, so the assertion that the log omits it proves nothing: %+v", ran)
+	}
 
 	auditPath := filepath.Join(a.dir, "logs", "audit.jsonl")
 	var record map[string]any
@@ -250,10 +260,17 @@ func TestExecIsAudited(t *testing.T) {
 	}
 
 	// The output is not in it, and must never be: an audit log that captured
-	// what commands printed would be a new place to steal secrets from.
+	// what commands printed would be a new place to steal secrets from. That is
+	// what docs/security.md promises — "no field for … file contents, stdin,
+	// command output" — and the command above was chosen so this can be checked
+	// rather than assumed: outputOnly reached the agent as bytes on a pipe and
+	// appears in no argument the caller sent.
 	data, err := os.ReadFile(auditPath)
 	if err != nil {
 		t.Fatalf("read the audit log: %v", err)
+	}
+	if contains(string(data), outputOnly) {
+		t.Fatalf("the audit log captured what the command printed:\n%s", data)
 	}
 	if contains(string(data), "sbx_") {
 		t.Fatalf("the audit log carries something token-shaped:\n%s", data)
