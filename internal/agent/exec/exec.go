@@ -411,21 +411,20 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 		return outcome{}, fmt.Errorf("preparing the process group: %w", err)
 	}
 	defer func() {
-		// Kill first, then close. On Windows closing the last handle is what
-		// terminates the job, but on Unix a process group holds no resource
-		// and nothing has yet reached a grandchild that outlived its parent —
-		// `sh -c 'sleep 100 &'` leaves one behind on every platform. Exec is
-		// one-shot by contract (docs/tools.md points anything longer-lived at
-		// sandbox_process_start), so the call takes its tree with it.
+		// The call takes its process tree with it. A grandchild that outlived
+		// its parent — `sh -c 'sleep 100 &'` leaves one behind — must not
+		// outlive the RPC: exec is one-shot by contract, and docs/tools.md
+		// points anything longer-lived at sandbox_process_start.
 		//
-		// Only when the child really leads its own group, though. Without that
-		// the group has degraded to "signal this one pid", and by this point
-		// Wait has reaped it — so the pid may already belong to something
-		// else, and the sweep would kill an unrelated process. There is
-		// nothing left to sweep in that case anyway: a leader that never got
+		// Sweep then close, and what each of those does is per platform: see
+		// sweepGroup. Only when the child really leads its own group, though.
+		// Without that the group has degraded to "signal this one pid", and by
+		// this point Wait has reaped it — so the pid may already belong to
+		// something else, and the sweep would kill an unrelated process. There
+		// is nothing left to sweep in that case anyway: a leader that never got
 		// its own group had no group for its descendants to be in.
 		if group.Isolated() {
-			if err := group.Kill(); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
+			if err := sweepGroup(group); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
 				s.log.Debug("sweeping the process group after exec", "error", err)
 			}
 		}
