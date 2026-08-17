@@ -74,16 +74,34 @@ func defaultServiceUser() (string, error) {
 		}
 		return current.Username, nil
 	}
-	// The same rule the config directories follow: a host that already has the
-	// pre-rebrand account keeps it. Defaulting to the new name here would grow a
-	// second system account on every upgraded host and chown the state and log
-	// directories away from the account that owns them and is running as them.
-	if _, err := user.Lookup(systemUserName); err != nil {
-		if _, err := user.Lookup(legacySystemUserName); err == nil {
-			return legacySystemUserName, nil
-		}
+	return linuxServiceUser(accountExists), nil
+}
+
+// accountExists reports whether name resolves to an account on this host.
+func accountExists(name string) bool {
+	_, err := user.Lookup(name)
+	return err == nil
+}
+
+// linuxServiceUser applies the same rule the config directories follow: a host
+// that already has the pre-rebrand account keeps it.
+//
+// Defaulting to the new name on an upgraded host would grow a second system
+// account per host and chown the state and log directories away from the
+// account that owns them and is currently running as them.
+//
+// When both accounts exist the new name wins, which is the post-migration
+// state: an operator who created `fleet` deliberately gets it, and the leftover
+// `sandboxd` account is theirs to remove.
+//
+// Split out from defaultServiceUser and given the lookup rather than calling
+// os/user directly because the rule turns on which system accounts exist, and a
+// test cannot create one.
+func linuxServiceUser(exists func(string) bool) string {
+	if !exists(systemUserName) && exists(legacySystemUserName) {
+		return legacySystemUserName
 	}
-	return systemUserName, nil
+	return systemUserName
 }
 
 // ensureServiceUser makes sure name exists, creating a locked-down system

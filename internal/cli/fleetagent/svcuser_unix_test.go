@@ -87,6 +87,53 @@ func TestGrantServiceUserAccess_LeavesAForeignDirectoryAlone(t *testing.T) {
 		"on Unix the handover is ownership, and install performs it")
 }
 
+// TestLinuxServiceUserKeepsAPreRebrandAccount covers the compatibility rule the
+// fleet rebrand needed on Linux, and the only one with no other coverage.
+//
+// The installer creates a dedicated system account and chowns the state and log
+// directories to it. A host installed before the rebrand has that account under
+// the old name and its directories owned by it, so defaulting to the new name
+// would create a *second* system account and hand the running daemon's state
+// away from the account running as it.
+//
+// The lookup is injected because the answer turns on which accounts exist on
+// the host, and a test cannot create a system account. That is also why the
+// rule is a function taking the lookup rather than three calls inline.
+func TestLinuxServiceUserKeepsAPreRebrandAccount(t *testing.T) {
+	const (
+		current = fleetagent.ServiceUserNameForTest
+		legacy  = fleetagent.LegacyServiceUserNameForTest
+	)
+	require.NotEqual(t, current, legacy, "the rule only means anything if the names differ")
+
+	existing := func(names ...string) func(string) bool {
+		set := map[string]bool{}
+		for _, n := range names {
+			set[n] = true
+		}
+		return func(name string) bool { return set[name] }
+	}
+
+	for _, tc := range []struct {
+		name  string
+		have  func(string) bool
+		want  string
+		about string
+	}{
+		{"a fresh host starts on the new name", existing(), current,
+			"nothing to keep, so the account is created under the current name"},
+		{"an upgraded host keeps its existing account", existing(legacy), legacy,
+			"the state and log directories are owned by this account and the daemon is running as it"},
+		{"a migrated host uses the new account", existing(current), current, ""},
+		{"both accounts present resolves to the new name", existing(current, legacy), current,
+			"an operator who created the new account deliberately gets it; the leftover is theirs to remove"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, fleetagent.LinuxServiceUserForTest(tc.have), tc.about)
+		})
+	}
+}
+
 func currentAccount(t *testing.T) (*user.User, int, int) {
 	t.Helper()
 	me, err := user.Current()
