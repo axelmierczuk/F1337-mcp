@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -410,13 +412,28 @@ func TestEnrollMint_AcceptsWhatEnrollmentWouldHonour(t *testing.T) {
 //
 // So this compares the two directly. Mint runs through the CLI; redemption runs
 // through enroll.Service against a token minted straight into a store, so the
-// mint verdict cannot gate the comparison. A disagreement either way fails,
-// which is what makes this hold when someone adds a rule to one side.
+// mint verdict cannot gate the comparison.
+//
+// The invariant is one-sided, and saying so is the point. Mint must never accept
+// what redemption would refuse — that is the direction that spends a single-use
+// secret and is discovered on a host the operator has walked away from. Mint may
+// refuse what redemption would honour, and on one shape it deliberately does:
+// --listen is derived from --address when the operator gave none, so an address
+// whose port net.SplitHostPort accepts and strconv does not would otherwise send
+// the pasted command back to the installer's 8722 without a word. Those cases
+// carry mintOnlyRefuses, and the asymmetry is asserted rather than omitted, so
+// that a shape quietly moving from one column to the other fails here.
+//
+// A sweep of every name in this table against twenty address shapes found no
+// disagreement outside the mintOnlyRefuses column.
 func TestEnrollMint_AgreesWithRedemptionOnWhatCanBeCertified(t *testing.T) {
 	cases := []struct {
 		label     string
 		name      string
 		addresses []string
+		// mintOnlyRefuses marks a case mint refuses on grounds of its own,
+		// before certifiability is at issue. Redemption honours it.
+		mintOnlyRefuses bool
 	}{
 		{label: "name with a colon", name: "build:box"},
 		{label: "name that looks like an endpoint", name: "gpu-01:9000"},
@@ -435,6 +452,10 @@ func TestEnrollMint_AgreesWithRedemptionOnWhatCanBeCertified(t *testing.T) {
 		{label: "wildcard bind", name: "build-box", addresses: []string{"0.0.0.0:9000"}},
 		{label: "port only", name: "build-box", addresses: []string{":9000"}},
 		{label: "wildcard address", name: "build-box", addresses: []string{"*.internal:9000"}},
+
+		{label: "named port", name: "build-box", addresses: []string{"build-box.internal:https"}, mintOnlyRefuses: true},
+		{label: "port zero", name: "build-box", addresses: []string{"build-box.internal:0"}, mintOnlyRefuses: true},
+		{label: "port past the range", name: "build-box", addresses: []string{"build-box.internal:65536"}, mintOnlyRefuses: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
@@ -450,12 +471,17 @@ func TestEnrollMint_AgreesWithRedemptionOnWhatCanBeCertified(t *testing.T) {
 
 			redeemErr := redeemThroughEnrollment(t, dir, tc.name, tc.addresses)
 
-			assert.Equal(t, redeemErr == nil, mintCode == 0,
-				"mint and redemption disagree about --name %q --address %v\nmint: %s\nredemption: %v",
-				tc.name, tc.addresses, mintOut, redeemErr)
+			if tc.mintOnlyRefuses {
+				assert.NotEqual(t, 0, mintCode, "mint was expected to refuse this on its own grounds:\n%s", mintOut)
+				assert.NoError(t, redeemErr, "this shape is one redemption honours; only mint refuses it")
+			} else {
+				assert.Equal(t, redeemErr == nil, mintCode == 0,
+					"mint and redemption disagree about --name %q --address %v\nmint: %s\nredemption: %v",
+					tc.name, tc.addresses, mintOut, redeemErr)
+			}
 
-			// And a mint that was refused must not have cost a token, which is
-			// the whole reason the check is at mint time.
+			// Whichever column it is in, a mint that was refused must not have
+			// cost a token: that is the whole reason the check is at mint time.
 			if mintCode != 0 {
 				listed, code := run(t, dir, "enroll", "list")
 				require.Equal(t, 0, code, listed)
@@ -971,9 +997,19 @@ func TestServe_ReleasesTheListenerWhenItCannotPrintItsBanner(t *testing.T) {
 // its own regression under half the time it ran, and "confirmed to fail with the
 // fix reverted" had been confirmed once, by luck. serve now waits for the
 // watcher when it finds the context already cancelled, rather than racing it, so
-// a cancelled serve deterministically never opens its accept loop and Serve
-// deterministically returns ErrServerStopped. One iteration is now worth more
-// than five hundred were: reverting the check fails this every run.
+// Serve always finds the server stopped and always returns ErrServerStopped.
+//
+// Which is what makes one iteration worth more than five hundred were, and it is
+// worth being exact about whose regression this catches. It is the
+// ErrServerStopped branch's — round 2's fix. Reverting that branch fails this
+// test 50 times in 50 while the ordering guard is in place, and 0 times in 50
+// without it, because without the guard the accept loop opens first and Serve
+// returns nil from it instead. The guard is what turned a branch reached by one
+// run in a thousand into one reached by every run.
+//
+// The guard's own regression is caught by the test below, not by this one:
+// removing it leaves this test passing every time, since both paths still exit
+// zero.
 func TestServe_ExitsCleanlyWhenStoppedBeforeItStartsServing(t *testing.T) {
 	dir := t.TempDir()
 	_, code := run(t, dir, "ca", "init")
@@ -989,33 +1025,125 @@ func TestServe_ExitsCleanlyWhenStoppedBeforeItStartsServing(t *testing.T) {
 	require.Equal(t, 0, code, "a serve that was told to stop reported a failure:\n%s", out.String())
 }
 
-// The other half of that determinism, and the reason it is worth having beyond
-// testability: this endpoint is the one an unauthenticated caller can reach, so
-// a serve that was cancelled before it began must not accept anything at all.
-// It used to open the accept loop first and drain it a moment later, ~999 runs
-// in 1000.
+// The reason the ordering guard is worth having beyond testability: this
+// endpoint is the one an unauthenticated caller can reach, so a serve that was
+// cancelled before it began must not accept anything at all. Without the guard
+// it opened the accept loop first and drained it a moment later, ~999 runs in
+// 1000.
+//
+// Catching that requires observing serve *while* it runs, and the version of
+// this test that shipped with the guard did not: it dialled the port after
+// MainContext had returned, when nothing is listening either way. Measured, it
+// passed 100 times in 100 with the guard removed — a test for a fix that would
+// not have noticed the fix being deleted, which is the shape the previous three
+// audit rounds each found once.
+//
+// So serve is caught in the act instead. Its banner is written to a gate that
+// blocks the first write, which holds it after net.Listen and before it decides
+// whether to serve: the port is open, and callers can queue in the kernel's
+// accept backlog. Releasing the gate then decides it. With the guard, those
+// callers are never accepted and the listener closes under them. Without it,
+// the accept loop opens, takes them, and speaks TLS to at least one.
+//
+// One round of that is not enough on its own: gRPC's connection handler bails
+// if GracefulStop has already fired, so a caller is served on about half of the
+// runs that open the accept loop — measured at 51 in 100 with 16 callers, and
+// no better with 64. It is one-sided, though. A handshake can only complete if
+// something accepted it, so the guard never makes this fail: 40 runs in 40 clean
+// with it in place. Rounds therefore only add catching power, and serveProbeRounds
+// of them puts the chance of missing a deleted guard at about one in four
+// thousand.
+const serveProbeRounds = 12
+
+// serveProbeCallers queue in the accept backlog while serve is held at its
+// banner.
+const serveProbeCallers = 16
+
+// bannerGate blocks serve's first write until it is released, and reports when
+// serve has reached it.
+type bannerGate struct {
+	once     sync.Once
+	reached  chan struct{}
+	released chan struct{}
+}
+
+func newBannerGate() *bannerGate {
+	return &bannerGate{reached: make(chan struct{}), released: make(chan struct{})}
+}
+
+func (g *bannerGate) Write(p []byte) (int, error) {
+	g.once.Do(func() {
+		close(g.reached)
+		<-g.released
+	})
+	return len(p), nil
+}
+
 func TestServe_AcceptsNothingWhenCancelledBeforeItStarts(t *testing.T) {
 	dir := t.TempDir()
 	_, code := run(t, dir, "ca", "init")
 	require.Equal(t, 0, code)
 	t.Setenv("FLEET_CONFIG_DIR", dir)
 
-	// A fixed port, so the check below is against the socket serve was given
-	// rather than against whatever the kernel handed out after it exited.
-	addr := "127.0.0.1:" + freeTCPPort(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	var out bytes.Buffer
-	require.Equal(t, 0, fleetctl.MainContext(ctx, []string{
-		"serve", "--listen", addr, "--advertise", "127.0.0.1",
-	}, &out), out.String())
+	for round := 0; round < serveProbeRounds; round++ {
+		// A fixed port, so the callers below queue on the socket serve was
+		// given rather than on whatever the kernel hands out afterwards.
+		addr := "127.0.0.1:" + freeTCPPort(t)
+		gate := newBannerGate()
 
-	// Nothing is listening: the listener was closed on the way out, and the
-	// accept loop it would have run was never entered.
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	if err == nil {
-		_ = conn.Close()
-		t.Fatalf("a serve that was cancelled before it started left %s accepting connections", addr)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		exited := make(chan int, 1)
+		go func() {
+			exited <- fleetctl.MainContext(ctx, []string{
+				"serve", "--listen", addr, "--advertise", "127.0.0.1",
+			}, gate)
+		}()
+
+		select {
+		case <-gate.reached:
+		case <-time.After(20 * time.Second):
+			t.Fatalf("round %d: serve never reached its banner", round)
+		}
+
+		callers := make([]net.Conn, 0, serveProbeCallers)
+		for i := 0; i < serveProbeCallers; i++ {
+			conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+			require.NoError(t, err, "round %d: the port was not open while the banner was held", round)
+			callers = append(callers, conn)
+		}
+
+		var (
+			wg     sync.WaitGroup
+			served atomic.Bool
+		)
+		for _, conn := range callers {
+			wg.Add(1)
+			go func(conn net.Conn) {
+				defer wg.Done()
+				<-gate.released
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				//nolint:gosec // this is a caller that must never be answered, not one verifying anything
+				tc := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+				if tc.HandshakeContext(context.Background()) == nil {
+					served.Store(true)
+				}
+				_ = conn.Close()
+			}(conn)
+		}
+
+		close(gate.released)
+		wg.Wait()
+
+		select {
+		case c := <-exited:
+			require.Equal(t, 0, c, "round %d", round)
+		case <-time.After(20 * time.Second):
+			t.Fatalf("round %d: a cancelled serve never returned", round)
+		}
+
+		require.False(t, served.Load(),
+			"round %d: a serve cancelled before it began completed a TLS handshake with a caller waiting on its listener", round)
 	}
 }
 
