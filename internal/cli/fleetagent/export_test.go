@@ -27,6 +27,18 @@ const ServiceAccessByOwnershipForTest = serviceAccessByOwnership
 // the "never a superuser" property can be asserted without an install.
 func DefaultServiceUserForTest() (string, error) { return defaultServiceUser() }
 
+// LegacyServiceNoteForTest exposes what an operator is told when this host
+// still carries a service registered under the pre-rebrand name.
+//
+// The presence answer is supplied rather than read: no test can register a
+// pre-rebrand service with a real service manager, and CI cannot register one
+// at all.
+func LegacyServiceNoteForTest(present bool) string { return legacyServiceNote(present) }
+
+// LegacyServiceNameForTest is the pre-rebrand service name, so the test asserts
+// on the same constant the note is built from.
+const LegacyServiceNameForTest = legacyServiceName
+
 // IsElevatedForTest reports whether this process can install a service.
 //
 // The tests that assert the *unprivileged* path have to skip when it is not,

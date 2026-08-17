@@ -90,6 +90,10 @@ func runServiceInstall(out io.Writer, configPath, userName string, level Hardeni
 
 	p := cli.NewPrinter(out)
 
+	// Before anything is created, chowned or registered, so an operator who did
+	// not read the migration steps can still stop here having changed nothing.
+	noteLegacyService(p)
+
 	params, cfg, err := buildUnitParams(configPath, userName, level)
 	if err != nil {
 		return err
@@ -240,6 +244,10 @@ func runServiceUninstall(out io.Writer) error {
 	}
 	if !isInstalled(svc) {
 		p.Printf("service %s is not installed; nothing to remove\n", ServiceName)
+		// "Nothing to remove" is false on a host whose service is still
+		// registered under the old name, and that is exactly the host most
+		// likely to be running this command.
+		noteLegacyService(p)
 		return p.Err()
 	}
 
@@ -324,6 +332,10 @@ func runServiceStatus(out io.Writer) error {
 		p.Printf("service %s: not installed\n", ServiceName)
 		p.Printf("platform:   %s\n", service.Platform())
 		p.Println("run `fleet-agent service install` to register it")
+		// The answer above is the one an operator misreads as "the agent is not
+		// running" on a host whose service is still registered as sandboxd-agent
+		// and running fine.
+		noteLegacyService(p)
 		return p.Err()
 	}
 

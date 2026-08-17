@@ -132,3 +132,48 @@ func TestVersionCommand(t *testing.T) {
 // tests below skipped nothing and then failed against a message written for
 // someone who cannot install a service.
 func elevated() bool { return fleetagent.IsElevatedForTest() }
+
+// TestLegacyServiceNote covers the one name in the fleet rebrand's
+// compatibility matrix that has no rule in code: the service registration.
+//
+// The two environment variables, the config directory and the directories
+// nested inside it, and the Linux service account all resolve the pre-rebrand
+// name themselves. A service cannot — removing one is not something a daemon
+// should do to a host on its own — so what is left is telling the operator, at
+// the moment it matters, that the answer they just got is wrong.
+//
+// It matters most at `install`: the `service` subcommands address the manager
+// by name, so an install on a host still carrying `sandboxd-agent` registers a
+// *second* service pointing at the same config and the same state directory,
+// and both then re-adopt the same supervised processes. docs/service.md
+// describes that outcome; nothing prevented it, and nothing said so.
+func TestLegacyServiceNote(t *testing.T) {
+	assert.Empty(t, fleetagent.LegacyServiceNoteForTest(false),
+		"a host with no pre-rebrand service has nothing to be told")
+
+	note := fleetagent.LegacyServiceNoteForTest(true)
+	require.NotEmpty(t, note)
+
+	assert.Contains(t, note, fleetagent.LegacyServiceNameForTest,
+		"the note has to name the service that is actually registered, or it is not actionable")
+	assert.Contains(t, note, fleetagent.ServiceName,
+		"and the name the subcommands do know, so the mismatch is legible")
+
+	// The removal commands, which are the whole of the remedy. Asserted per
+	// platform because the wrong platform's commands are worse than none.
+	switch runtime.GOOS {
+	case "windows":
+		assert.Contains(t, note, "sc.exe delete "+fleetagent.LegacyServiceNameForTest)
+	case "darwin":
+		assert.Contains(t, note, "launchctl bootout system /Library/LaunchDaemons/"+
+			fleetagent.LegacyServiceNameForTest+".plist")
+	default:
+		assert.Contains(t, note, "systemctl disable --now "+fleetagent.LegacyServiceNameForTest)
+	}
+
+	// The consequence, not just the fact. An operator who reads "there is an
+	// old service" and not "installing now gives you two of them fighting over
+	// one state directory" has no reason to stop.
+	assert.Contains(t, note, "second service")
+	assert.Contains(t, note, "state directory")
+}

@@ -23,13 +23,24 @@ model.
 
 | Platform | Default account | Created by install? |
 | --- | --- | --- |
-| Linux | `fleet`, a system account | Yes, via `useradd` or `adduser` |
+| Linux | `fleet`, a system account (but see the pre-rebrand rule below) | Yes, via `useradd` or `adduser` |
 | macOS | The invoking user (`$SUDO_USER`) | No — pass `--user` for a different one |
 | Windows | `NT AUTHORITY\NetworkService` | n/a, it is a built-in identity |
 
 `--user` overrides the default everywhere. `--create-user=false` turns off
 account creation, so an install against a missing account fails with a message
 naming it rather than inventing one.
+
+**On a host installed before the fleet rebrand, the Linux default is `sandboxd`,
+not `fleet`.** That account already exists there and already owns the state and
+log directories, and the daemon is already running as it. Defaulting to the new
+name would create a second system account on every upgraded host and chown those
+directories away from the account using them, so `install` keeps the one that is
+there: it uses `fleet` unless `fleet` is absent and `sandboxd` is present. Once
+both exist — because you created `fleet` deliberately — `fleet` wins, and the
+leftover `sandboxd` account is yours to remove. `--user` overrides this like any
+other default. It is the same rule the config directories follow; see
+[quickstart.md](quickstart.md#upgrading-from-sandboxd).
 
 The defaults differ because the right answer differs. On Linux a system daemon
 conventionally gets a dedicated system account and `useradd` makes creating one
@@ -155,6 +166,12 @@ host where the old service is still installed, that means:
 - `fleet-agent service install` registers a *second* service pointing at the
   same config and state. Both would start at boot and fight over the same
   supervised processes.
+
+`install`, `uninstall` and `status` each check for the old registration and say
+so before doing any of that — `install` before it creates, chowns or registers
+anything, so you can stop there having changed nothing. The check is a warning,
+not a refusal: removing a service is not something the agent should do to your
+host on its own.
 
 So remove the old one first, using the old name, with the platform's own tools:
 
