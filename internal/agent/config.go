@@ -21,7 +21,7 @@ const DefaultListen = "0.0.0.0:8722"
 
 // DefaultClientOU is the organizational unit an incoming client certificate
 // must carry. It matches ca.ProfileControl's OU: a leaf issued to another
-// agent carries "sandboxd-agent" and is refused.
+// agent carries "fleet-agent" and is refused.
 const DefaultClientOU = "sandboxd-control"
 
 // ErrNoAllowedRoots is returned by Config.Validate when the jail is enforced,
@@ -69,7 +69,7 @@ type Config struct {
 	// with its process history intact.
 	StateDir string `yaml:"state_dir,omitempty"`
 
-	// EnrolledAt and Addresses are recorded by `sandboxd-agent enroll` for
+	// EnrolledAt and Addresses are recorded by `fleet-agent enroll` for
 	// operator diagnostics.
 	EnrolledAt string   `yaml:"enrolled_at,omitempty"`
 	Addresses  []string `yaml:"addresses,omitempty"`

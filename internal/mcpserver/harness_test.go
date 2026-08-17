@@ -25,7 +25,7 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
 
-// fakeHost stands in for one sandboxd-agent's HostService. The agent itself
+// fakeHost stands in for one fleet-agent's HostService. The agent itself
 // (#5) is being built concurrently and is not on main, and a fake client is
 // what makes "refresh: false issues no probes" assertable on a count rather
 // than on elapsed time.
@@ -64,7 +64,7 @@ func newFakeHost() *fakeHost {
 			AgentVersion:           "0.1.0-test",
 			AllowedRoots:           []string{"/home/build/workspace"},
 			StartedAt:              timestamppb.New(time.Now().Add(-90 * time.Minute)),
-			AuthenticatedPrincipal: "sandboxd-mcp",
+			AuthenticatedPrincipal: "fleet-mcp",
 		},
 	}
 }

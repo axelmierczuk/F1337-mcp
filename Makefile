@@ -95,9 +95,9 @@ build-agent-all:
 	@for p in $(AGENT_PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=""; \
 		[ "$$os" = "windows" ] && ext=".exe"; \
-		echo "  building sandboxd-agent $$os/$$arch"; \
+		echo "  building fleet-agent $$os/$$arch"; \
 		GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags '$(LDFLAGS)' \
-			-o $(BIN_DIR)/sandboxd-agent-$$os-$$arch$$ext ./cmd/sandboxd-agent || exit 1; \
+			-o $(BIN_DIR)/fleet-agent-$$os-$$arch$$ext ./cmd/fleet-agent || exit 1; \
 	done
 
 ## test: run unit tests with race detection

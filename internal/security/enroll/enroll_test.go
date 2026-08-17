@@ -37,7 +37,7 @@ func newTestCA(t *testing.T) *ca.CA {
 
 // startControlPlane serves an enroll.Service over an in-memory bufconn
 // listener, presenting a CA-signed leaf as its server identity — exactly as
-// sandboxctl serve does, keeping the CA private key out of the process that
+// fleetctl serve does, keeping the CA private key out of the process that
 // terminates TLS for unauthenticated callers.
 func startControlPlane(t *testing.T, svc *enroll.Service, caObj *ca.CA) *bufconn.Listener {
 	t.Helper()

@@ -73,7 +73,7 @@ func TestInit_ForceOverwrites(t *testing.T) {
 
 // A certificate beside a key from a different CA is what a half-restored
 // backup, or two `ca init` runs pointed at overlapping directories, leaves
-// behind. Loading it succeeds, so `sandboxctl serve` starts and `ca
+// behind. Loading it succeeds, so `fleetctl serve` starts and `ca
 // fingerprint` prints — and the operator distributes — the fingerprint of a CA
 // this process cannot sign for. Every enrollment then fails at the last step,
 // after its token has been spent.
@@ -116,10 +116,10 @@ func TestSignCSR_ControlProfile_ClientAuthValidates(t *testing.T) {
 	c, err := ca.Init(dir, false)
 	require.NoError(t, err)
 
-	csrDER := ecdsaCSR(t, "sandboxd-mcp")
+	csrDER := ecdsaCSR(t, "fleet-mcp")
 	_, certPEM, err := c.SignCSR(csrDER, ca.SignOptions{
 		Profile: ca.ProfileControl,
-		Subject: "sandboxd-mcp",
+		Subject: "fleet-mcp",
 	})
 	require.NoError(t, err)
 
@@ -160,10 +160,10 @@ func TestSignCSR_ControlLeafRejectedAsServerCert(t *testing.T) {
 	c, err := ca.Init(dir, false)
 	require.NoError(t, err)
 
-	csrDER := ecdsaCSR(t, "sandboxd-mcp")
+	csrDER := ecdsaCSR(t, "fleet-mcp")
 	_, certPEM, err := c.SignCSR(csrDER, ca.SignOptions{
 		Profile: ca.ProfileControl,
-		Subject: "sandboxd-mcp",
+		Subject: "fleet-mcp",
 	})
 	require.NoError(t, err)
 

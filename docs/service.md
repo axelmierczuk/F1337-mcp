@@ -1,13 +1,13 @@
 # Running the agent as a service
 
-`sandboxd-agent service install` registers the daemon with the platform's
+`fleet-agent service install` registers the daemon with the platform's
 service manager so it starts at boot. It needs elevation, and it refuses
 early — before creating a user or a directory — when it does not have it.
 
 ```sh
-sudo sandboxd-agent service install          # systemd, launchd, or the Windows SCM
-sudo sandboxd-agent service start
-sandboxd-agent service status
+sudo fleet-agent service install          # systemd, launchd, or the Windows SCM
+sudo fleet-agent service start
+fleet-agent service status
 ```
 
 `install` bakes the config path into the service definition, so the daemon does
@@ -113,7 +113,7 @@ The systemd unit sets `KillMode=process` and the launchd job sets
 systemd's default `KillMode=control-group` sends `SIGTERM` to every process in
 the unit's cgroup when the service stops — which is every background process
 the agent supervises. launchd does the equivalent to the job's process group.
-Without these, `systemctl restart sandboxd-agent` kills every dev server that
+Without these, `systemctl restart fleet-agent` kills every dev server that
 agent is running, and an agent upgrade does it across the entire fleet at once.
 
 Supervised processes belong to the host, not to the daemon that started them.
@@ -126,7 +126,7 @@ asked to perform.
 ## Uninstall keeps your identity
 
 ```sh
-sudo sandboxd-agent service uninstall
+sudo fleet-agent service uninstall
 ```
 
 removes the unit, job, or service registration and **leaves**:
@@ -154,36 +154,36 @@ has to be checked by hand.
 ### Linux, systemd
 
 ```sh
-sudo sandboxd-agent service install
-sudo sandboxd-agent service start
-sandboxd-agent service status                 # installed, running, with a PID
-systemctl show -p KillMode --value sandboxd-agent.service   # must print: process
-journalctl -u sandboxd-agent -n 20            # structured slog output
+sudo fleet-agent service install
+sudo fleet-agent service start
+fleet-agent service status                 # installed, running, with a PID
+systemctl show -p KillMode --value fleet-agent.service   # must print: process
+journalctl -u fleet-agent -n 20            # structured slog output
 
 # Supervised processes survive a restart of the daemon:
 #   start a background process through the MCP server, note its PID,
-sudo systemctl restart sandboxd-agent
+sudo systemctl restart fleet-agent
 #   then confirm that PID is still alive.
 
 sudo systemctl reboot                          # comes back after a reboot
-sandboxd-agent service status
+fleet-agent service status
 
-sudo sandboxd-agent service install            # idempotent: reinstalls, no error
-sudo sandboxd-agent service uninstall
+sudo fleet-agent service install            # idempotent: reinstalls, no error
+sudo fleet-agent service uninstall
 ls /etc/sandboxd /var/lib/sandboxd             # credentials and state still there
 ```
 
 ### macOS, launchd
 
 ```sh
-sudo sandboxd-agent service install --user "$(whoami)"
-sudo sandboxd-agent service start
-sandboxd-agent service status
-sudo launchctl list sandboxd-agent             # PID, and AbandonProcessGroup in the job
-tail -f /Library/Logs/sandboxd/sandboxd-agent.err.log
+sudo fleet-agent service install --user "$(whoami)"
+sudo fleet-agent service start
+fleet-agent service status
+sudo launchctl list fleet-agent             # PID, and AbandonProcessGroup in the job
+tail -f /Library/Logs/sandboxd/fleet-agent.err.log
 
 sudo shutdown -r now                           # survives a reboot
-sudo sandboxd-agent service uninstall
+sudo fleet-agent service uninstall
 ```
 
 ### Windows
@@ -191,13 +191,13 @@ sudo sandboxd-agent service uninstall
 From an elevated PowerShell:
 
 ```powershell
-sandboxd-agent service install
-sandboxd-agent service start
-sandboxd-agent service status
-Get-Service sandboxd-agent                     # Running, StartType Automatic
-sc.exe qfailure sandboxd-agent                 # restart action, 5s delay
-Get-EventLog -LogName Application -Source sandboxd-agent -Newest 20
+fleet-agent service install
+fleet-agent service start
+fleet-agent service status
+Get-Service fleet-agent                     # Running, StartType Automatic
+sc.exe qfailure fleet-agent                 # restart action, 5s delay
+Get-EventLog -LogName Application -Source fleet-agent -Newest 20
 
 Restart-Computer                               # survives a reboot
-sandboxd-agent service uninstall
+fleet-agent service uninstall
 ```

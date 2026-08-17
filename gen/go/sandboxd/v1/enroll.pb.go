@@ -24,7 +24,7 @@ const (
 
 type EnrollRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Single-use token minted by "sandboxctl enroll mint".
+	// Single-use token minted by "fleetctl enroll mint".
 	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
 	// PKCS#10 certificate signing request in DER form.
 	CsrDer []byte `protobuf:"bytes,2,opt,name=csr_der,json=csrDer,proto3" json:"csr_der,omitempty"`

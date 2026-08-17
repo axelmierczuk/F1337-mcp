@@ -61,7 +61,7 @@ Register an already-enrolled agent that is not in the local registry.
 | `labels` | object | Free-form `key=value`, bounded: at most 32, keys printable ASCII with no spaces. |
 
 Does not enroll. Enrollment mints credentials and is an operator action via
-`sandboxctl`.
+`fleetctl`.
 
 Name, address and labels are all validated before the registry is touched, so a
 rejected call leaves nothing behind. Labels are bounded because they are paid

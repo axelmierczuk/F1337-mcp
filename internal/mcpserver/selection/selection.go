@@ -126,7 +126,7 @@ type NoTargetError struct {
 
 func (e *NoTargetError) Error() string {
 	if len(e.Available) == 0 {
-		return "no sandbox selected, and none are registered. Enroll a host with `sandboxctl enroll mint` (see docs/quickstart.md), or register an already-enrolled agent with sandbox_add"
+		return "no sandbox selected, and none are registered. Enroll a host with `fleetctl enroll mint` (see docs/quickstart.md), or register an already-enrolled agent with sandbox_add"
 	}
 	return fmt.Sprintf("no sandbox selected. Call sandbox_select(name=\"%s\") to choose one for subsequent calls, or pass sandbox=\"%s\" to target this call only. Registered: %s",
 		e.Available[0], e.Available[0], strings.Join(e.Available, ", "))
@@ -143,14 +143,14 @@ type UnknownSandboxError struct {
 
 func (e *UnknownSandboxError) Error() string {
 	if len(e.Available) == 0 {
-		return fmt.Sprintf("unknown sandbox %q: no sandboxes are registered. Enroll one with `sandboxctl enroll mint`, or register an already-enrolled agent with sandbox_add", e.Ref)
+		return fmt.Sprintf("unknown sandbox %q: no sandboxes are registered. Enroll one with `fleetctl enroll mint`, or register an already-enrolled agent with sandbox_add", e.Ref)
 	}
 	return fmt.Sprintf("unknown sandbox %q. Registered: %s", e.Ref, strings.Join(e.Available, ", "))
 }
 
 // StaleSelectionError is returned when a client's sticky default names a
 // sandbox that is no longer registered — it was removed by another client, or
-// by sandboxctl, while this one still pointed at it.
+// by fleetctl, while this one still pointed at it.
 //
 // It is distinct from UnknownSandboxError because the model did nothing wrong
 // and the fix is different: re-select, do not correct a typo.

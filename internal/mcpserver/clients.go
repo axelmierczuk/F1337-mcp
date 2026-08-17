@@ -61,15 +61,15 @@ func (l *lazyPool) get() (*client.Pool, error) {
 		return nil, fmt.Errorf("the MCP server is shutting down")
 	}
 
-	caCert, err := readCredential(l.paths.caCert, "fleet CA certificate", "sandboxctl ca init")
+	caCert, err := readCredential(l.paths.caCert, "fleet CA certificate", "fleetctl ca init")
 	if err != nil {
 		return nil, err
 	}
-	cert, err := readCredential(l.paths.cert, "control certificate", "sandboxctl ca sign --profile control")
+	cert, err := readCredential(l.paths.cert, "control certificate", "fleetctl ca sign --profile control")
 	if err != nil {
 		return nil, err
 	}
-	key, err := readCredential(l.paths.key, "control private key", "sandboxctl ca sign --profile control")
+	key, err := readCredential(l.paths.key, "control private key", "fleetctl ca sign --profile control")
 	if err != nil {
 		return nil, err
 	}

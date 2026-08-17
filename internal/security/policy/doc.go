@@ -3,7 +3,7 @@
 //
 // # What this is not
 //
-// The default is allow-all, and that is deliberate. sandboxd-agent is a remote
+// The default is allow-all, and that is deliberate. fleet-agent is a remote
 // code execution service by design, and a deny list on one is a speed bump: an
 // operator who denies "sh" has not stopped a caller reaching a shell, they have
 // stopped it reaching that one. Presenting a command list as a security

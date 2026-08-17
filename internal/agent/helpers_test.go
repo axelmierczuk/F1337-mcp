@@ -91,11 +91,11 @@ func (f *testFleet) config(t *testing.T, execEnabled bool, roots ...string) *age
 	return cfg
 }
 
-// controlLeaf issues the leaf sandboxd-mcp presents. The common name is
+// controlLeaf issues the leaf fleet-mcp presents. The common name is
 // fixed: it is the principal every test that checks authentication asserts on.
 func (f *testFleet) controlLeaf() (certPEM, keyPEM []byte) {
 	f.t.Helper()
-	return f.sign(ca.ProfileControl, "sandboxd-mcp", nil)
+	return f.sign(ca.ProfileControl, "fleet-mcp", nil)
 }
 
 func (f *testFleet) agentLeaf(cn string) (certPEM, keyPEM []byte) {

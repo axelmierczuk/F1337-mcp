@@ -27,7 +27,7 @@ type entry struct {
 	cancel context.CancelFunc
 }
 
-// Pool dials sandboxd-agent instances over mTLS gRPC, keeping one long-lived
+// Pool dials fleet-agent instances over mTLS gRPC, keeping one long-lived
 // channel per sandbox name and a periodically refreshed health cache
 // alongside it.
 //

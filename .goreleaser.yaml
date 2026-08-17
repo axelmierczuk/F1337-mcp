@@ -1,6 +1,6 @@
 version: 2
 
-project_name: sandboxd
+project_name: fleet
 
 before:
   hooks:
@@ -9,9 +9,9 @@ before:
 builds:
   # The agent is the widely-distributed component: it lands on every host in
   # the fleet, so it gets the full platform matrix and static linking.
-  - id: sandboxd-agent
-    main: ./cmd/sandboxd-agent
-    binary: sandboxd-agent
+  - id: fleet-agent
+    main: ./cmd/fleet-agent
+    binary: fleet-agent
     env:
       - CGO_ENABLED=0
     flags:
@@ -25,9 +25,9 @@ builds:
     goarch: [amd64, arm64]
 
   # The MCP server and control CLI only ever run on a developer workstation.
-  - id: sandboxd-mcp
-    main: ./cmd/sandboxd-mcp
-    binary: sandboxd-mcp
+  - id: fleet-mcp
+    main: ./cmd/fleet-mcp
+    binary: fleet-mcp
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags:
@@ -38,9 +38,9 @@ builds:
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
 
-  - id: sandboxctl
-    main: ./cmd/sandboxctl
-    binary: sandboxctl
+  - id: fleetctl
+    main: ./cmd/fleetctl
+    binary: fleetctl
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags:
@@ -56,16 +56,16 @@ archives:
   # constructs the download URL from OS and arch without consulting the API for
   # an asset list.
   - id: agent
-    ids: [sandboxd-agent]
-    name_template: "sandboxd-agent_{{ .Os }}_{{ .Arch }}"
+    ids: [fleet-agent]
+    name_template: "fleet-agent_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     format_overrides:
       - goos: windows
         formats: [zip]
 
   - id: tools
-    ids: [sandboxd-mcp, sandboxctl]
-    name_template: "sandboxd-tools_{{ .Os }}_{{ .Arch }}"
+    ids: [fleet-mcp, fleetctl]
+    name_template: "fleet-tools_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     format_overrides:
       - goos: windows
@@ -100,6 +100,6 @@ release:
 
     `--ca-fingerprint` is not optional: enrollment refuses to run unpinned, and
     the installer refuses before it downloads anything. Read it on the control
-    host with `sandboxctl ca fingerprint`.
+    host with `fleetctl ca fingerprint`.
 
     Verify `checksums.txt` against the artifact you downloaded before running anything.

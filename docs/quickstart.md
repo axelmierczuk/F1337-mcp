@@ -10,14 +10,14 @@
 ## 1. Workstation tools
 
 ```sh
-go install github.com/axelmierczuk/fleet-mcp/cmd/sandboxd-mcp@latest
-go install github.com/axelmierczuk/fleet-mcp/cmd/sandboxctl@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-mcp@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
 ```
 
 ## 2. Create a fleet CA
 
 ```sh
-sandboxctl ca init
+fleetctl ca init
 ```
 
 Writes the CA key and certificate to `~/.config/sandboxd/ca/`. The signing key
@@ -26,14 +26,14 @@ never leaves this directory, and no MCP tool can read it.
 Print the fingerprint to pin during enrollment:
 
 ```sh
-sandboxctl ca fingerprint
+fleetctl ca fingerprint
 # 9f2c8a1e...
 ```
 
 ## 3. Start the enrollment endpoint
 
 ```sh
-sandboxctl serve --listen 0.0.0.0:9443
+fleetctl serve --listen 0.0.0.0:9443
 ```
 
 Only needed while enrolling hosts. Stop it afterwards.
@@ -41,7 +41,7 @@ Only needed while enrolling hosts. Stop it afterwards.
 ## 4. Mint a token
 
 ```sh
-sandboxctl enroll mint --name build-box --address build-box.internal:8722 --ttl 15m
+fleetctl enroll mint --name build-box --address build-box.internal:8722 --ttl 15m
 # token: sbx_ey...
 ```
 
@@ -77,7 +77,7 @@ $s = irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.p
 ```
 
 Prefer not to pipe to a shell? Download the archive from the releases page,
-check it against `checksums.txt`, then run `sandboxd-agent enroll` yourself with
+check it against `checksums.txt`, then run `fleet-agent enroll` yourself with
 the same flags.
 
 ## 6. Wire up your agent CLI
@@ -88,7 +88,7 @@ Add to `mcp.json`:
 {
   "mcpServers": {
     "sandboxd": {
-      "command": "sandboxd-mcp",
+      "command": "fleet-mcp",
       "args": ["serve"]
     }
   }
@@ -98,7 +98,7 @@ Add to `mcp.json`:
 Restart the CLI. Confirm the fleet is visible:
 
 ```sh
-sandboxctl list
+fleetctl list
 ```
 
 ## 7. Use it
@@ -115,14 +115,14 @@ Repeat steps 4 and 5. `--name` distinguishes them; labels let the model choose
 by capability rather than hostname:
 
 ```sh
-sandboxctl enroll mint --name gpu-01 --address gpu-01.internal:8722 \
+fleetctl enroll mint --name gpu-01 --address gpu-01.internal:8722 \
   --label gpu=a100 --label arch=amd64
 ```
 
 ## Troubleshooting
 
 **Agent does not appear in `sandbox_list`.**
-Check the service is running (`sandboxd-agent service status`), and that your
+Check the service is running (`fleet-agent service status`), and that your
 workstation can reach its listen address.
 
 **`certificate signed by unknown authority`.**

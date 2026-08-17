@@ -359,7 +359,7 @@ func checkRequestedName(name string) error {
 // maxDescriptorLength bounds each of the strings an enrolling host uses to
 // describe itself. None of them is an identity — they are recorded for an
 // operator to read — but all of them are persisted in the fleet registry and
-// printed back in `sandboxctl list`, and a kernel version has no more use for a
+// printed back in `fleetctl list`, and a kernel version has no more use for a
 // kilobyte than a name does.
 const maxDescriptorLength = 256
 
@@ -408,7 +408,7 @@ func checkHostDescription(req *sandboxdv1.EnrollRequest) error {
 //
 // Control characters are the point: the first listen address becomes the
 // registry's address for this sandbox, and every one of these fields is
-// printed into `sandboxctl list`'s table. A terminal escape sequence there
+// printed into `fleetctl list`'s table. A terminal escape sequence there
 // rewrites what the operator sees about their own fleet, and a newline splits
 // one row into two.
 func checkDescriptor(field, value string) error {

@@ -25,7 +25,7 @@ import (
 )
 
 // fakeAgent is a minimal HostService implementation standing in for
-// sandboxd-agent (milestone M1, not yet built) so internal/client's mTLS,
+// fleet-agent (milestone M1, not yet built) so internal/client's mTLS,
 // pooling, and health behaviour can be exercised end to end.
 type fakeAgent struct {
 	sandboxdv1.UnimplementedHostServiceServer
@@ -82,7 +82,7 @@ func newTestFleet(t *testing.T) *testFleet {
 
 func (f *testFleet) controlCert() (certPEM, keyPEM []byte) {
 	f.t.Helper()
-	return signLeaf(f.t, f.ca, ca.ProfileControl, "sandboxd-mcp", nil)
+	return signLeaf(f.t, f.ca, ca.ProfileControl, "fleet-mcp", nil)
 }
 
 func (f *testFleet) agentCert(name string) (certPEM, keyPEM []byte) {

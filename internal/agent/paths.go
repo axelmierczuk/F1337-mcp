@@ -22,7 +22,7 @@ const EnvConfig = "SANDBOXD_AGENT_CONFIG"
 // documented at the top of examples/agent.yaml.
 //
 // These are the paths the installer writes to when run with elevation. A
-// per-user enrollment (`sandboxd-agent enroll` without root) lands under
+// per-user enrollment (`fleet-agent enroll` without root) lands under
 // UserConfigDir instead, and DefaultConfigPath prefers whichever actually
 // exists.
 func SystemConfigDir() string {
@@ -67,7 +67,7 @@ func DefaultLogDir() string {
 }
 
 // UserConfigDir returns the per-user enrollment directory, which is where
-// `sandboxd-agent enroll` writes when no --dir is given.
+// `fleet-agent enroll` writes when no --dir is given.
 func UserConfigDir() (string, error) {
 	dir, err := registry.ConfigDir()
 	if err != nil {

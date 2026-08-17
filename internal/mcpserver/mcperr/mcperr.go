@@ -65,11 +65,11 @@ func (c Call) Map(err error) error {
 	// MapError classifies; the phrasing below is ours.
 	switch mapped := client.MapError(err); {
 	case errors.Is(mapped, client.ErrUnreachable):
-		return fmt.Errorf("sandbox %s is unreachable at %s: %s. Check the host is powered on and sandboxd-agent is running; sandbox_list shows current health",
+		return fmt.Errorf("sandbox %s is unreachable at %s: %s. Check the host is powered on and fleet-agent is running; sandbox_list shows current health",
 			c.Sandbox, c.addressOrUnknown(), message(err))
 
 	case errors.Is(mapped, client.ErrCertificateRejected):
-		return fmt.Errorf("sandbox %s rejected this client's certificate: %s. The control certificate is missing, expired, or issued by a different fleet CA; re-issue it with sandboxctl",
+		return fmt.Errorf("sandbox %s rejected this client's certificate: %s. The control certificate is missing, expired, or issued by a different fleet CA; re-issue it with fleetctl",
 			c.Sandbox, message(err))
 
 	case errors.Is(mapped, client.ErrPermissionDenied):

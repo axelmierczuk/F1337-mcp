@@ -139,7 +139,7 @@ var services struct {
 	entries map[string]Factory
 }
 
-// Register makes a service part of every sandboxd-agent daemon that imports
+// Register makes a service part of every fleet-agent daemon that imports
 // its package. Call it from an init function:
 //
 //	func init() {

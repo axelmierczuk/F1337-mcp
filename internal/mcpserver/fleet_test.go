@@ -91,7 +91,7 @@ func TestList_EmptyRegistryIsNotAnError(t *testing.T) {
 
 	assert.Empty(t, out.Sandboxes)
 	assert.Empty(t, out.Sandbox, "nothing is selected, so the echo is empty")
-	assert.Contains(t, out.Hint, "sandboxctl enroll mint")
+	assert.Contains(t, out.Hint, "fleetctl enroll mint")
 	assert.Contains(t, out.Hint, "sandbox_add")
 }
 
@@ -282,7 +282,7 @@ func TestList_FiltersByLabel(t *testing.T) {
 	out = structured[listResult](t, f.ok("sandbox_list", map[string]any{"label": "gpu=h100"}, ""))
 	assert.Empty(t, out.Sandboxes)
 	assert.Contains(t, out.Hint, "gpu=h100")
-	assert.NotContains(t, out.Hint, "sandboxctl enroll mint",
+	assert.NotContains(t, out.Hint, "fleetctl enroll mint",
 		"a filter that matched nothing is not an empty fleet")
 
 	// An empty value asks for the sandboxes whose label is set to nothing, not
@@ -306,7 +306,7 @@ func TestList_ReportsAStaleSelectionRatherThanEchoingIt(t *testing.T) {
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
 	f.ok("sandbox_select", map[string]any{"name": "gpu-01"}, "")
 
-	// Removed underneath the server, as sandboxctl would.
+	// Removed underneath the server, as fleetctl would.
 	require.NoError(t, f.fleet.Remove("gpu-01"))
 
 	out := structured[listResult](t, f.ok("sandbox_list", map[string]any{}, ""))

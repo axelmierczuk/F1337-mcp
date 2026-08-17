@@ -235,7 +235,7 @@ func TestRateLimiter_GlobalAndPerPeer(t *testing.T) {
 	require.NoError(t, short.Allow("10.0.0.1"))
 }
 
-// `sandboxctl enroll mint` and `sandboxctl serve` are separate processes, so a
+// `fleetctl enroll mint` and `fleetctl serve` are separate processes, so a
 // token that only exists in the minting process's memory can never be
 // redeemed.
 func TestTokenStore_PersistsAcrossProcesses(t *testing.T) {

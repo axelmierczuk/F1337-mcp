@@ -22,8 +22,8 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
-// init registers ForwardService with every sandboxd-agent daemon that links
-// this package. See internal/cli/sandboxdagent/services.go for the import that
+// init registers ForwardService with every fleet-agent daemon that links
+// this package. See internal/cli/fleetagent/services.go for the import that
 // does.
 func init() {
 	agent.Register("forward", New)

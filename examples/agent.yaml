@@ -1,8 +1,8 @@
-# sandboxd-agent configuration.
+# fleet-agent configuration.
 #
 # Written to /etc/sandboxd/agent.yaml (Linux), /Library/Application
 # Support/sandboxd/agent.yaml (macOS), or %ProgramData%\sandboxd\agent.yaml
-# (Windows) by `sandboxd-agent enroll`.
+# (Windows) by `fleet-agent enroll`.
 
 # The name this host enrolled under, written by `enroll` from the name the
 # control plane assigned. Every audit record below is stamped with it, and a

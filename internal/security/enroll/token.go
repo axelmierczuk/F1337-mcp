@@ -106,7 +106,7 @@ type tokenState struct {
 // once and never stored.
 //
 // A store may be backed by a file, which is what makes the CLI split work:
-// `sandboxctl enroll mint` and `sandboxctl serve` are separate processes, so
+// `fleetctl enroll mint` and `fleetctl serve` are separate processes, so
 // a token minted by one has to be redeemable by the other. File-backed stores
 // re-read on every operation and hold an advisory file lock across the whole
 // read-modify-write, so a mint concurrent with a redemption cannot clobber
@@ -233,7 +233,7 @@ func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
 	return out, nil
 }
 
-// List returns the metadata of every token still held, for `sandboxctl enroll
+// List returns the metadata of every token still held, for `fleetctl enroll
 // list`. Records carry no token material, so this is safe to print.
 func (s *TokenStore) List() ([]TokenRecord, error) {
 	var out []TokenRecord

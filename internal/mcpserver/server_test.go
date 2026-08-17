@@ -311,7 +311,7 @@ func TestServer_StartsWithoutCredentials(t *testing.T) {
 	require.True(t, res.IsError)
 	text := resultText(res)
 	assert.Contains(t, text, filepath.Join(dir, "ca", "ca.crt"))
-	assert.Contains(t, text, "sandboxctl")
+	assert.Contains(t, text, "fleetctl")
 }
 
 // ---------------------------------------------------------------- helpers
@@ -364,7 +364,7 @@ func countResponses(requests []string) int {
 // transport test: anything anywhere in the server that prints, logs, or
 // panics to stdout lands in the captured lines. Replacing os.Stderr too is
 // what lets the server keep its default log destination, so the test covers
-// the wiring a real `sandboxd-mcp serve` uses rather than one the test chose.
+// the wiring a real `fleet-mcp serve` uses rather than one the test chose.
 //
 // It waits for wantResponses lines before closing stdin. Closing it earlier
 // races the handlers: the transport tears the session down on EOF, and a

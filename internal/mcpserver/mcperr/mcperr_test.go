@@ -58,7 +58,7 @@ func TestMap_CodesBecomeReadableMessages(t *testing.T) {
 		{
 			name:     "unauthenticated points at the certificate, not the request",
 			err:      status.Error(codes.Unauthenticated, "bad certificate"),
-			contains: []string{"build-box", "certificate", "sandboxctl"},
+			contains: []string{"build-box", "certificate", "fleetctl"},
 		},
 		{
 			name:     "resource exhausted explains the size limit",

@@ -29,7 +29,7 @@ func TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines(t *testing.T) {
 	dir := t.TempDir()
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
-	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
 

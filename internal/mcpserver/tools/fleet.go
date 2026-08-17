@@ -35,7 +35,7 @@ const (
 
 // enrollmentHint is what an empty fleet gets told. Adding a sandbox is an
 // operator action; the model needs to know that rather than retrying.
-const enrollmentHint = "No sandboxes are registered. Enrolling one mints credentials and is an operator action: `sandboxctl enroll mint --name <name> --address <host:port>`, then install the agent on the host (docs/quickstart.md). A host that is already enrolled but missing here can be registered with sandbox_add."
+const enrollmentHint = "No sandboxes are registered. Enrolling one mints credentials and is an operator action: `fleetctl enroll mint --name <name> --address <host:port>`, then install the agent on the host (docs/quickstart.md). A host that is already enrolled but missing here can be registered with sandbox_add."
 
 // unconfinedNote is what a host with no allowed roots is reported as.
 //
@@ -72,7 +72,7 @@ func registerFleet(r *Registrar) {
 	AddFleet(r, &mcp.Tool{
 		Name:        "sandbox_add",
 		Title:       "Register a sandbox",
-		Description: "Register an already-enrolled agent by name and address. Does not enroll: minting credentials is an operator action via sandboxctl.",
+		Description: "Register an already-enrolled agent by name and address. Does not enroll: minting credentials is an operator action via fleetctl.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
 	}, r.sandboxAdd)
 

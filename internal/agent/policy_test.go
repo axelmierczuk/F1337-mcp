@@ -17,7 +17,7 @@ import (
 // accepted one.
 func policyRecord() policy.Record {
 	return policy.Record{
-		Principal: "sandboxd-mcp",
+		Principal: "fleet-mcp",
 		RPC:       "sandboxd.v1.ExecService/Exec",
 		Outcome:   policy.OutcomeOK,
 	}

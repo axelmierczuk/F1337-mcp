@@ -328,7 +328,7 @@ func TestSelection_UnderTheProcessFallbackDoesNotOutliveTheProcess(t *testing.T)
 // Not writing the fallback's selection stops one from being created. It does
 // not remove the ones already on disk: every registry.yaml written by a build
 // from before that fix still carries `process:<pid>` keys, and one of those
-// pids will eventually be handed to a new sandboxd-mcp. Resolution must read
+// pids will eventually be handed to a new fleet-mcp. Resolution must read
 // the fallback identity from memory only, so an inherited key is inert rather
 // than merely unlikely.
 func TestSelection_APersistedProcessKeyIsNeverInherited(t *testing.T) {

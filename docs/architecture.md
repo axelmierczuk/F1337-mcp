@@ -7,7 +7,7 @@
               │  JSON-RPC over stdio
               ▼
    ┌──────────────────────────────────────┐
-   │ sandboxd-mcp                         │
+   │ fleet-mcp                         │
    │   internal/mcpserver/tools           │  tool handlers
    │   internal/mcpserver/selection       │  which sandbox does this call target
    │   internal/registry                  │  fleet inventory, sticky default
@@ -16,7 +16,7 @@
               │  gRPC / mTLS  (:8722)
               ▼
    ┌──────────────────────────────────────┐
-   │ sandboxd-agent                       │
+   │ fleet-agent                       │
    │   internal/agent/host                │  HostService
    │   internal/agent/exec                │  ExecService
    │   internal/agent/fs                  │  FileService
@@ -27,13 +27,13 @@
    └──────────────────────────────────────┘
 
    ┌──────────────────────────────────────┐
-   │ sandboxctl                (:9443)    │
+   │ fleetctl                (:9443)    │
    │   internal/security/ca               │  CA, signing, rotation
    │   internal/security/enroll           │  EnrollmentService, tokens
    └──────────────────────────────────────┘
 ```
 
-`sandboxctl` is a separate control plane rather than a subcommand of the MCP
+`fleetctl` is a separate control plane rather than a subcommand of the MCP
 server for one reason: the MCP server is a process a model can reach. The CA
 signing key must not be.
 

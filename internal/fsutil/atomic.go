@@ -5,7 +5,7 @@
 // Both exist because more than one process legitimately touches the same
 // files. The MCP server, the operator CLI, and a second MCP server started
 // against the same config directory all read-modify-write the registry, and
-// `sandboxctl enroll mint` writes the token store that `sandboxctl serve`
+// `fleetctl enroll mint` writes the token store that `fleetctl serve`
 // redeems from.
 package fsutil
 

@@ -18,7 +18,7 @@ import (
 // installer — and handing that to every command a model asks for is a
 // credential leak with a remote trigger. The systemd unit and the launchd job
 // this repository installs do not scrub it either, and neither would a
-// hand-rolled `nohup sandboxd-agent &`.
+// hand-rolled `nohup fleet-agent &`.
 //
 // So the base is an allowlist, and each entry earns its place:
 //

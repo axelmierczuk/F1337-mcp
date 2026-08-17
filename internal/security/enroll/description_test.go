@@ -19,7 +19,7 @@ import (
 // The name is not the only thing an enrolling host writes into the fleet
 // registry. Everything it says about itself — the platform it claims, the
 // version it claims, the addresses it names — is persisted beside the name and
-// printed back in `sandboxctl list`'s table.
+// printed back in `fleetctl list`'s table.
 //
 // Round 2 bounded the name for precisely this reason and bounded nothing else,
 // so a host holding one valid token could put a terminal escape sequence, a
@@ -131,7 +131,7 @@ func TestEnroll_ListenAddressCountIsBounded(t *testing.T) {
 // Redeeming a token nobody minted is the ordinary case for an endpoint anyone
 // on the network can reach. Rewriting the whole token store for each such
 // attempt makes an unauthenticated caller drive the control plane's disk, and
-// makes it hold the cross-process lock that `sandboxctl enroll mint` and
+// makes it hold the cross-process lock that `fleetctl enroll mint` and
 // `enroll list` need to make any progress at all.
 func TestTokenStore_FailedRedemptionDoesNotRewriteTheStore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tokens.yaml")

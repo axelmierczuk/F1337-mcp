@@ -28,7 +28,7 @@ type Config struct {
 	// CACertPEM is the fleet CA bundle. Every agent's server certificate
 	// must chain to it.
 	CACertPEM []byte
-	// CertPEM and KeyPEM are the control leaf sandboxd-mcp presents as its
+	// CertPEM and KeyPEM are the control leaf fleet-mcp presents as its
 	// client certificate.
 	CertPEM []byte
 	KeyPEM  []byte

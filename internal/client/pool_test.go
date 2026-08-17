@@ -138,7 +138,7 @@ func TestPool_AgentLeafAsClientCert_RejectedByServer(t *testing.T) {
 
 	// Misconfigure the pool with an agent leaf instead of a control leaf as
 	// its own client identity.
-	agentCertPEM, agentKeyPEM := fleet.agentCert("sandboxd-mcp")
+	agentCertPEM, agentKeyPEM := fleet.agentCert("fleet-mcp")
 	pool, err := client.NewPool(client.Config{
 		CACertPEM:   fleet.ca.CertPEM(),
 		CertPEM:     agentCertPEM,

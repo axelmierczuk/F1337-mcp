@@ -154,7 +154,7 @@ func TestNew_RequiresAJail(t *testing.T) {
 }
 
 // FileService is registered with every daemon that links this package, which is
-// what the import in internal/cli/sandboxdagent/services.go relies on.
+// what the import in internal/cli/fleetagent/services.go relies on.
 func TestService_IsRegisteredWithTheDaemon(t *testing.T) {
 	names := make([]string, 0)
 	for _, reg := range agent.Registered() {

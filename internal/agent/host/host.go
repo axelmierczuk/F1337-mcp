@@ -11,8 +11,8 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
-// init registers HostService with every sandboxd-agent daemon that links this
-// package. See internal/cli/sandboxdagent/services.go for the import that does.
+// init registers HostService with every fleet-agent daemon that links this
+// package. See internal/cli/fleetagent/services.go for the import that does.
 func init() {
 	agent.Register("host", New)
 }

@@ -2,7 +2,7 @@
 
 ## What this is
 
-`sandboxd-agent` executes arbitrary commands and reads and writes arbitrary
+`fleet-agent` executes arbitrary commands and reads and writes arbitrary
 files on the host it runs on, at the request of a remote caller. **It is a
 remote code execution service.** That is the feature.
 
@@ -19,9 +19,9 @@ Do not install the agent on a machine you would not hand to the model outright.
 
 | Principal | Holds | Can do |
 | --- | --- | --- |
-| Control plane (`sandboxctl`) | CA signing key | Issue identities for the whole fleet |
-| MCP server (`sandboxd-mcp`) | Client cert | Full exec and filesystem access on every enrolled sandbox |
-| Agent (`sandboxd-agent`) | Leaf cert + key | Serve requests from authenticated clients |
+| Control plane (`fleetctl`) | CA signing key | Issue identities for the whole fleet |
+| MCP server (`fleet-mcp`) | Client cert | Full exec and filesystem access on every enrolled sandbox |
+| Agent (`fleet-agent`) | Leaf cert + key | Serve requests from authenticated clients |
 | Model | Nothing directly | Whatever the MCP server exposes as tools |
 
 The model is not a principal. It acts through the MCP server's identity, which
@@ -44,7 +44,7 @@ able to mint a credential.
 ```
 operator                control plane              new host
    │                          │                        │
-   ├─ sandboxctl enroll mint ─►                        │
+   ├─ fleetctl enroll mint ─►                        │
    ◄── token + CA fingerprint ┤                        │
    │                                                   │
    ├─────── token + fingerprint, out of band ─────────►│
@@ -63,7 +63,7 @@ operator                control plane              new host
   for any name in the fleet, and mTLS stops meaning anything.
 - **A registry label is not an identity.** A token minted without `--name` lets
   the enrolling host pick what the fleet registry calls it. That name is a
-  label: it is echoed back as `assigned_name` and printed by `sandboxctl list`,
+  label: it is echoed back as `assigned_name` and printed by `fleetctl list`,
   and it appears nowhere in the certificate.
 - Everything an enrolling host says about itself — its platform, its version,
   the addresses it names — is bounded in length and rejected if it contains

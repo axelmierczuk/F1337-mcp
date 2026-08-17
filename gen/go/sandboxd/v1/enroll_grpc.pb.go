@@ -26,8 +26,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// EnrollmentService is served by the control plane (sandboxctl serve), not by
-// sandboxd-agent. It is the one endpoint an unenrolled host may talk to.
+// EnrollmentService is served by the control plane (fleetctl serve), not by
+// fleet-agent. It is the one endpoint an unenrolled host may talk to.
 //
 // This is the only RPC path that is not mutually authenticated, because the
 // calling agent has no certificate yet. It is server-authenticated TLS plus a
@@ -65,8 +65,8 @@ func (c *enrollmentServiceClient) Enroll(ctx context.Context, in *EnrollRequest,
 // All implementations must embed UnimplementedEnrollmentServiceServer
 // for forward compatibility.
 //
-// EnrollmentService is served by the control plane (sandboxctl serve), not by
-// sandboxd-agent. It is the one endpoint an unenrolled host may talk to.
+// EnrollmentService is served by the control plane (fleetctl serve), not by
+// fleet-agent. It is the one endpoint an unenrolled host may talk to.
 //
 // This is the only RPC path that is not mutually authenticated, because the
 // calling agent has no certificate yet. It is server-authenticated TLS plus a

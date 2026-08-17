@@ -12,7 +12,7 @@ work like the tools it already has, except they run on a machine you
 designate instead of your laptop.
 
 > [!WARNING]
-> `sandboxd-agent` is a remote code execution service. That is its purpose,
+> `fleet-agent` is a remote code execution service. That is its purpose,
 > not a caveat. Read [docs/security.md](docs/security.md) before installing
 > it anywhere.
 
@@ -26,11 +26,11 @@ designate instead of your laptop.
 
 Three binaries, one Go module:
 
-- **`sandboxd-mcp`** — runs on your workstation. The MCP server your agent
+- **`fleet-mcp`** — runs on your workstation. The MCP server your agent
   talks to. Owns the registry of known sandboxes and the current selection.
-- **`sandboxd-agent`** — runs on every sandbox host. Listens over gRPC/mTLS,
+- **`fleet-agent`** — runs on every sandbox host. Listens over gRPC/mTLS,
   runs commands, and supervises background processes.
-- **`sandboxctl`** — runs on your workstation. Sets up the CA, mints
+- **`fleetctl`** — runs on your workstation. Sets up the CA, mints
   enrollment tokens, and inspects the fleet.
 
 The agent CLI (Claude Code, Cursor, etc.) calls `sandbox_select` to pick a
@@ -42,16 +42,16 @@ just execute wherever you pointed them.
 **1. Get the workstation tools:**
 
 ```sh
-go install github.com/axelmierczuk/fleet-mcp/cmd/sandboxd-mcp@latest
-go install github.com/axelmierczuk/fleet-mcp/cmd/sandboxctl@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-mcp@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
 ```
 
 **2. Create a CA and mint an enrollment token:**
 
 ```sh
-sandboxctl ca init
-sandboxctl serve &                    # enrollment endpoint, :9443
-sandboxctl enroll mint --name build-box
+fleetctl ca init
+fleetctl serve &                    # enrollment endpoint, :9443
+fleetctl enroll mint --name build-box
 # → token: sbx_ey...   ca fingerprint: 9f2c...
 ```
 
@@ -75,7 +75,7 @@ installs a system service. Use `install.ps1` on Windows.
 {
   "mcpServers": {
     "sandboxd": {
-      "command": "sandboxd-mcp",
+      "command": "fleet-mcp",
       "args": ["serve"]
     }
   }

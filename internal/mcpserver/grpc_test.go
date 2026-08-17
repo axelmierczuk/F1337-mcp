@@ -61,7 +61,7 @@ func TestEndToEnd_OverRealMTLS(t *testing.T) {
 
 	stop, dialOpt := serveAgentOverBufconn(t, authority, "agent-a")
 
-	controlCert, controlKey := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	controlCert, controlKey := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	pool, err := client.NewPool(client.Config{
 		CACertPEM:   authority.CertPEM(),
 		CertPEM:     controlCert,
@@ -126,7 +126,7 @@ func TestLazyPool_BuildsFromCredentialsOnDisk(t *testing.T) {
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
 
-	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
 
@@ -145,7 +145,7 @@ func TestLazyPool_BuildsFromCredentialsOnDisk(t *testing.T) {
 
 	text := resultText(callTool(t, session, "sandbox_info", map[string]any{"sandbox": "closed"}, true))
 	assert.NotContains(t, text, "control certificate", "the credentials on disk must have been used")
-	assert.NotContains(t, text, "sandboxctl ca sign")
+	assert.NotContains(t, text, "fleetctl ca sign")
 	assert.Truef(t,
 		strings.Contains(text, "unreachable") || strings.Contains(text, "timed out"),
 		"expected a connection failure, got: %s", text)
@@ -169,17 +169,17 @@ func TestLazyPool_NoticesCredentialsAppearingMidSession(t *testing.T) {
 	callTool(t, session, "sandbox_add", map[string]any{"name": "closed", "address": "127.0.0.1:1"}, false)
 
 	text := resultText(callTool(t, session, "sandbox_info", map[string]any{"sandbox": "closed"}, true))
-	require.Contains(t, text, "sandboxctl ca init", "the first failure must name the missing CA")
+	require.Contains(t, text, "fleetctl ca init", "the first failure must name the missing CA")
 
 	// The operator goes and creates them, without restarting the server.
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
-	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
 
 	text = resultText(callTool(t, session, "sandbox_info", map[string]any{"sandbox": "closed"}, true))
-	assert.NotContains(t, text, "sandboxctl ca init",
+	assert.NotContains(t, text, "fleetctl ca init",
 		"the same session must pick up credentials that appeared after it started")
 	assert.Truef(t,
 		strings.Contains(text, "unreachable") || strings.Contains(text, "timed out"),
@@ -198,7 +198,7 @@ func TestLazyPool_DoesNotRebuildAfterClose(t *testing.T) {
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
 
-	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "sandboxd-mcp", nil)
+	certPEM, keyPEM := signLeaf(t, authority, ca.ProfileControl, "fleet-mcp", nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "control.key"), keyPEM, 0o600))
 

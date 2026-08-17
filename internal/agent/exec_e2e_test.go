@@ -109,7 +109,7 @@ func TestExecService_EndToEnd(t *testing.T) {
 		Outcome   string `json:"outcome"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(lines[0]), &rec))
-	assert.Equal(t, "sandboxd-mcp", rec.Principal,
+	assert.Equal(t, "fleet-mcp", rec.Principal,
 		"the principal is the client certificate's common name, taken from the verified chain")
 	assert.Equal(t, "sandboxd.v1.ExecService/Exec", rec.RPC)
 	assert.Equal(t, "ok", rec.Outcome)

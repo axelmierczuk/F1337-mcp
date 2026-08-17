@@ -30,7 +30,7 @@ message GetHostInfoResponse {
   Platform platform = 1;
   Resources resources = 2;
   repeated Toolchain toolchains = 3;
-  // Semantic version of the sandboxd-agent binary serving this request.
+  // Semantic version of the fleet-agent binary serving this request.
   string agent_version = 4;
   // Absolute paths the agent will allow filesystem operations under. Empty
   // means the agent is running without a path jail, which it warns about.

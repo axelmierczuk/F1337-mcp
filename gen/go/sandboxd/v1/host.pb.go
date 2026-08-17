@@ -125,7 +125,7 @@ type GetHostInfoResponse struct {
 	Platform   *Platform              `protobuf:"bytes,1,opt,name=platform,proto3" json:"platform,omitempty"`
 	Resources  *Resources             `protobuf:"bytes,2,opt,name=resources,proto3" json:"resources,omitempty"`
 	Toolchains []*Toolchain           `protobuf:"bytes,3,rep,name=toolchains,proto3" json:"toolchains,omitempty"`
-	// Semantic version of the sandboxd-agent binary serving this request.
+	// Semantic version of the fleet-agent binary serving this request.
 	AgentVersion string `protobuf:"bytes,4,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
 	// Absolute paths the agent will allow filesystem operations under. Empty
 	// means the agent is running without a path jail, which it warns about.

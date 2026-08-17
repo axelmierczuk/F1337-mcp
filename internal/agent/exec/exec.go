@@ -23,8 +23,8 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
-// init registers ExecService with every sandboxd-agent daemon that links this
-// package. See internal/cli/sandboxdagent/services.go for the import that does.
+// init registers ExecService with every fleet-agent daemon that links this
+// package. See internal/cli/fleetagent/services.go for the import that does.
 func init() {
 	agent.Register("exec", New)
 }

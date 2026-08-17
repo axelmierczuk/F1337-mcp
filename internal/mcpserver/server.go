@@ -58,7 +58,7 @@ which is not the same as none being writable. Use sandbox_process_start, not
 sandbox_exec, for anything meant to outlive the call.
 
 Registering a sandbox does not enroll it: minting credentials is an operator
-action via sandboxctl.`
+action via fleetctl.`
 
 // Options configures a Server. The zero value is usable: every path defaults
 // under the user's config directory.
@@ -119,7 +119,7 @@ type Server struct {
 // registers every tool.
 //
 // It deliberately does not require credentials to exist. A workstation that
-// has run `sandboxctl ca init` but not yet issued itself a control leaf can
+// has run `fleetctl ca init` but not yet issued itself a control leaf can
 // still list, add and remove sandboxes; the missing certificate surfaces as a
 // tool error on the first call that actually needs to reach an agent, naming
 // the file and the command that creates it. Failing at startup instead would

@@ -23,9 +23,9 @@ import (
 type Profile int
 
 const (
-	// ProfileAgent issues a server-auth leaf for a sandboxd-agent host.
+	// ProfileAgent issues a server-auth leaf for a fleet-agent host.
 	ProfileAgent Profile = iota
-	// ProfileControl issues a client-auth leaf for sandboxd-mcp.
+	// ProfileControl issues a client-auth leaf for fleet-mcp.
 	ProfileControl
 	// ProfileControlPlane issues a server-auth leaf for the control plane's
 	// own enrollment listener, so that listener terminates TLS with a leaf
@@ -39,7 +39,7 @@ const (
 func (p Profile) OrganizationalUnit() string {
 	switch p {
 	case ProfileAgent:
-		return "sandboxd-agent"
+		return "fleet-agent"
 	case ProfileControl:
 		return "sandboxd-control"
 	case ProfileControlPlane:
