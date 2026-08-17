@@ -686,8 +686,18 @@ func streamToLocal(stream forwardReceiver, conn net.Conn) error {
 
 		if resp.GetClose() != nil {
 			// The sandbox-side server closed its write side. The local client
-			// may still be sending, so shut down only the write half here.
-			return closeLocalWrite(conn)
+			// may still be sending, so shut down only the write half here —
+			// and then keep receiving.
+			//
+			// Returning here instead would end this pump, which ends carry,
+			// which cancels the stream. CloseSend does not wait for the agent
+			// to have consumed what was already sent, so a cancel that lands
+			// first drops the client's last bytes: the request is silently
+			// truncated and the server never sees the end of it. The stream
+			// ends on its own once the agent's handler returns, which is the
+			// point at which there is genuinely nothing left in flight.
+			_ = closeLocalWrite(conn)
+			continue
 		}
 		data := resp.GetData()
 		if len(data) == 0 {
