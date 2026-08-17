@@ -122,13 +122,16 @@ func spew(args []string) {
 	}
 }
 
-// tree announces its pid, spawns a child one level shallower, and then sleeps
-// forever.
+// tree announces its pid and process group, spawns a child one level
+// shallower, and then sleeps forever.
 //
-// Each level prints "pid N" on the shared stdout, so the caller ends up holding
-// the identity of every process in the tree. Nothing here exits on its own: the
-// only way this tree ends is for something to kill it, which is the question
-// the timeout scenario asks.
+// Each level prints "pid N pgid M" on the shared stdout, so the caller ends up
+// holding the identity of every process in the tree. The group id is there so
+// the caller can tell whether the command really leads a group of its own:
+// "nothing is left in the group" is a claim about an empty set either way, and
+// only true membership makes it a claim about this tree. Nothing here exits on
+// its own: the only way this tree ends is for something to kill it, which is
+// the question the timeout scenario asks.
 func tree(args []string) {
 	depth := 2
 	if len(args) > 0 {
@@ -139,7 +142,7 @@ func tree(args []string) {
 		depth = d
 	}
 
-	fmt.Printf("pid %d\n", os.Getpid())
+	fmt.Printf("pid %d pgid %d\n", os.Getpid(), processGroup())
 	if depth > 0 {
 		child := exec.Command(os.Args[0], "tree", strconv.Itoa(depth-1))
 		child.Stdout = os.Stdout

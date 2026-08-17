@@ -36,6 +36,11 @@ const (
 	// containerImage carries a Go toolchain and nothing else; the suite builds
 	// the binaries it needs from the mounted source.
 	containerImage = "golang:1.25"
+	// innerScenario is the test the container runs. Named once, so the -run
+	// pattern and the assertion that it actually ran cannot drift apart — the
+	// drift being the thing that turns this pair into a scenario that passes
+	// without running anything.
+	innerScenario = "TestNoProcessSurvivesTheTimeoutInsideThisNamespace"
 )
 
 // TestExecTimeoutKillsTheWholeProcessTreeInContainer re-runs the tree-kill
@@ -63,7 +68,7 @@ func TestExecTimeoutKillsTheWholeProcessTreeInContainer(t *testing.T) {
 		"--env", inContainerEnv + "=1",
 		containerImage,
 		"go", "test", "-tags", "integration", "-count=1", "-v",
-		"-run", "TestNoProcessSurvivesTheTimeoutInsideThisNamespace",
+		"-run", "^" + innerScenario + "$",
 		"./test/e2e/",
 	}
 
@@ -73,8 +78,19 @@ func TestExecTimeoutKillsTheWholeProcessTreeInContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the containerised scenario failed: %v", err)
 	}
-	if !contains(string(out), "PASS") {
-		t.Fatalf("the containerised scenario did not report a pass:\n%s", out)
+
+	// The inner scenario has to have *run*, and the naive check for it does not
+	// say that. `go test` prints a bare "PASS" and exits zero for a run that
+	// skipped every test, and for a -run pattern that matched none at all — so
+	// a rename here, or an environment that did not reach the container, would
+	// turn this scenario into a green job that asserted nothing. That is the
+	// failure this whole suite exists to stop, and it must not be the shape of
+	// the suite itself. The per-test line is the one that only a test that ran
+	// and passed produces.
+	pass := "--- PASS: " + innerScenario
+	if !contains(string(out), pass) {
+		t.Fatalf("the containerised scenario did not run and pass (%q is missing; a skip or an unmatched -run also prints a bare PASS):\n%s",
+			pass, out)
 	}
 }
 
@@ -108,8 +124,8 @@ func TestNoProcessSurvivesTheTimeoutInsideThisNamespace(t *testing.T) {
 	if !res.TimedOut {
 		t.Fatalf("a command that never exits should have been killed for overrunning: %+v", res)
 	}
-	if pids := parsePIDs(t, res.Stdout); len(pids) != 4 {
-		t.Fatalf("expected four levels of the tree to announce themselves, got %v from:\n%s", pids, res.Stdout)
+	if procs := parseTree(t, res.Stdout); len(procs) != 4 {
+		t.Fatalf("expected four levels of the tree to announce themselves, got %v from:\n%s", procs, res.Stdout)
 	}
 
 	waitFor(t, 30*time.Second, "every process of the tree to leave the namespace", func() (bool, string) {

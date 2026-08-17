@@ -13,7 +13,13 @@ import (
 )
 
 // pidLine matches the identity each level of the helper tree prints.
-var pidLine = regexp.MustCompile(`(?m)^pid (\d+)$`)
+var pidLine = regexp.MustCompile(`(?m)^pid (\d+) pgid (\d+)$`)
+
+// treeProc is one level of the helper tree, as it reported itself.
+type treeProc struct {
+	pid  int
+	pgid int
+}
 
 // TestExecTimeoutKillsTheWholeProcessTree runs a command that outlives its
 // timeout and spawns children that would outlive their parent, and then proves
@@ -44,18 +50,38 @@ func TestExecTimeoutKillsTheWholeProcessTree(t *testing.T) {
 		t.Fatalf("a command that never exits should have been killed for overrunning: %+v", res)
 	}
 
-	pids := parsePIDs(t, res.Stdout)
-	if len(pids) != 3 {
-		t.Fatalf("expected three levels of the tree to announce themselves, got %v from:\n%s", pids, res.Stdout)
+	procs := parseTree(t, res.Stdout)
+	if len(procs) != 3 {
+		t.Fatalf("expected three levels of the tree to announce themselves, got %v from:\n%s", procs, res.Stdout)
+	}
+
+	// Checked before anything is asserted about the group, because it is what
+	// makes those assertions mean anything. The leader reported its own group
+	// id, so this is checkable rather than assumed: an agent that stopped
+	// putting a command in its own session would leave the leader in the
+	// *agent's* group, nothing would ever have had a group id equal to the
+	// leader's pid, and "the group is empty" below would pass while a survivor
+	// sat somewhere this test never looks.
+	leader := procs[0]
+	if leader.pgid != leader.pid {
+		t.Fatalf("the command's leader (pid %d) is in group %d rather than leading its own; "+
+			"the group assertion below would be vacuous, and a timeout cannot reach descendants through a group it does not lead",
+			leader.pid, leader.pgid)
+	}
+	for _, p := range procs[1:] {
+		if p.pgid != leader.pgid {
+			t.Fatalf("pid %d is in group %d, not the tree's group %d: the group swept is not this tree's",
+				p.pid, p.pgid, leader.pgid)
+		}
 	}
 
 	// Every process the command created, by the identity it reported itself.
-	for _, pid := range pids {
-		waitFor(t, 30*time.Second, fmt.Sprintf("pid %d to be gone", pid), func() (bool, string) {
-			if !processAlive(pid) {
+	for _, p := range procs {
+		waitFor(t, 30*time.Second, fmt.Sprintf("pid %d to be gone", p.pid), func() (bool, string) {
+			if !processAlive(p.pid) {
 				return true, ""
 			}
-			return false, fmt.Sprintf("pid %d is still alive after the timeout killed its group", pid)
+			return false, fmt.Sprintf("pid %d is still alive after the timeout killed its group", p.pid)
 		})
 	}
 
@@ -66,13 +92,12 @@ func TestExecTimeoutKillsTheWholeProcessTree(t *testing.T) {
 	//
 	// The container variant of this scenario enumerates the whole PID namespace
 	// instead; see TestExecTimeoutKillsTheWholeProcessTreeInContainer.
-	leader := pids[0]
 	waitFor(t, 30*time.Second, "the command's process group to empty", func() (bool, string) {
-		members := processGroupMembers(t, leader)
+		members := processGroupMembers(t, leader.pgid)
 		if len(members) == 0 {
 			return true, ""
 		}
-		return false, fmt.Sprintf("process group %d still holds %v", leader, members)
+		return false, fmt.Sprintf("process group %d still holds %v", leader.pgid, members)
 	})
 
 	if !bystander.running() {
@@ -116,19 +141,25 @@ func TestExecTimeoutReportsWhatItDid(t *testing.T) {
 	}
 }
 
-// parsePIDs pulls the identities the helper tree announced.
-func parsePIDs(t *testing.T, out string) []int {
+// parseTree pulls the identities the helper tree announced, in the order it
+// announced them: the leader first, because each level prints itself before
+// spawning the next.
+func parseTree(t *testing.T, out string) []treeProc {
 	t.Helper()
 
-	var pids []int
+	var procs []treeProc
 	for _, m := range pidLine.FindAllStringSubmatch(out, -1) {
 		pid, err := strconv.Atoi(m[1])
 		if err != nil {
 			t.Fatalf("unparseable pid %q", m[1])
 		}
-		pids = append(pids, pid)
+		pgid, err := strconv.Atoi(m[2])
+		if err != nil {
+			t.Fatalf("unparseable pgid %q", m[2])
+		}
+		procs = append(procs, treeProc{pid: pid, pgid: pgid})
 	}
-	return pids
+	return procs
 }
 
 // processGroupMembers lists every process still in a process group.
