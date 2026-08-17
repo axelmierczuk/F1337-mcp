@@ -65,6 +65,14 @@ func newFakeHost() *fakeHost {
 			AllowedRoots:           []string{"/home/build/workspace"},
 			StartedAt:              timestamppb.New(time.Now().Add(-90 * time.Minute)),
 			AuthenticatedPrincipal: "fleet-mcp",
+			// A narrowed proxy posture, which is what fleet_socks requires
+			// before it will open one. A test that wants the refusal overwrites
+			// this; see socks_tools_test.go.
+			ForwardPolicy: &sandboxdv1.ForwardPolicy{
+				Enabled:      true,
+				SocksEnabled: true,
+				AllowedHosts: []string{"db.internal", "10.0.4.0/24"},
+			},
 		},
 	}
 }

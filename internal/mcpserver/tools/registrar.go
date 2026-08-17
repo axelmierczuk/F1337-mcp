@@ -250,6 +250,8 @@ type Registrar struct {
 	// than inside a handler because a forward outlives the call that opened
 	// it: see [Registrar.Close], and forward.go.
 	forwards *forwardManager
+	// proxies owns every open SOCKS proxy, for the same reason.
+	proxies *socksManager
 
 	mu            sync.Mutex
 	registrations []Registration
@@ -362,5 +364,6 @@ func Register(server *mcp.Server, deps Deps) *Registrar {
 	registerTransfer(r)
 	registerProcess(r)
 	registerForward(r)
+	registerSocks(r)
 	return r
 }

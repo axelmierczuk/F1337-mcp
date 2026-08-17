@@ -26,6 +26,7 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/agent"
 	agentforward "github.com/axelmierczuk/fleet-mcp/internal/agent/forward"
+	agenthost "github.com/axelmierczuk/fleet-mcp/internal/agent/host"
 	agentprocess "github.com/axelmierczuk/fleet-mcp/internal/agent/process"
 	"github.com/axelmierczuk/fleet-mcp/internal/client"
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver"
@@ -243,6 +244,10 @@ type liveAgentOptions struct {
 	forwardAllowedHosts []string
 	// forwardDisabled turns ForwardService off.
 	forwardDisabled bool
+	// socksEnabled turns SOCKS proxying on. It is off by default, exactly as it
+	// is on a real agent — a fixture whose default differed from the product's
+	// would be testing a posture nobody ships.
+	socksEnabled bool
 }
 
 func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
@@ -275,6 +280,7 @@ func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
 		Forward: agent.ForwardConfig{
 			Enabled:      &forwardEnabled,
 			AllowedHosts: opts.forwardAllowedHosts,
+			SocksEnabled: opts.socksEnabled,
 			DialTimeout:  agent.Duration(3 * time.Second),
 		},
 	}
@@ -311,11 +317,19 @@ func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
 	require.NoError(t, err)
 	fwdSvc, err := agentforward.New(deps)
 	require.NoError(t, err)
+	// The real HostService, so that fleet_socks reads the forward policy off the
+	// agent's own configuration rather than off a fake this file could set to
+	// anything. The whole of fleet_socks's refusal turns on that answer, and a
+	// fixture that supplied it would be testing the tool against its own
+	// opinion of what the agent said.
+	hostSvc, err := agenthost.New(deps)
+	require.NoError(t, err)
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
 	procSvc.Register(srv)
 	fwdSvc.Register(srv)
+	hostSvc.Register(srv)
 
 	var serving sync.WaitGroup
 	serving.Add(1)
@@ -380,7 +394,7 @@ type liveClients struct {
 }
 
 func (c *liveClients) Host(string, string) (sandboxdv1.HostServiceClient, error) {
-	return nil, status.Error(codes.Unimplemented, "HostService is not part of these tests")
+	return sandboxdv1.NewHostServiceClient(c.conn), nil
 }
 
 func (c *liveClients) Exec(string, string) (sandboxdv1.ExecServiceClient, error) {

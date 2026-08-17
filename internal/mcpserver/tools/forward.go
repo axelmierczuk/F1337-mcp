@@ -61,16 +61,26 @@ func registerForward(r *Registrar) {
 }
 
 // Close releases everything the tools own outside a single call: every open
-// port forward and its local listener.
+// port forward, every open SOCKS proxy, and their local listeners.
 //
 // The MCP server calls this on the way out. A local listener that survived the
 // process would hold its port against the next server, and the user would see
 // "address already in use" from a process that no longer exists.
+//
+// Both are closed even if one of them fails, and the first failure is the one
+// reported: a proxy left running because a forward's teardown returned an error
+// is the leak this method exists to prevent, arrived at from inside.
 func (r *Registrar) Close() error {
-	if r.forwards == nil {
-		return nil
+	var firstErr error
+	if r.forwards != nil {
+		firstErr = r.forwards.Close()
 	}
-	return r.forwards.Close()
+	if r.proxies != nil {
+		if err := r.proxies.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // ------------------------------------------------------------- manager
