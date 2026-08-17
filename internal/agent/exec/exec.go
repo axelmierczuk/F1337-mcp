@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	osexec "os/exec"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -39,6 +41,12 @@ const execMethod = "sandboxd.v1.ExecService/Exec"
 // longer to return. The supervisor's process.default_grace_period is a
 // different question: there the caller is asking a long-lived server to shut
 // down cleanly, and waiting is the point.
+//
+// It buys nothing on Windows, which has no deliverable, catchable termination
+// request for a process without a console: SignalTerm terminates the job object
+// there, so the escalation ends at its first step and this grace is never
+// waited out. That asymmetry belongs to the platform, not to this package —
+// see internal/platform's ProcessGroup.Signal.
 const defaultKillGrace = 5 * time.Second
 
 // defaultIODrain bounds how long Wait keeps reading output after the process
@@ -50,6 +58,13 @@ const defaultKillGrace = 5 * time.Second
 // a command that succeeded in a millisecond. With it, the pipes are closed, the
 // result is reported, and the leftovers are killed with the rest of the group.
 const defaultIODrain = 2 * time.Second
+
+// errStreamStalled reports that the call was given up on because its output
+// stream stopped accepting data.
+//
+// It is not a failure of the command — that was killed on schedule — but a
+// failure to deliver its result, and the two are audited differently.
+var errStreamStalled = errors.New("the caller stopped reading its output stream, so the command was killed and its result could not be delivered")
 
 // Service implements sandboxd.v1.ExecService.
 type Service struct {
@@ -238,10 +253,26 @@ func (s *Service) Exec(req *sandboxdv1.ExecRequest, stream sandboxdv1.ExecServic
 	// the command's own timeout: waiting longer than the command was allowed to
 	// run for turns a busy agent into a hung tool call, and a caller that set no
 	// deadline of its own would otherwise wait indefinitely for a slot.
+	//
+	// The timeout bounds the queue wait and then the command separately, so a
+	// call on a saturated agent can take up to twice it before returning. The
+	// alternative — spending the queue wait out of the command's budget — hands
+	// a command that waited its whole timeout no time at all to run, which
+	// fails calls for a reason the caller cannot see or act on. docs/tools.md
+	// says which one this is.
 	acquireCtx, cancelAcquire := context.WithTimeout(ctx, timeout)
 	release, err := s.policy.Acquire(acquireCtx)
 	cancelAcquire()
 	if err != nil {
+		// Which context ended decides what happened. The caller hanging up
+		// while queued is not the agent running out of capacity, and recording
+		// it as one would put a capacity failure in the audit log for every
+		// client that lost patience or lost its connection.
+		if ctx.Err() != nil {
+			rec.Outcome = policy.OutcomeCancelled
+			rec.Error = "the caller went away while waiting for a free process slot"
+			return s.finish(rec, status.Errorf(codes.Canceled, "%s", rec.Error))
+		}
 		return s.fail(rec, codes.ResourceExhausted, "%s", err)
 	}
 	defer release()
@@ -256,6 +287,16 @@ func (s *Service) Exec(req *sandboxdv1.ExecRequest, stream sandboxdv1.ExecServic
 		shell:   req.GetShell(),
 		sink:    sink,
 	})
+	if errors.Is(err, errStreamStalled) {
+		// The command ran and was killed, so the record says what happened to
+		// it rather than reporting a request that failed. Nothing here reads
+		// the sink: its lock is held by the copier still parked in Send.
+		rec.Outcome = outcome.auditOutcome()
+		rec.TimedOut = outcome.timedOut
+		rec.DurationMS = outcome.duration.Milliseconds()
+		rec.Error = err.Error()
+		return s.finish(rec, status.Errorf(codes.Aborted, "%s", err))
+	}
 	if err != nil {
 		return s.fail(rec, codes.Internal, "%s", err)
 	}
@@ -413,8 +454,9 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 	if len(spec.stdin) > 0 {
 		// os/exec copies this into the child's stdin pipe and closes it when
 		// the copy finishes, which is the "written then closed" the request
-		// documents. A command that never reads it cannot wedge the call:
-		// WaitDelay closes the pipe.
+		// documents. A command that never reads it does not wedge the call:
+		// WaitDelay closes the pipe, and unlike the output copiers this one is
+		// blocked on a pipe rather than on the caller's stream.
 		cmd.Stdin = bytes.NewReader(spec.stdin)
 	}
 	group.ConfigureCommand(cmd)
@@ -436,16 +478,50 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 	}
 
 	done := make(chan struct{})
-	watchdog := s.watch(ctx, group, spec.timeout, done)
+	// Closed exactly once, on every path out of this function, so the watchdog
+	// can never outlive the call it is watching.
+	stopWatching := sync.OnceFunc(func() { close(done) })
+	defer stopWatching()
 
-	waitErr := cmd.Wait()
-	close(done)
-	killed := <-watchdog
+	watcher := s.watch(ctx, group, spec.timeout, done)
+
+	// Wait runs on its own goroutine because it is not always possible to
+	// finish. os/exec's Wait waits for the output-copying goroutines
+	// unconditionally once it has closed the pipes — awaitGoroutines does a
+	// bare receive on their result — and a copier is not necessarily waiting on
+	// a pipe: this one writes to a gRPC stream, and grpc-go's Send parks until
+	// the stream's flow-control window opens. A caller that is still connected
+	// but has stopped calling Recv never opens it. So the wait can outlive the
+	// command by any amount, and the handler must not: the RPC ending is
+	// precisely what tears the stream down and releases that Send. The channel
+	// is buffered so the goroutine can finish and exit after this function has
+	// returned.
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	var waitErr error
+	select {
+	case waitErr = <-waited:
+		stopWatching()
+	case <-watcher.abandon:
+		stopWatching()
+		<-watcher.finished
+		// Deliberately nothing from cmd or from the sink here. ProcessState
+		// belongs to the Wait still running on the other goroutine, and the
+		// sink's lock is held by the copier parked in Send — touching either
+		// would trade a hung RPC for a data race or a deadlock.
+		return outcome{
+			duration:  time.Since(started),
+			timedOut:  watcher.timedOut.Load(),
+			cancelled: watcher.cancelled.Load(),
+		}, errStreamStalled
+	}
+	<-watcher.finished
 
 	result := outcome{
 		duration:  time.Since(started),
-		timedOut:  killed.timedOut,
-		cancelled: killed.cancelled,
+		timedOut:  watcher.timedOut.Load(),
+		cancelled: watcher.cancelled.Load(),
 	}
 	if cmd.ProcessState == nil {
 		return outcome{}, fmt.Errorf("running %s: %w", spec.cmd.Path, waitErr)
@@ -464,14 +540,25 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 	return result, nil
 }
 
-// killOutcome reports why the watchdog killed the process, if it did.
-type killOutcome struct {
-	timedOut  bool
-	cancelled bool
+// watcher is the goroutine that bounds a running command, and the state run
+// reads back from it.
+type watcher struct {
+	// timedOut and cancelled record why the command was killed. run reads them
+	// only after finished is closed, which is what publishes the writes.
+	timedOut  atomic.Bool
+	cancelled atomic.Bool
+
+	// abandon is closed when waiting for the command has stopped being able to
+	// end, and the handler must return without it. See run.
+	abandon chan struct{}
+
+	// finished is closed when the goroutine has returned, so run knows nothing
+	// is still signalling a process group it is about to release.
+	finished chan struct{}
 }
 
 // watch kills the process group when the command runs out of time or its
-// caller goes away.
+// caller goes away, and gives up on the call when even that does not end it.
 //
 // SIGTERM to the group, then SIGKILL to the group after the grace period. The
 // group and not the leader: signalling `sh -c 'make -j8'` alone leaves eight
@@ -480,26 +567,32 @@ type killOutcome struct {
 // kills Cmd.Process, and WaitDelay's escalation kills Cmd.Process — which is
 // why the context is watched here instead of being handed to CommandContext.
 //
-// The returned channel yields once, after done is closed.
-func (s *Service) watch(ctx context.Context, group *platform.ProcessGroup, timeout time.Duration, done <-chan struct{}) <-chan killOutcome {
-	result := make(chan killOutcome, 1)
+// On Windows there is no grace step to speak of: the platform has no
+// deliverable, catchable termination request for a process without a console,
+// so SignalTerm terminates the job object outright and the escalation collapses
+// into its first step.
+//
+// Every wait below selects on done, so closing it returns the goroutine
+// promptly from wherever it is.
+func (s *Service) watch(ctx context.Context, group *platform.ProcessGroup, timeout time.Duration, done <-chan struct{}) *watcher {
+	w := &watcher{abandon: make(chan struct{}), finished: make(chan struct{})}
 
 	go func() {
+		defer close(w.finished)
+
 		timer := time.NewTimer(timeout)
 		defer timer.Stop()
 
-		var killed killOutcome
 		select {
 		case <-done:
-			result <- killed
 			return
 		case <-timer.C:
-			killed.timedOut = true
+			w.timedOut.Store(true)
 		case <-ctx.Done():
 			// The stream's context. Cancelled means the caller hung up or the
 			// daemon is draining; either way nothing is left to receive the
 			// output, and the command must not keep running.
-			killed.cancelled = true
+			w.cancelled.Store(true)
 		}
 
 		// A command that finished in the same instant is not a command that
@@ -509,7 +602,8 @@ func (s *Service) watch(ctx context.Context, group *platform.ProcessGroup, timeo
 		// something it did not.
 		select {
 		case <-done:
-			result <- killOutcome{}
+			w.timedOut.Store(false)
+			w.cancelled.Store(false)
 			return
 		default:
 		}
@@ -522,16 +616,33 @@ func (s *Service) watch(ctx context.Context, group *platform.ProcessGroup, timeo
 		defer grace.Stop()
 		select {
 		case <-done:
+			return
 		case <-grace.C:
-			if err := group.Kill(); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
-				s.log.Warn("could not kill the process group", "error", err)
-			}
-			<-done
 		}
-		result <- killed
+
+		if err := group.Kill(); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
+			s.log.Warn("could not kill the process group", "error", err)
+		}
+
+		// The process is gone, so Wait returns in milliseconds — unless
+		// something downstream of the output pipes is stuck, which is the case
+		// this exists for: a caller that is still connected but has stopped
+		// reading parks the copier inside grpc's Send, and os/exec's Wait waits
+		// for that copier however long it takes. Past this point the handler
+		// gains nothing by waiting and costs the agent a concurrency slot, an
+		// audit record, and an RPC that never ends.
+		drain := time.NewTimer(s.ioDrain)
+		defer drain.Stop()
+		select {
+		case <-done:
+		case <-drain.C:
+			s.log.Warn("giving up on a command whose output stream stopped accepting data",
+				"drain", s.ioDrain, "timed_out", w.timedOut.Load(), "cancelled", w.cancelled.Load())
+			close(w.abandon)
+		}
 	}()
 
-	return result
+	return w
 }
 
 // fail records a refused request and returns the error the caller sees.

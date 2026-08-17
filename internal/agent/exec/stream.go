@@ -26,6 +26,18 @@ const maxChunkBytes = 32 * 1024
 // command that produced too much output would hang until its timeout instead of
 // finishing, and the caller would get a timeout for a command that had done its
 // job. Accepting and discarding is what keeps the pipe drained.
+//
+// # The lock is held across Send, and Send can park indefinitely
+//
+// grpc-go's Send waits for the stream's flow-control window, which a caller
+// that has stopped reading never reopens; only the RPC ending releases it. So a
+// method on this type can block for as long as the client likes, and anything
+// calling one from the handler's own goroutine — after the handler has decided
+// to give up on such a caller, say — deadlocks the very path that would have
+// freed it. exec.go's abandon path touches nothing here for that reason.
+//
+// Serialising on one mutex is not incidental either: grpc.ServerStream permits
+// one Send at a time, and stdout and stderr are copied by two goroutines.
 type sink struct {
 	mu     sync.Mutex
 	stream sandboxdv1.ExecService_ExecServer

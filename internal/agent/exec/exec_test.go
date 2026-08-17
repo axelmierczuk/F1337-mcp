@@ -53,6 +53,11 @@ type fakeStream struct {
 	// onSend, when set, runs before each Send. A test uses it to cancel the
 	// call from inside the stream.
 	onSend func(*sandboxdv1.ExecResponse)
+	// blockSend, when set, parks every Send until it is closed. This is what a
+	// caller that has stopped reading its own stream does to the handler:
+	// grpc-go's Send waits for a flow-control window the client is no longer
+	// opening.
+	blockSend chan struct{}
 }
 
 func newFakeStream(ctx context.Context) *fakeStream { return &fakeStream{ctx: ctx} }
@@ -63,10 +68,14 @@ func (s *fakeStream) Send(msg *sandboxdv1.ExecResponse) error {
 	s.mu.Lock()
 	hook := s.onSend
 	err := s.sendErr
+	block := s.blockSend
 	s.mu.Unlock()
 
 	if hook != nil {
 		hook(msg)
+	}
+	if block != nil {
+		<-block
 	}
 	if err != nil {
 		return err
@@ -389,6 +398,57 @@ func TestExec_CancellingTheCallKillsTheCommand(t *testing.T) {
 	require.Equal(t, policy.OutcomeCancelled, records[0].Outcome)
 }
 
+// A caller that stops reading its own stream must not be able to hold the
+// handler open forever.
+//
+// os/exec's Wait waits for the output-copying goroutines unconditionally once
+// it has closed the pipes, and this one writes to a gRPC stream rather than to
+// a file — so a client that is still connected but has stopped calling Recv
+// parks it in Send indefinitely. Everything downstream of Wait then never
+// happens: the concurrency slot is never released, no audit record is written
+// for a command that really ran, and the RPC ends only when the daemon drains.
+//
+// The command itself is killed on schedule either way, which is what makes this
+// invisible from the outside: there is no runaway process to notice.
+func TestExec_StalledOutputStreamDoesNotWedgeTheHandler(t *testing.T) {
+	h := newHarness(t)
+
+	block := make(chan struct{})
+	// Released at the end so the parked copier can finish; the handler must
+	// have returned long before this runs.
+	defer close(block)
+
+	stream := newFakeStream(context.Background())
+	stream.blockSend = block
+
+	req := helperReq("spew", "1048576")
+	req.Timeout = durationpb.New(500 * time.Millisecond)
+
+	returned := make(chan error, 1)
+	go func() { returned <- h.svc.Exec(req, stream) }()
+
+	var err error
+	select {
+	case err = <-returned:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Exec did not return for a caller that stopped reading its stream")
+	}
+
+	require.Error(t, err)
+	require.Equal(t, codes.Aborted, status.Code(err))
+	require.Contains(t, status.Convert(err).Message(), "stopped reading")
+
+	// The slot is back, so the next call is not queued behind a call that will
+	// never end.
+	require.Equal(t, 0, h.svc.policy.InUse())
+
+	records := h.records(t)
+	require.Len(t, records, 1, "a command that ran is recorded even when its result could not be delivered")
+	require.Equal(t, policy.OutcomeTimedOut, records[0].Outcome)
+	require.True(t, records[0].TimedOut)
+	require.NotEmpty(t, records[0].Error)
+}
+
 func TestExec_IgnoringSIGTERMEscalatesToKill(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows has no SIGTERM to ignore: the job object is terminated, which a process cannot decline")
@@ -582,25 +642,34 @@ func TestExec_DisabledServiceRefusesAndSaysWhy(t *testing.T) {
 
 func TestExec_ConcurrencyCapIsEnforced(t *testing.T) {
 	h := newHarness(t, withCaps(policy.Caps{
-		DefaultTimeout: 5 * time.Second,
+		DefaultTimeout: 20 * time.Second,
 		MaxTimeout:     time.Minute,
 		MaxOutputBytes: 1 << 20,
 		MaxConcurrent:  1,
 	}))
 
-	// Hold the only slot, then prove the next call is refused rather than
-	// queued forever behind an already-cancelled context.
+	// Hold the only slot. The caller here never cancels: the refusal has to
+	// come from the agent being full, not from the caller giving up, which is
+	// a different outcome and a different audit record.
 	release, err := h.svc.policy.Acquire(context.Background())
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	_, err = h.runCtx(ctx, t, helperReq("echo", "hi"))
+	refused := helperReq("echo", "hi")
+	refused.Timeout = durationpb.New(300 * time.Millisecond)
+	_, err = h.run(t, refused)
 	require.Error(t, err)
 	require.Equal(t, codes.ResourceExhausted, status.Code(err))
 
+	// And the slot is a slot: give it back and the next call runs.
 	release()
+	stream, err := h.run(t, helperReq("echo", "through"))
+	require.NoError(t, err)
+	require.Equal(t, "through", stream.output(sandboxdv1.Stream_STREAM_STDOUT))
+
+	records := h.records(t)
+	require.Len(t, records, 2)
+	require.Equal(t, policy.OutcomeError, records[0].Outcome)
+	require.Equal(t, policy.OutcomeOK, records[1].Outcome)
 }
 
 // A full agent refuses rather than queueing a caller indefinitely.
@@ -624,6 +693,36 @@ func TestExec_ConcurrencyWaitIsBoundedByTheCommandsOwnTimeout(t *testing.T) {
 	_, err = h.run(t, helperReq("echo", "hi"))
 	require.Error(t, err)
 	require.Equal(t, codes.ResourceExhausted, status.Code(err))
+}
+
+// A caller that gives up while queued is recorded as cancelled, not as the
+// agent running out of capacity.
+func TestExec_CancelledWhileQueuedIsNotACapacityFailure(t *testing.T) {
+	h := newHarness(t, withCaps(policy.Caps{
+		DefaultTimeout: 30 * time.Second,
+		MaxTimeout:     time.Minute,
+		MaxOutputBytes: 1 << 20,
+		MaxConcurrent:  1,
+	}))
+
+	release, err := h.svc.policy.Acquire(context.Background())
+	require.NoError(t, err)
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err = h.runCtx(ctx, t, helperReq("echo", "hi"))
+	require.Error(t, err)
+	require.Equal(t, codes.Canceled, status.Code(err))
+
+	records := h.records(t)
+	require.Len(t, records, 1)
+	require.Equal(t, policy.OutcomeCancelled, records[0].Outcome,
+		"the agent had capacity in reserve for this caller; it stopped waiting for it")
 }
 
 // --- policy ---------------------------------------------------------------
