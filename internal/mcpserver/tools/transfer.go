@@ -190,7 +190,7 @@ func (r *Registrar) sandboxTransfer(ctx context.Context, _ *mcp.CallToolRequest,
 		if err != nil {
 			return TransferResult{}, err
 		}
-		moved, err = r.runPush(ctx, files, target, plan, in.Force)
+		moved, err = r.runPush(ctx, files, target, plan, in.Destination, in.Force)
 	} else {
 		plan, err = r.planPull(ctx, files, target, in, matcher)
 		if err != nil {
@@ -421,12 +421,12 @@ func (r *Registrar) pushFileDestination(ctx context.Context, files sandboxdv1.Fi
 }
 
 // runPush sends the planned files.
-func (r *Registrar) runPush(ctx context.Context, files sandboxdv1.FileServiceClient, target *selection.Target, plan *transferPlan, force bool) (transferCounts, error) {
+func (r *Registrar) runPush(ctx context.Context, files sandboxdv1.FileServiceClient, target *selection.Target, plan *transferPlan, destination string, force bool) (transferCounts, error) {
 	var moved transferCounts
 
 	existing := map[string]*sandboxdv1.FileMetadata{}
 	if !force {
-		existing = r.remoteIndex(ctx, files, plan)
+		existing = r.remoteIndex(ctx, files, plan, destination)
 	}
 
 	for _, entry := range plan.entries {
@@ -466,7 +466,7 @@ func (r *Registrar) runPush(ctx context.Context, files sandboxdv1.FileServiceCli
 // push again over a tree of a few thousand files, and a round trip each is the
 // difference between a second and a minute. A listing that fails for any
 // reason yields an empty index, which costs a re-send and never a wrong one.
-func (r *Registrar) remoteIndex(ctx context.Context, files sandboxdv1.FileServiceClient, plan *transferPlan) map[string]*sandboxdv1.FileMetadata {
+func (r *Registrar) remoteIndex(ctx context.Context, files sandboxdv1.FileServiceClient, plan *transferPlan, destination string) map[string]*sandboxdv1.FileMetadata {
 	index := map[string]*sandboxdv1.FileMetadata{}
 	callCtx, cancel := context.WithTimeout(ctx, r.deps.callTimeout())
 	defer cancel()
@@ -483,14 +483,9 @@ func (r *Registrar) remoteIndex(ctx context.Context, files sandboxdv1.FileServic
 	}
 
 	// Every entry shares one destination root, so listing it once covers them
-	// all. Derived from an entry rather than from the argument so it is the
-	// same string the writes will use.
-	root := destinationRoot(plan)
-	if root == "" {
-		return index
-	}
+	// all.
 	resp, err := files.ListDirectory(callCtx, &sandboxdv1.ListDirectoryRequest{
-		Path: root, Recursive: true, Limit: MaxTransferFiles, IncludeHidden: true,
+		Path: destination, Recursive: true, Limit: MaxTransferFiles, IncludeHidden: true,
 	})
 	if err != nil {
 		return index
@@ -499,24 +494,6 @@ func (r *Registrar) remoteIndex(ctx context.Context, files sandboxdv1.FileServic
 		index[entry.GetPath()] = entry
 	}
 	return index
-}
-
-// destinationRoot recovers the destination directory the planned entries hang
-// off, by trimming an entry's own relative path from its destination.
-func destinationRoot(plan *transferPlan) string {
-	if len(plan.entries) == 0 {
-		return ""
-	}
-	first := plan.entries[0]
-	// The destination was composed as root + sep + rel, so trimming the rel
-	// back off — in whichever separator it was written with — recovers root.
-	for _, sep := range []string{"/", `\`} {
-		tail := sep + strings.ReplaceAll(first.rel, "/", sep)
-		if strings.HasSuffix(first.destination, tail) {
-			return strings.TrimSuffix(first.destination, tail)
-		}
-	}
-	return ""
 }
 
 // unchangedRemote reports whether the destination already holds this file.
@@ -670,7 +647,15 @@ func (r *Registrar) runPull(ctx context.Context, files sandboxdv1.FileServiceCli
 // removed on the way out, never a destination holding half a file that every
 // later reader will treat as whole.
 func (r *Registrar) pullFile(ctx context.Context, files sandboxdv1.FileServiceClient, entry transferEntry) (uint64, error) {
-	stream, err := files.ReadFile(ctx, &sandboxdv1.ReadFileRequest{Path: entry.source, Raw: true})
+	// MaxBytes is set explicitly, and it is not optional. ReadFile applies the
+	// agent's own default when a request names none, and that default is 8 MiB
+	// — sized for a caller reading a file into a result, not for one copying a
+	// file. Left unset, every pull of anything larger arrives silently
+	// truncated, is renamed into place, and is reported as a completed
+	// transfer. The cap on a transfer is the transfer's own.
+	stream, err := files.ReadFile(ctx, &sandboxdv1.ReadFileRequest{
+		Path: entry.source, Raw: true, MaxBytes: MaxTransferBytes,
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -689,7 +674,10 @@ func (r *Registrar) pullFile(ctx context.Context, files sandboxdv1.FileServiceCl
 		}
 	}()
 
-	var written uint64
+	var (
+		written uint64
+		result  *sandboxdv1.ReadResult
+	)
 	for {
 		msg, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {
@@ -698,15 +686,27 @@ func (r *Registrar) pullFile(ctx context.Context, files sandboxdv1.FileServiceCl
 		if recvErr != nil {
 			return 0, recvErr
 		}
-		chunk, ok := msg.GetEvent().(*sandboxdv1.ReadFileResponse_Chunk)
-		if !ok {
-			continue
+		switch event := msg.GetEvent().(type) {
+		case *sandboxdv1.ReadFileResponse_Chunk:
+			n, err := tmp.Write(event.Chunk)
+			if err != nil {
+				return 0, fmt.Errorf("writing %s: %w", tmpPath, err)
+			}
+			written += u64(n)
+		case *sandboxdv1.ReadFileResponse_Result:
+			result = event.Result
 		}
-		n, err := tmp.Write(chunk.Chunk)
-		if err != nil {
-			return 0, fmt.Errorf("writing %s: %w", tmpPath, err)
-		}
-		written += u64(n)
+	}
+
+	// A truncated read is a failed transfer, not a smaller file. Committing it
+	// would rename a partial copy into place under the real name, where every
+	// later reader — and every later unchanged check, which compares sizes —
+	// treats it as the whole thing. The temporary file is discarded by the
+	// deferred cleanup above, so the destination keeps whatever it had.
+	if result.GetTruncation().GetTruncated() {
+		return 0, fmt.Errorf(
+			"%s was truncated by the sandbox after %d of %d bytes, so it was not written; transfer it in pieces, or raise the agent's read cap",
+			entry.source, written, entry.size)
 	}
 
 	mode := fs.FileMode(entry.mode).Perm()

@@ -285,6 +285,45 @@ func TestWrite_LargeContentIsStreamedRatherThanSentWhole(t *testing.T) {
 	assert.Equal(t, size, bytes, "and every byte must arrive")
 }
 
+// TestWrite_LargeContentIsNotCopiedWhole.
+//
+// The structural test above proves the content leaves as many messages; this
+// proves the handler does not make a second copy of it on the way — an
+// io.ReadAll in writeStream would keep both the request's string and a
+// byte-for-byte duplicate of it live at once.
+//
+// It is the weakest of the three heap assertions, and the reason is the
+// protocol rather than the code: sandbox_write takes its content as a tool
+// *argument*, so a 64 MiB write is a 64 MiB JSON string that MCP has already
+// decoded whole before the handler is reached. No choice on this side changes
+// that. The baseline is therefore taken at the header message — the last
+// moment before any content moves — so what is measured is the copy the
+// handler could avoid rather than the one it cannot.
+func TestWrite_LargeContentIsNotCopiedWhole(t *testing.T) {
+	if testing.Short() {
+		t.Skip("moves 64 MiB")
+	}
+	f := newAgentFixture(t, backendOptions{})
+	path := f.path("large.bin")
+
+	// The sampler is started by the header message, not here; see samplingWrite.
+	sampler := &heapSampler{every: 16}
+	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
+
+	out := structured[writeResult](t, f.ok("sandbox_write", map[string]any{
+		"path": path, "content": strings.Repeat("abcdefgh", heapPayload/8),
+	}))
+
+	require.Equal(t, uint64(heapPayload), out.BytesWritten)
+	require.Greater(t, sampler.ticks, 512, "64 MiB has to leave as many messages, not one")
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, int64(heapPayload), info.Size())
+
+	assertHeapBounded(t, sampler, heapPayload, "sandbox_write")
+}
+
 // ------------------------------------------------------------------ edit
 
 // TestEdit_ReturnsAReadableDiff.

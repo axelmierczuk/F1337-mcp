@@ -495,6 +495,119 @@ func TestTransfer_BadDirectionIsRefusedWithTheTwoThatWork(t *testing.T) {
 	assert.Contains(t, text, "pull")
 }
 
+// --------------------------------------------------------------- memory
+
+// TestTransfer_APulledFileIsNeverHeldWhole.
+//
+// #25 asks that a large file transfer without this process's memory tracking
+// its size. The code streams, and it will keep looking like it streams after
+// someone puts an io.ReadAll in the middle of it, so the property is asserted
+// rather than described. The measurement is internal/agent/fs's: peak live
+// heap sampled while the content is still moving, because an implementation
+// that buffered the file and released it at the end shows nothing afterwards.
+func TestTransfer_APulledFileIsNeverHeldWhole(t *testing.T) {
+	if testing.Short() {
+		t.Skip("moves 64 MiB")
+	}
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{})
+
+	source := f.path("large.bin")
+	writeGeneratedFile(t, source, heapPayload)
+	destination := filepath.Join(local, "large.bin")
+
+	// A 64 MiB file arrives as a thousand 64 KiB chunks; sampling every
+	// sixteenth keeps sixty-odd collections rather than a thousand.
+	sampler := newHeapSampler(16)
+	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
+
+	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+		"direction": "pull", "source": source, "destination": destination,
+	}))
+
+	require.Equal(t, 1, out.Files)
+	require.Equal(t, uint64(heapPayload), out.Bytes)
+	require.Greater(t, sampler.ticks, 512, "a 64 MiB file has to arrive as many chunks, not one")
+
+	info, err := os.Stat(destination)
+	require.NoError(t, err)
+	require.Equal(t, int64(heapPayload), info.Size(), "and all of it has to land")
+
+	assertHeapBounded(t, sampler, heapPayload, "sandbox_transfer pull")
+}
+
+// TestTransfer_APushedFileIsNeverHeldWhole, the same property in the other
+// direction. The push path reads the local file in chunks and sends each one;
+// holding the file whole would be an io.ReadAll of the source.
+func TestTransfer_APushedFileIsNeverHeldWhole(t *testing.T) {
+	if testing.Short() {
+		t.Skip("moves 64 MiB")
+	}
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{})
+
+	source := filepath.Join(local, "large.bin")
+	writeGeneratedFile(t, source, heapPayload)
+	destination := f.path("large.bin")
+
+	sampler := newHeapSampler(16)
+	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
+
+	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+		"direction": "push", "source": source, "destination": destination,
+	}))
+
+	require.Equal(t, 1, out.Files)
+	require.Equal(t, uint64(heapPayload), out.Bytes)
+	require.Greater(t, sampler.ticks, 512, "a 64 MiB file has to be sent as many chunks, not one")
+
+	info, err := os.Stat(destination)
+	require.NoError(t, err)
+	require.Equal(t, int64(heapPayload), info.Size())
+
+	assertHeapBounded(t, sampler, heapPayload, "sandbox_transfer push")
+}
+
+// truncatingFiles serves a ReadFile stream that delivers one chunk and then
+// reports the read as truncated, which is what an agent does when it hits its
+// own read cap.
+type truncatingFiles struct {
+	sandboxdv1.FileServiceClient
+}
+
+func (t *truncatingFiles) ReadFile(context.Context, *sandboxdv1.ReadFileRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[sandboxdv1.ReadFileResponse], error) {
+	return &recvStream[sandboxdv1.ReadFileResponse]{messages: []*sandboxdv1.ReadFileResponse{
+		{Event: &sandboxdv1.ReadFileResponse_Chunk{Chunk: []byte("the first part only")}},
+		{Event: &sandboxdv1.ReadFileResponse_Result{Result: &sandboxdv1.ReadResult{
+			Truncation: &sandboxdv1.Truncation{Truncated: true, BytesOmitted: 4096},
+		}}},
+	}}, nil
+}
+
+// TestTransfer_ATruncatedReadIsNotCommitted.
+//
+// A truncated read is a failed transfer, not a smaller file. Renaming the
+// partial copy into place under the real name is worse than failing: every
+// later reader treats it as whole, and so does the unchanged check on the next
+// push, which compares sizes and would then never correct it.
+func TestTransfer_ATruncatedReadIsNotCommitted(t *testing.T) {
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{})
+
+	source := f.path("big.bin")
+	writeRemote(t, source, strings.Repeat("z", 8192))
+	destination := filepath.Join(local, "big.bin")
+
+	f.clients.filesOverride = &truncatingFiles{FileServiceClient: f.backend.files}
+
+	text := f.fails("sandbox_transfer", map[string]any{
+		"direction": "pull", "source": source, "destination": destination,
+	})
+
+	assert.Contains(t, text, "truncated")
+	assert.NoFileExists(t, destination, "a truncated read must not be renamed into place")
+}
+
 // --------------------------------------------------- interruption
 
 // stallingFiles serves a ReadFile stream that delivers part of a file and then

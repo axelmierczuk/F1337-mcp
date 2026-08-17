@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -230,19 +229,21 @@ func TestExec_StdinIsDelivered(t *testing.T) {
 // it is talking to must not be able to size this process's heap by streaming
 // at it.
 type floodExec struct {
-	total int
+	total   int
+	sampler *heapSampler
 }
 
 const floodChunk = 32 * 1024
 
 func (f floodExec) Exec(_ context.Context, _ *sandboxdv1.ExecRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[sandboxdv1.ExecResponse], error) {
-	return &floodStream{remaining: f.total}, nil
+	return &floodStream{remaining: f.total, sampler: f.sampler}, nil
 }
 
 type floodStream struct {
 	grpc.ClientStream
 	remaining int
 	done      bool
+	sampler   *heapSampler
 }
 
 func (s *floodStream) Recv() (*sandboxdv1.ExecResponse, error) {
@@ -254,6 +255,7 @@ func (s *floodStream) Recv() (*sandboxdv1.ExecResponse, error) {
 			chunk[i] = 'y'
 		}
 		chunk[n-1] = '\n'
+		s.sampler.tick()
 		return &sandboxdv1.ExecResponse{Event: &sandboxdv1.ExecResponse_Output{
 			Output: &sandboxdv1.OutputChunk{Stream: sandboxdv1.Stream_STREAM_STDOUT, Data: chunk},
 		}}, nil
@@ -269,38 +271,32 @@ func (s *floodStream) Recv() (*sandboxdv1.ExecResponse, error) {
 
 // TestExec_MegabytesOfOutputDoNotBlowUpTheServer asserts on the heap, not on
 // the rendered string: a tool that accumulated everything and then trimmed
-// would pass a length check and still be the bug.
+// would pass a length check and still be the bug. It is the peak *during* the
+// stream, because a tool that buffered and then trimmed would also show
+// nothing afterwards.
 func TestExec_MegabytesOfOutputDoNotBlowUpTheServer(t *testing.T) {
-	const streamed = 256 << 20 // 256 MiB
+	if testing.Short() {
+		t.Skip("streams 256 MiB")
+	}
+	const streamed = 256 << 20 // 256 MiB, four times heapPayload: chunks here
+	// are generated in memory rather than read from disk, so the bigger signal
+	// is nearly free.
 
 	f := newAgentFixture(t, backendOptions{})
 	// Swap the exec client for one that ignores the cap. The file service and
 	// everything else stays real.
-	f.clients.execOverride = floodExec{total: streamed}
+	sampler := newHeapSampler(128)
+	f.clients.execOverride = floodExec{total: streamed, sampler: sampler}
 
-	before := heapInUse()
 	out := structured[execResult](t, f.ok("sandbox_exec", map[string]any{
 		"argv": []any{"whatever"}, "max_output_bytes": 64 * 1024,
 	}))
-	after := heapInUse()
 
 	assert.Equal(t, int32(0), out.ExitCode, "the call must complete rather than fail on size")
 	require.NotNil(t, out.Truncation)
 	assert.Greater(t, out.Truncation.BytesOmitted, uint64(200<<20), "and must report roughly what it dropped")
 	assert.LessOrEqual(t, len(out.Stdout), 64*1024+floodChunk)
+	require.Greater(t, sampler.ticks, 512, "the flood has to arrive as many chunks, not one")
 
-	// A tool that buffered the stream would be holding a quarter of a gigabyte
-	// here. The bound is loose on purpose and signed on purpose: it is testing
-	// an order of magnitude, not an allocator, and a run that ends with *less*
-	// live heap than it started with is a pass, not an underflow.
-	growth := after - before
-	assert.Lessf(t, growth, int64(32<<20),
-		"heap grew by %d bytes while %d were streamed: the output is being buffered", growth, streamed)
-}
-
-func heapInUse() int64 {
-	runtime.GC()
-	var stats runtime.MemStats
-	runtime.ReadMemStats(&stats)
-	return int64(stats.HeapInuse)
+	assertHeapBounded(t, sampler, streamed, "sandbox_exec output accumulation")
 }
