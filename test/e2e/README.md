@@ -64,7 +64,6 @@ Everything except one scenario.
 | `TestEnrollmentRefusesWhatTheTokenDoesNotAuthorize` | A host cannot enroll as a name or an address its token does not authorize, and a spent token cannot be replayed. |
 | `TestEnrollmentRequiresThePinnedFingerprint` | Enrollment refuses to proceed unpinned, and a wrong pin fails the handshake before the token is sent. |
 | `TestARefusedEnrollmentSpendsItsToken` | Records a defect, not a requirement. See the comment on the test. |
-| `TestNoShippedCommandIssuesTheControlLeaf` | Records a defect, not a requirement: no command produces the control certificate `fleet-mcp` presents, so a server built by the documented flow reaches no agent. Pins the workaround this suite uses. See the comment on the test. |
 | `TestConcurrentCallsKeepTheirTargets` | Two dozen calls in flight across both sandboxes each run where they were aimed. |
 | `TestListReportsAnUnreachableSandboxWithoutWaitingForIt` | A dead sandbox is reported dead in the same listing that still reports its neighbour live. |
 | `TestFileSearchToolsWalkTheSandbox` | `fleet_ls`, `fleet_glob` and `fleet_grep` — the last of which is a server stream — over a real tree. |
@@ -117,7 +116,3 @@ body runs the pattern has already decided which bodies there are.
   forked it. A hostname would prove nothing when both daemons share one.
 - **Real network conditions.** Everything is loopback: no latency, no packet
   loss, no severed connection mid-stream.
-- **The MCP server's own credentials, end to end.** `fleetctl ca sign --profile
-  control` signs the control leaf, but nothing in the product produces the CSR
-  it signs, so the harness builds that one artifact itself. See the PR body
-  for #28.
