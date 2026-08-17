@@ -145,12 +145,20 @@ func TestServer_ShutdownClosesTheAuditLog(t *testing.T) {
 	assert.Contains(t, string(data), "sandboxd.v1.ExecService/Exec")
 }
 
-// Stop is the impatient path, and it still releases the audit log's handle.
+// Stop is the impatient path, and it releases the audit log's handle before it
+// returns.
 //
 // It skips the shutdown participants on purpose, but the log is an OS handle
 // rather than a participant's state: left open it makes the file undeletable on
 // Windows for the life of the process, including by the caller that gave up on
 // the server.
+//
+// "Before it returns" is the load-bearing half. Stop also makes Serve return,
+// and Serve's own shutdown closes the log — but on another goroutine, so a
+// caller that stops the server and then removes its log file would be racing
+// that goroutine. On Windows it would lose that race about as often as it won
+// it, which is a flake in someone else's test suite rather than a bug anyone
+// goes looking for.
 func TestServer_StopReleasesTheAuditLog(t *testing.T) {
 	fleet := newTestFleet(t)
 	dir := t.TempDir()
@@ -165,11 +173,12 @@ func TestServer_StopReleasesTheAuditLog(t *testing.T) {
 
 	// Removing the file is the portable spelling of "nothing holds it open":
 	// on Windows an open handle is what makes this fail, and on Unix it
-	// succeeds either way, so the assertion has teeth exactly where the
-	// failure lives. Recreated afterwards so the harness's own shutdown, which
-	// runs later, still has a log to close.
+	// succeeds either way, so the assertion bites exactly where the failure
+	// lives. Nothing reopens it afterwards — that a write would is
+	// TestServer_ShutdownClosesTheAuditLog's assertion, and making it here as
+	// well would leave this test holding the handle its own subject exists to
+	// release.
 	require.NoError(t, os.Remove(cfg.Audit.Path))
-	require.NoError(t, h.server.Deps().Audit.Write(policyRecord()), "a later write reopens it")
 }
 
 // A config assembled in memory gets the same caps as one read from disk.
