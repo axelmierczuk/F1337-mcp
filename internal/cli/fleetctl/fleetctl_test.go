@@ -2,12 +2,14 @@ package fleetctl_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -306,6 +308,90 @@ func TestEnrollMint_RefusesAnEndpointTheInstallerWouldReadAsAFlag(t *testing.T) 
 	}
 }
 
+// --name and --address are the two inputs that reach the certificate rather
+// than the installer, and nothing checked either. Both become subject
+// alternative names, and the CA refuses names it will not sign — in Enroll,
+// which redeems the token before it signs anything, so the operator pays a
+// single-use secret and reads the refusal on a host they have walked away from.
+// Verified against the enrollment service: a token reserving "build box" comes
+// back marked used with an InvalidArgument beside it.
+//
+// A port is the milder version and fails more quietly still: one
+// net.SplitHostPort accepts and strconv does not sends the generated --listen
+// back to the installer's 8722 without a word, standing the agent up on a port
+// the control plane will never dial.
+func TestEnrollMint_RefusesATokenThatCouldNotBeRedeemed(t *testing.T) {
+	for label, args := range map[string][]string{
+		"name with a space":               {"--name", "build box"},
+		"name ending a label with a dash": {"--name", "build-box-"},
+		"wildcard name":                   {"--name", "*box"},
+		"address named port":              {"--name", "build-box", "--address", "build-box.internal:https"},
+		"address port too large":          {"--name", "build-box", "--address", "build-box.internal:99999"},
+		"address leading dash":            {"--name", "build-box", "--address", "-oProxyCommand=x:9000"},
+		"address wildcard":                {"--name", "build-box", "--address", "*.internal:9000"},
+		"address unsignable":              {"--name", "build-box", "--address", "x-.internal:9000"},
+	} {
+		t.Run(label, func(t *testing.T) {
+			dir := t.TempDir()
+			_, code := run(t, dir, "ca", "init")
+			require.Equal(t, 0, code)
+
+			out, code := runCapturingErrors(t, dir, append([]string{"enroll", "mint"}, args...)...)
+			require.NotEqual(t, 0, code, "mint accepted %v:\n%s", args, out)
+
+			listed, code := run(t, dir, "enroll", "list")
+			require.Equal(t, 0, code, listed)
+			assert.Contains(t, listed, "no enrollment tokens",
+				"a refused mint spent a token anyway, which is the whole cost this check avoids:\n%s", listed)
+		})
+	}
+}
+
+// And more subject alternative names than the CA will put on one leaf, which
+// fails the same way and is the one shape no single value is wrong in.
+func TestEnrollMint_RefusesMoreAddressesThanALeafCanCarry(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+
+	args := []string{"enroll", "mint", "--name", "build-box"}
+	for i := range ca.MaxSANs + 1 {
+		args = append(args, "--address", fmt.Sprintf("host-%d.internal:9000", i))
+	}
+	out, code := runCapturingErrors(t, dir, args...)
+	require.NotEqual(t, 0, code, "mint accepted more names than a leaf can carry:\n%s", out)
+
+	listed, code := run(t, dir, "enroll", "list")
+	require.Equal(t, 0, code, listed)
+	assert.Contains(t, listed, "no enrollment tokens")
+}
+
+// The shapes that are not malformed keep working. A bare host authorizes a name
+// without claiming a port; a wildcard bind authorizes no name at all, which
+// enrollment drops rather than refusing, so mint must not refuse it either.
+func TestEnrollMint_AcceptsWhatEnrollmentWouldHonour(t *testing.T) {
+	for label, args := range map[string][]string{
+		"underscore in a name": {"--name", "build_box"},
+		"dotted name":          {"--name", "gpu-01.internal"},
+		"bare host":            {"--name", "build-box", "--address", "build-box.internal"},
+		"host and port":        {"--name", "build-box", "--address", "build-box.internal:9000"},
+		"ipv4":                 {"--name", "build-box", "--address", "10.0.0.5:9000"},
+		"ipv6":                 {"--name", "build-box", "--address", "[::1]:9000"},
+		"wildcard bind":        {"--name", "build-box", "--address", "0.0.0.0:9000"},
+		"port only":            {"--name", "build-box", "--address", ":9000"},
+	} {
+		t.Run(label, func(t *testing.T) {
+			dir := t.TempDir()
+			_, code := run(t, dir, "ca", "init")
+			require.Equal(t, 0, code)
+
+			full := append([]string{"enroll", "mint", "--control", "workstation.internal:9443"}, args...)
+			out, code := runCapturingErrors(t, dir, full...)
+			require.Equal(t, 0, code, "mint refused %v:\n%s", args, out)
+		})
+	}
+}
+
 // A token minted without a CA would be unusable: `fleet-agent enroll` refuses
 // to run without the fingerprint, so the operator would have burnt a mint and
 // have to do it again.
@@ -465,6 +551,77 @@ func TestCARotate_OnlyARetirementReportsARetirement(t *testing.T) {
 	again, code := run(t, dir, "ca", "rotate", "--retire", "--json")
 	require.Equal(t, 0, code, again)
 	assert.Equal(t, 0, retiredIn(again), "a retirement with nothing to drop retires nothing")
+}
+
+// Activate writes the incoming key and then the widened bundle, and a crash
+// between them leaves the pair Load refuses. ca.Activate was taught to read the
+// trust bundle directly so that re-running it finishes the job — but the
+// command an operator actually types loaded the CA before dispatching to any
+// step, so the repair stayed behind the damage and the CA directory still had
+// no way back short of editing it by hand. A library that can recover and a CLI
+// that cannot reach the recovery is the same outage.
+func TestCARotate_ActivateFinishesAnInterruptedActivation(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+	original := fingerprintOf(t, dir)
+
+	staged, code := run(t, dir, "ca", "rotate")
+	require.Equal(t, 0, code, staged)
+
+	// The crash.
+	caDir := filepath.Join(dir, "ca")
+	nextKey, err := os.ReadFile(filepath.Join(caDir, "ca-next.key"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(caDir, "ca.key"), nextKey, 0o600))
+	_, err = ca.Load(caDir)
+	require.Error(t, err, "the fixture is only meaningful if this state is one Load rejects")
+
+	out, code := runCapturingErrors(t, dir, "ca", "rotate", "--activate")
+	require.Equal(t, 0, code, "the one command that can finish the activation could not run:\n%s", out)
+
+	// And the directory is whole again for the commands that go through Load —
+	// which, in this CLI, is all the ones that matter.
+	rotated := fingerprintOf(t, dir)
+	assert.NotEqual(t, original, rotated)
+	fingerprint, code := run(t, dir, "ca", "fingerprint")
+	require.Equal(t, 0, code, fingerprint)
+	assert.Contains(t, fingerprint, rotated)
+}
+
+// The other half of that: the commands that cannot repair the state must still
+// say what does. Every one of them reaches the operator through Load.
+func TestCommands_NameTheRepairAfterAnInterruptedActivation(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+	_, code = run(t, dir, "ca", "rotate")
+	require.Equal(t, 0, code)
+
+	caDir := filepath.Join(dir, "ca")
+	nextKey, err := os.ReadFile(filepath.Join(caDir, "ca-next.key"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(caDir, "ca.key"), nextKey, 0o600))
+
+	for _, args := range [][]string{
+		{"ca", "fingerprint"},
+		{"enroll", "mint", "--name", "build-box"},
+		{"ca", "rotate", "--retire"},
+	} {
+		out, code := runCapturingErrors(t, dir, args...)
+		require.NotEqual(t, 0, code, "%v should not have run against a half-activated CA:\n%s", args, out)
+		assert.Contains(t, out, "ca rotate --activate", "%v left the operator with no way forward", args)
+	}
+}
+
+// A --activate against a directory that holds no CA at all is still answered
+// with the command that makes one, not with a rotation error. Reading the state
+// without loading the CA is what makes the repair reachable; it must not cost
+// the message every other command gives.
+func TestCARotate_ActivateBeforeCAInitNamesTheCommandToRun(t *testing.T) {
+	out, code := runCapturingErrors(t, t.TempDir(), "ca", "rotate", "--activate")
+	assert.NotEqual(t, 0, code)
+	assert.Contains(t, out, "fleetctl ca init")
 }
 
 func TestCARotate_BeforeCAInitNamesTheCommandToRun(t *testing.T) {
@@ -665,6 +822,68 @@ func TestServe_ReleasesTheListenerWhenItCannotPrintItsBanner(t *testing.T) {
 	again, err := net.Listen("tcp", address)
 	require.NoError(t, err, "serve returned still holding %s", address)
 	require.NoError(t, again.Close())
+}
+
+// serve starts a watcher that stops the server when the context is cancelled,
+// then starts the server. A cancellation landing between the two — a Ctrl-C in
+// serve's first instant, or a shell driving it through MainContext and changing
+// its mind — reaches GracefulStop before Serve reaches its accept loop, and
+// Serve then returns ErrServerStopped. That is the command being asked to stop,
+// not a failure to serve, and reporting it as one made the exit code depend on
+// which side of a mutex won.
+//
+// The window is small, so the loop is what makes losing it likely rather than
+// possible: with the check removed this fails within a few hundred iterations,
+// and with it in place every iteration exits 0 however the race lands.
+func TestServe_ExitsCleanlyWhenStoppedBeforeItStartsServing(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+	t.Setenv("FLEET_CONFIG_DIR", dir)
+
+	for i := range 500 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var out bytes.Buffer
+		code := fleetctl.MainContext(ctx, []string{
+			"serve", "--listen", "127.0.0.1:0", "--advertise", "127.0.0.1",
+		}, &out)
+		require.Equal(t, 0, code, "iteration %d: a serve that was told to stop reported a failure:\n%s", i, out.String())
+	}
+}
+
+// Re-issuing writes the leaf beside the key, and the two are read as a pair.
+// os.WriteFile truncates before it writes and applies its mode only on create,
+// so the certificate half was neither atomic nor written at the mode this
+// command promises — while the key half beside it was both.
+func TestCASign_ReplacesAControlCertificateWholeAndAtItsOwnMode(t *testing.T) {
+	dir := t.TempDir()
+	_, code := run(t, dir, "ca", "init")
+	require.Equal(t, 0, code)
+	_, code = run(t, dir, "ca", "sign", "--profile", "control")
+	require.Equal(t, 0, code)
+
+	certPath := filepath.Join(dir, "control.crt")
+	require.NoError(t, os.Chmod(certPath, 0o600))
+
+	out, code := run(t, dir, "ca", "sign", "--profile", "control")
+	require.Equal(t, 0, code, out)
+
+	// A complete certificate, and one that still pairs with the key written
+	// beside it in the same command.
+	certPEM, err := os.ReadFile(certPath)
+	require.NoError(t, err)
+	keyPEM, err := os.ReadFile(filepath.Join(dir, "control.key"))
+	require.NoError(t, err)
+	_, err = tls.X509KeyPair(certPEM, keyPEM)
+	require.NoError(t, err)
+
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(certPath)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o644), info.Mode().Perm(),
+			"re-issuing kept the mode it found rather than the one it writes")
+	}
 }
 
 func TestUnknownCommand_ExitsNonZero(t *testing.T) {

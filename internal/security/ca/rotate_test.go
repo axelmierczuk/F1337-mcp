@@ -230,10 +230,7 @@ func TestActivate_FinishesAnActivationInterruptedBetweenItsTwoWrites(t *testing.
 	require.NoError(t, err)
 
 	// The crash.
-	nextKey := mustReadFile(t, filepath.Join(dir, "ca-next.key"))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca.key"), nextKey, 0o600))
-	_, err = ca.Load(dir)
-	require.Error(t, err, "the fixture is only meaningful if this state is one Load rejects")
+	interruptActivation(t, dir)
 
 	// The repair.
 	activated, err := ca.Activate(dir)
@@ -253,6 +250,110 @@ func TestActivate_FinishesAnActivationInterruptedBetweenItsTwoWrites(t *testing.
 		_, statErr := os.Stat(filepath.Join(dir, name))
 		assert.True(t, os.IsNotExist(statErr), "%s should be gone once the activation completes", name)
 	}
+}
+
+// interruptActivation puts dir into the state a crash between Activate's two
+// writes leaves: the incoming key has landed on ca.key, the widened bundle has
+// not, and the staged files are still there because Activate discards them only
+// once both writes are done.
+func interruptActivation(t *testing.T, dir string) {
+	t.Helper()
+	nextKey := mustReadFile(t, filepath.Join(dir, "ca-next.key"))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca.key"), nextKey, 0o600))
+	_, err := ca.Load(dir)
+	require.Error(t, err, "the fixture is only meaningful if this state is one Load rejects")
+}
+
+// Every command goes through Load, so Load's message is the only thing an
+// operator sees when an activation was interrupted. Saying only that the
+// directory holds two different CAs reads like the end of the fleet; it is in
+// fact one command from whole, and that command has to be named.
+func TestLoad_NamesTheRepairForAnInterruptedActivation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	_, err := ca.Init(dir, false)
+	require.NoError(t, err)
+	_, err = ca.Stage(dir)
+	require.NoError(t, err)
+	interruptActivation(t, dir)
+
+	_, err = ca.Load(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ca rotate --activate",
+		"an interrupted activation is recoverable and Load is the only place the operator is told anything")
+}
+
+// And the other direction: a certificate and a key from genuinely different CAs
+// is a half-restored backup, which `ca rotate --activate` does not fix. Naming
+// it there would send an operator to run a rotation step against a CA that has
+// no rotation staged.
+func TestLoad_DoesNotOfferTheRepairForAnUnrelatedMismatch(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	_, err := ca.Init(dir, false)
+	require.NoError(t, err)
+
+	other := filepath.Join(t.TempDir(), "other")
+	_, err = ca.Init(other, false)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca.key"), mustReadFile(t, filepath.Join(other, "ca.key")), 0o600))
+
+	_, err = ca.Load(dir)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "ca rotate --activate")
+}
+
+// Status describes where in a rotation a directory is, and the state an
+// operator most needs described is the one Load refuses. Reading it through
+// Load meant Status could not answer for an interrupted activation, and the
+// rotate command — which asks Status before every step — could not either.
+func TestStatus_DescribesADirectoryWithAnInterruptedActivation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	first, err := ca.Init(dir, false)
+	require.NoError(t, err)
+	staged, err := ca.Stage(dir)
+	require.NoError(t, err)
+	interruptActivation(t, dir)
+
+	state, err := ca.Status(dir)
+	require.NoError(t, err, "Status must describe the state an interrupted activation leaves")
+	assert.True(t, state.Staging())
+	assert.Equal(t, first.Certificate().Raw, state.Issuer.Raw, "the bundle still says the outgoing CA is issuing")
+	assert.Equal(t, staged.Staged.Raw, state.Staged.Raw)
+}
+
+// Re-running Activate to finish an interrupted one sees the already-promoted
+// root as both the issuer and the staged CA. The roots it reports have to
+// describe the bundle it wrote, or `ca rotate --activate` tells the operator
+// that the CA now doing the signing is a superseded root kept only so old
+// certificates keep working.
+func TestActivate_DoesNotReportTheIssuerAmongTheSupersededRoots(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	_, err := ca.Init(dir, false)
+	require.NoError(t, err)
+	_, err = ca.Stage(dir)
+	require.NoError(t, err)
+
+	// The crash on the other side of the bundle write: both files landed, the
+	// staged pair had not yet been discarded.
+	stagedCert := mustReadFile(t, filepath.Join(dir, "ca-next.crt"))
+	stagedKey := mustReadFile(t, filepath.Join(dir, "ca-next.key"))
+	first, err := ca.Activate(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca-next.crt"), stagedCert, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca-next.key"), stagedKey, 0o600))
+
+	again, err := ca.Activate(dir)
+	require.NoError(t, err, "re-running activate must be idempotent")
+	assert.Equal(t, first.Issuer.Raw, again.Issuer.Raw)
+	for _, root := range again.Superseded {
+		assert.NotEqual(t, again.Issuer.Raw, root.Raw,
+			"the CA that is issuing was reported as a root kept only for old certificates")
+	}
+	assert.Len(t, again.Superseded, 1, "one outgoing root, reported once")
+
+	// And what it says matches what it wrote.
+	onDisk, err := ca.Load(dir)
+	require.NoError(t, err)
+	assert.Len(t, onDisk.TrustedRoots(), 2)
 }
 
 func TestStage_RefusesASecondStage(t *testing.T) {

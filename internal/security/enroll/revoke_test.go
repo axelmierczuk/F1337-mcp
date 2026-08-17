@@ -2,7 +2,9 @@ package enroll_test
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -69,7 +71,7 @@ func TestRevoke_IsVisibleToAStoreOpenedAfterwards(t *testing.T) {
 
 // A prefix is enough, because that is how an operator will use it — but only
 // one that identifies a single token.
-func TestRevoke_AcceptsAPrefixAndRejectsAnAmbiguousOne(t *testing.T) {
+func TestRevoke_AcceptsAPrefix(t *testing.T) {
 	store, err := enroll.OpenTokenStore(filepath.Join(t.TempDir(), "tokens.yaml"))
 	require.NoError(t, err)
 	_, rec, err := store.Mint(enroll.MintOptions{Name: "build-box"})
@@ -83,6 +85,45 @@ func TestRevoke_AcceptsAPrefixAndRejectsAnAmbiguousOne(t *testing.T) {
 
 	_, err = store.Revoke(rec.ID[:6])
 	require.NoError(t, err)
+}
+
+// A prefix that names two tokens must revoke neither. Revoking the wrong token
+// is silent — the operator sees a success and the token they meant to withdraw
+// stays redeemable — so the ambiguity has to be an error rather than a choice.
+//
+// The store is written directly because ids come from SHA-256 digests and Mint
+// cannot be asked for a collision. Revoke matches on the stored hash, so what
+// makes two entries ambiguous is a shared prefix, not a shared preimage.
+func TestRevoke_RefusesAnAmbiguousPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.yaml")
+	now := time.Now().UTC()
+	issued := now.Add(-time.Minute).Format(time.RFC3339Nano)
+	expires := now.Add(time.Hour).Format(time.RFC3339Nano)
+	require.NoError(t, os.WriteFile(path, []byte(
+		"version: 1\ntokens:\n"+
+			tokenYAML(strings.Repeat("a", 60)+"1111", "build-box", issued, expires, false)+
+			tokenYAML(strings.Repeat("a", 60)+"2222", "gpu-01", issued, expires, false),
+	), 0o600))
+
+	store, err := enroll.OpenTokenStore(path)
+	require.NoError(t, err)
+
+	_, err = store.Revoke(strings.Repeat("a", 8))
+	require.ErrorIs(t, err, enroll.ErrTokenIDAmbiguous)
+
+	// Neither was touched: an ambiguous revocation that quietly withdrew one of
+	// them would be worse than one that did nothing.
+	records, err := store.List()
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	for _, rec := range records {
+		assert.Equal(t, enroll.StatePending, rec.State(time.Now().UTC()), "token %s was revoked by an ambiguous id", rec.ID)
+	}
+
+	// And enough of the id resolves it.
+	revoked, err := store.Revoke(strings.Repeat("a", 60) + "1")
+	require.NoError(t, err)
+	assert.Equal(t, "build-box", revoked.Name)
 }
 
 func TestRevoke_RejectsAnUnknownID(t *testing.T) {

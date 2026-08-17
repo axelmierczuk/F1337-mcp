@@ -176,6 +176,25 @@ If in doubt, do not retire. A bundle holding one extra root is a small cost; a
 fleet that cannot authenticate itself is an afternoon with a console on every
 machine.
 
+### If a step is interrupted
+
+Each step writes more than one file, so a crash or a `^C` in the middle leaves a
+CA directory part-way through. Every case is recoverable, and none of them needs
+you to edit the directory by hand:
+
+- **Interrupted stage** — `ca-next.crt` exists but is not yet in `ca.crt`.
+  Nothing trusts the staged root, so nothing has changed for the fleet. Delete
+  `ca-next.crt` and `ca-next.key` and run `fleetctl ca rotate` again; the
+  commands that notice say exactly this.
+- **Interrupted activation** — the incoming key has replaced `ca.key` but the
+  bundle still names the outgoing CA as the issuer. Commands that need to sign
+  refuse to run at all, and say so: a certificate and a key from different CAs
+  is the shape of a half-restored backup, and this tool will not guess. Run
+  `fleetctl ca rotate --activate` again. It reads the trust bundle rather than
+  the mismatched pair, finishes the two writes, and the directory is whole.
+- **Interrupted retirement** — `ca.crt` is written atomically, so it holds
+  either the old bundle or the narrowed one. Re-run the step.
+
 ### What rotation does not fix
 
 Rotation replaces the CA. It does not revoke anything. A leaf issued by the old

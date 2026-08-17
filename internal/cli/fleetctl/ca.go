@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -285,8 +284,8 @@ func newCASignCommand(out io.Writer) *cobra.Command {
 				}
 				result.Key = keyPath
 			}
-			if err := os.WriteFile(certPath, certPEM, 0o644); err != nil { //nolint:gosec // a certificate is public by design
-				return fmt.Errorf("write %s: %w", certPath, err)
+			if err := writeCertificate(certPath, certPEM); err != nil {
+				return err
 			}
 			result.Certificate = certPath
 
@@ -443,17 +442,32 @@ func newCARotateCommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Load first, so a directory with no CA at all is reported as such
-			// rather than as a rotation problem.
-			if _, err := loadCA(caDir); err != nil {
-				return err
-			}
 			// Read the state before the step as well as after: `--retire` on a
 			// CA that trusts one root already is a no-op, and afterwards it is
 			// indistinguishable from a retirement that removed something.
+			//
+			// Status reads the trust bundle, so this also reports a directory
+			// with no CA at all as such rather than as a rotation problem.
 			before, err := ca.Status(caDir)
 			if err != nil {
-				return err
+				return actionable(caDir, err)
+			}
+			// Stage and Retire load the CA themselves and cannot do their work
+			// without a signing key that matches the bundle, so a directory
+			// that does not load is reported here in the operator's terms.
+			//
+			// An activation with something staged to activate is the one
+			// exception, and deliberately: it is what finishes an activation
+			// interrupted between its two writes, and that state is precisely
+			// the certificate-and-key mismatch Load refuses. Loading here put
+			// the repair behind the damage — ca.Activate was taught to read the
+			// bundle directly for exactly this reason, and this guard meant no
+			// operator could reach it. An --activate with nothing staged has
+			// nothing to repair, so it is described like any other command.
+			if !activate || !before.Staging() {
+				if _, err := loadCA(caDir); err != nil {
+					return err
+				}
 			}
 
 			step, state, err := runRotationStep(caDir, activate, retire)
@@ -570,6 +584,22 @@ func caDirFile(caDir string) string { return filepath.Join(caDir, "ca.crt") }
 // through any path an attacker could have pre-created.
 func writeSecret(path string, data []byte) error {
 	if err := fsutil.WriteAtomic(path, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeCertificate writes an issued leaf at 0644, replacing whatever was there.
+//
+// Through the same primitive as the key beside it, and for the second half of
+// the same reason. `ca sign --profile control` replaces control.crt and
+// control.key together, and fleet-mcp and `fleetctl list` read them together as
+// a pair: os.WriteFile truncates the certificate before it writes, so a control
+// plane starting inside that window read an empty control.crt and refused to
+// run. It also applies its mode only on create, so the leaf inherited whatever
+// mode the file it replaced happened to have.
+func writeCertificate(path string, data []byte) error {
+	if err := fsutil.WriteAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil

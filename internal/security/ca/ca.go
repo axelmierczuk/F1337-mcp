@@ -212,8 +212,7 @@ func Load(dir string) (*CA, error) {
 	// act on it.
 	certPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
 	if !ok || !key.PublicKey.Equal(certPub) {
-		return nil, fmt.Errorf("ca: %s does not match the key in %s; this CA directory holds a certificate and a key from different CAs",
-			filepath.Join(dir, certFileName), filepath.Join(dir, keyFileName))
+		return nil, mismatchedPairError(dir, keyPEM)
 	}
 
 	return &CA{dir: dir, cert: cert, certPEM: certPEM, key: key, trusted: trusted}, nil

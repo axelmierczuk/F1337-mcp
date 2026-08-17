@@ -72,12 +72,20 @@ func (r Rotation) Staging() bool { return r.Staged != nil }
 func (r Rotation) Overlapping() bool { return r.Staged != nil || len(r.Superseded) > 0 }
 
 // Status reports the rotation state of the CA in dir.
+//
+// It reads the trust bundle rather than loading the CA, and so answers for a
+// directory whose signing key does not match its certificate. That is not an
+// exotic case: it is what an activation interrupted between its two writes
+// leaves behind, and it is the one state in which an operator most needs to be
+// told where in a rotation they are. Insisting on Load here put the description
+// of the damage behind the damage, and with it [Activate], the repair — see the
+// comment there.
 func Status(dir string) (Rotation, error) {
-	authority, err := Load(dir)
+	trusted, err := readBundle(dir)
 	if err != nil {
 		return Rotation{}, err
 	}
-	return authority.rotation()
+	return classify(dir, trusted)
 }
 
 // rotation classifies this CA's trust bundle.
@@ -202,7 +210,15 @@ func Activate(dir string) (Rotation, error) {
 	// The bundle is rebuilt from scratch rather than reordered in place, so an
 	// interrupted Stage that never reached the bundle still activates onto a
 	// bundle that holds the root now doing the issuing.
-	roots := append([]*x509.Certificate{state.Staged, state.Issuer}, state.Superseded...)
+	//
+	// Deduplicated here rather than only on the way to disk, because the state
+	// this function returns has to describe the bundle it wrote. Re-running
+	// Activate to finish one interrupted between its two writes classifies the
+	// already-promoted root as both the issuer and the staged CA, and the
+	// undeduplicated list then reported the CA that is doing the signing to the
+	// operator as a superseded root — the exact opposite of what "also trusted,
+	// so certificates already issued under them keep working" means.
+	roots := dedupeCerts(append([]*x509.Certificate{state.Staged, state.Issuer}, state.Superseded...))
 
 	// Key first, and the staged files are removed only once both writes are
 	// done, so re-running Activate finishes an activation that was interrupted
@@ -247,13 +263,18 @@ func Retire(dir string) (Rotation, error) {
 
 // writeBundle replaces ca.crt with roots, de-duplicated, issuer first.
 func writeBundle(dir string, roots []*x509.Certificate) error {
+	return writeFileAtomic(filepath.Join(dir, certFileName), encodeBundle(dedupeCerts(roots)), 0o644)
+}
+
+// dedupeCerts drops nils and repeats, keeping first-occurrence order.
+func dedupeCerts(roots []*x509.Certificate) []*x509.Certificate {
 	var unique []*x509.Certificate
 	for _, root := range roots {
 		if root != nil && !containsCert(unique, root) {
 			unique = append(unique, root)
 		}
 	}
-	return writeFileAtomic(filepath.Join(dir, certFileName), encodeBundle(unique), 0o644)
+	return unique
 }
 
 // readStagedCert returns the staged CA certificate, or nil when none is staged.
@@ -284,6 +305,27 @@ func discardStaged(dir string) error {
 		}
 	}
 	return nil
+}
+
+// mismatchedPairError explains a ca.crt that does not match the ca.key beside
+// it, naming the repair when the rotation machinery is what produced the pair.
+//
+// Usually there is nothing to name: a certificate and a key from different CAs
+// is a half-restored backup, and no command in this tree puts it right. But
+// [Activate] writes the incoming key and then the widened bundle, so a crash
+// between those two leaves exactly this pair — a state re-running Activate
+// finishes. Every command goes through [Load] to reach here, so without this an
+// operator whose CA is one command from whole is told only that it holds two
+// different CAs, which reads like the end of the fleet rather than the middle
+// of a rotation.
+func mismatchedPairError(dir string, keyPEM []byte) error {
+	base := fmt.Errorf("ca: %s does not match the key in %s; this CA directory holds a certificate and a key from different CAs",
+		filepath.Join(dir, certFileName), filepath.Join(dir, keyFileName))
+	staged, err := readStagedCert(dir)
+	if err != nil || staged == nil || checkKeyMatches(keyPEM, staged) != nil {
+		return base
+	}
+	return fmt.Errorf("%w; a CA rotation was interrupted after its new key was written — finish it with `ca rotate --activate`", base)
 }
 
 // checkKeyMatches verifies that a PEM private key belongs to cert, for the same

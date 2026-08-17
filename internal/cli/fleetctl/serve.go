@@ -143,7 +143,16 @@ func newServeCommand(out io.Writer) *cobra.Command {
 				<-stopped
 			}()
 
-			if err := server.Serve(lis); err != nil {
+			// ErrServerStopped means the watcher above stopped this server
+			// before Serve reached its accept loop — a Ctrl-C, or a caller
+			// cancelling the context, landing in the window between starting
+			// the watcher and starting the server. Nothing else holds this
+			// server, so it can only mean the command was asked to stop, and a
+			// command that stopped when it was told to has not failed. Without
+			// this, stopping serve in its first instant exited non-zero with
+			// "the server has been stopped" while stopping it an instant later
+			// exited 0.
+			if err := server.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 				return fmt.Errorf("serve: %w", err)
 			}
 			return nil

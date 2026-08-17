@@ -156,10 +156,24 @@ func openRegistry(path string) (*registry.Registry, error) {
 // operator neither what is missing nor what to do about it.
 func loadCA(dir string) (*ca.CA, error) {
 	authority, err := ca.Load(dir)
-	if errors.Is(err, ca.ErrNotInitialized) {
-		return nil, fmt.Errorf("no fleet CA in %s: run `fleetctl ca init` to create one", dir)
+	if err != nil {
+		return nil, actionable(dir, err)
 	}
-	return authority, err
+	return authority, nil
+}
+
+// actionable turns "there is no CA here" into the command that makes one, and
+// passes everything else through untouched.
+//
+// It is separate from [loadCA] because not every command that has to answer for
+// an empty CA directory loads the CA: `ca rotate --activate` reads the trust
+// bundle instead, so that it can repair a directory whose key and certificate
+// disagree.
+func actionable(dir string, err error) error {
+	if errors.Is(err, ca.ErrNotInitialized) {
+		return fmt.Errorf("no fleet CA in %s: run `fleetctl ca init` to create one", dir)
+	}
+	return err
 }
 
 // readFile keeps the error message consistent across commands that take a path

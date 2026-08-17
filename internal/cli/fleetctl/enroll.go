@@ -129,6 +129,9 @@ func newEnrollMintCommand(out io.Writer) *cobra.Command {
 					return err
 				}
 			}
+			if err := checkCertifiable(name, addresses); err != nil {
+				return err
+			}
 
 			token, rec, err := store.Mint(enroll.MintOptions{
 				Name:      name,
@@ -257,6 +260,67 @@ func checkEndpoint(flag, value string, requireHost bool) error {
 		return fmt.Errorf("%s %q does not name a port between 1 and 65535", flag, value)
 	}
 	return nil
+}
+
+// checkCertifiable refuses a mint whose token could not be redeemed.
+//
+// --control and --listen are checked because a bad one reaches the installer.
+// These two are the same argument one step further along: --name and --address
+// are what the *certificate* is built from, and the CA's rules for a subject
+// alternative name are stricter than anything this command checked before.
+// Enrollment applies them in `certifiable` — which runs after Redeem has marked
+// the token used — so a name the CA will not sign costs a single-use secret and
+// is discovered on a host the operator has already walked away from, with only
+// a re-mint to show for it. `--name "build box"` and `--address host:https` both
+// did exactly that.
+//
+// The check is the CA's own, over the same set enrollment will hand it, so mint
+// refuses what redemption would refuse and nothing else.
+func checkCertifiable(name string, addresses []string) error {
+	hosts := make([]string, 0, len(addresses))
+	for _, value := range addresses {
+		host, err := authorizedHost(value)
+		if err != nil {
+			return err
+		}
+		if host != "" {
+			hosts = append(hosts, host)
+		}
+	}
+	dnsNames, ips := hostsToSANs(name, hosts)
+	if err := ca.CheckSANs(dnsNames, ips); err != nil {
+		return fmt.Errorf("this token could not be redeemed as minted: %w (--name and --address become the issued certificate's subject alternative names)", err)
+	}
+	return nil
+}
+
+// authorizedHost is the host an --address authorizes, or the empty string for a
+// wildcard bind, which authorizes none. It mirrors what enrollment extracts, so
+// what is checked here is what will be signed there.
+//
+// The port is checked on the way past because it is what --listen is derived
+// from when the operator did not give one: a port net.SplitHostPort accepts and
+// strconv does not sent the generated command back to the installer's 8722
+// without saying it had, standing the agent up where the control plane will
+// never look — the exact failure deriving --listen from --address prevents.
+//
+// A bare host with no port is not malformed: it authorizes the name without
+// claiming to know which port the agent will serve on.
+func authorizedHost(value string) (string, error) {
+	if strings.HasPrefix(value, "-") {
+		return "", fmt.Errorf("--address %q starts with '-'; give it as host or host:port", value)
+	}
+	host := value
+	if h, port, err := net.SplitHostPort(value); err == nil {
+		host = h
+		if n, convErr := strconv.Atoi(port); convErr != nil || n < 1 || n > 65535 {
+			return "", fmt.Errorf("--address %q does not name a port between 1 and 65535", value)
+		}
+	}
+	if host == "0.0.0.0" || host == "::" {
+		return "", nil
+	}
+	return host, nil
 }
 
 // listenFor derives the agent's listen address from the endpoints the token
