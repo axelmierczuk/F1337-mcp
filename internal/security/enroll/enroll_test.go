@@ -403,11 +403,12 @@ func TestEnroll_RejectsInvalidCSR(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, codes.InvalidArgument, st.Code())
 
-	// The token must not have been burned by a request that never made it
-	// past CSR parsing... except it already was, per the mark-before-sign
-	// contract: the token is consumed on first redemption regardless of
-	// whether signing subsequently fails, so a caller must mint a fresh one
-	// to retry. Assert that contract explicitly.
+	// And the token was not burned by a request that never made it past CSR
+	// parsing. This used to assert the opposite — the token was consumed on
+	// first redemption whatever happened afterwards — which is the defect #58
+	// records: the operator's next attempt failed naming the credential rather
+	// than the mistake, and minting a fresh token made that go away without
+	// ever explaining it.
 	_, err = tokens.Redeem(token)
-	require.ErrorIs(t, err, enroll.ErrTokenUsed)
+	require.NoError(t, err, "a request refused on its CSR must leave the token spendable")
 }
