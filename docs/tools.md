@@ -101,8 +101,8 @@ Run a command to completion.
 | `argv` | string[] | **Required.** Executable and arguments. Not shell-parsed. `argv[0]` is looked up in the effective `PATH` — the one the command will run with, not the daemon's — and never in the working directory. |
 | `working_dir` | string | An ordinary path: exec and the path jail are mutually exclusive, so there are no roots to resolve it against. Must exist and be a directory. Defaults to the agent account's home directory. |
 | `env` | string[] | `KEY=VALUE`. Applied over a documented base environment, not over the daemon's own. An entry replaces the base entry with the same name. |
-| `timeout_seconds` | int | SIGTERM to the process **group** on expiry, then SIGKILL after the grace period. On Windows there is no catchable equivalent, so the job object is terminated at the first step. Defaults to 120s, matching the agent's own default so that a timeout report names the limit that actually bit. Above the agent's `exec.max_timeout` the call is refused, naming the maximum, rather than quietly shortened. On a saturated agent the timeout bounds the wait for a free process slot and then the command itself, so a queued call can take up to twice it — the RPC deadline allows for that, so a hung agent still cannot hold the call open. |
-| `max_output_bytes` | int | Beyond this, output is truncated and marked. Defaults to 128 KiB: the agent's ceiling is sized for a program reading output, this default for a model reading it in context. Above the agent's `exec.max_output_bytes` it is clamped to it — the truncation in the result is what reports that. |
+| `timeout_seconds` | int | SIGTERM to the process **group** on expiry, then SIGKILL after the grace period. On Windows there is no catchable equivalent, so the job object is terminated at the first step. Defaults to 120s, matching the agent's own default so that a timeout report names the limit that actually bit. Above the agent's `exec.max_timeout` the call is refused, naming the maximum, rather than quietly shortened. On a saturated agent the timeout bounds the wait for a free process slot and then the command itself, so a queued call can take up to twice it — the RPC deadline allows for that, so a hung agent still cannot hold the call open. Anything over a week is refused by the tool before the call is made: the deadline is derived from this number, and a large enough one wraps it into a deadline that has already passed. |
+| `max_output_bytes` | int | Beyond this, output is truncated and marked. Defaults to 128 KiB: the agent's ceiling is sized for a program reading output, this default for a model reading it in context. Above the agent's `exec.max_output_bytes` it is clamped to it — the truncation in the result is what reports that. The MCP server keeps its own 8 MiB ceiling on one result whatever this says, and when that is the cap that bit the truncation note says so rather than pointing at this argument. |
 | `shell` | bool | Run through the platform shell (`sh -c`, or `cmd /c` on Windows). Opt-in, because it reintroduces shell parsing of untrusted strings. The command policy then sees the shell, not the command inside it. |
 | `stdin` | string | Written to stdin, which is then closed. |
 
@@ -355,7 +355,19 @@ inside `source` is followed — a repository full of them would otherwise
 transfer as a tree of holes — and one resolving outside is skipped and named in
 the result. On a pull every link is skipped and named, because `ReadFile`
 follows links agent-side and deciding whether the target is inside the tree
-would mean resolving a remote path from here.
+would mean resolving a remote path from here. A pull whose `source` *is* a link
+is refused for the same reason, naming what it points at: the metadata
+describing a link is the link's own, so following it would land the target's
+contents under the link's name, with the link's size and the link's mode.
+
+**A pulled name cannot leave the destination.** The names in a pulled tree come
+from the sandbox, and `..\..\x` is an ordinary filename on Linux — the
+normalisation that lets a Windows sandbox's `cmd\app\main.go` mean
+`cmd/app/main.go` would otherwise turn it into a way out of the directory the
+caller named, and past two levels out of the working directory. Every entry is
+checked against the destination root and against the same confinement the root
+was, so a symlinked subdirectory of the destination is not a way out either.
+Entries that fail either check are skipped and reported; the rest arrive.
 
 **Defaults, caps and repeats.** `.git`, `.hg`, `.svn`, `node_modules`,
 `vendor`, `target`, `dist`, `build`, virtualenv and cache directories are
@@ -368,7 +380,13 @@ quick check, minus the modification time this protocol has no field to preserve
 — which makes push, edit, push again cost only what changed. `force` overrides
 it. Executable bits are preserved in both directions. A pull writes through a
 temporary file and renames, so an interrupted transfer leaves nothing at the
-destination rather than a partial file every later reader treats as whole.
+destination rather than a partial file every later reader treats as whole. A
+read the sandbox cut short, or one that ends without saying whether it finished,
+fails the transfer rather than committing the prefix under the real name.
+
+Each file's own RPC deadline scales with its size rather than using the deadline
+sized for a question, so the cap above is a size a transfer can actually reach
+on a link slower than a laboratory's. The same applies to `sandbox_write`.
 
 ### `sandbox_forward`
 Forward a sandbox port to the workstation.

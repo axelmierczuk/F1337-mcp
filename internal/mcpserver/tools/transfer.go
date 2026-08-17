@@ -441,7 +441,7 @@ func (r *Registrar) runPush(ctx context.Context, files sandboxdv1.FileServiceCli
 			return moved, fmt.Errorf("reading %s on this workstation: %w", entry.source, err)
 		}
 
-		callCtx, cancel := context.WithTimeout(ctx, r.deps.callTimeout())
+		callCtx, cancel := context.WithTimeout(ctx, r.deps.streamTimeout(entry.size))
 		resp, err := writeStream(callCtx, files, &sandboxdv1.WriteFileHeader{
 			Path:          entry.destination,
 			Mode:          entry.mode,
@@ -573,6 +573,16 @@ func (r *Registrar) planPull(ctx context.Context, files sandboxdv1.FileServiceCl
 	plan := &transferPlan{dir: metadata.GetIsDir()}
 
 	if !metadata.GetIsDir() {
+		if metadata.GetIsSymlink() {
+			// The same rule the recursive walk applies, for the same reason:
+			// ReadFile follows the link on the sandbox, so this would copy
+			// whatever it points at under the link's name — and the metadata
+			// here describes the *link*, so the file would land with the link's
+			// size and the link's mode, which on Linux is 0777.
+			return nil, fmt.Errorf(
+				"source %s on sandbox %s is a symlink to %s, and links are not followed: reading it would copy that file under this name, with the link's permissions rather than its own. Name the target directly if that is what you mean",
+				in.Source, target.Name(), metadata.GetSymlinkTarget())
+		}
 		destination, err := localFileDestination(in.Destination, metadata.GetPath(), in.AllowOutsideWorkingDir)
 		if err != nil {
 			return nil, err
@@ -637,10 +647,15 @@ func (r *Registrar) planPull(ctx context.Context, files sandboxdv1.FileServiceCl
 			})
 			continue
 		}
+		destination, skipReason := localEntryDestination(destinationRoot, rel, in.AllowOutsideWorkingDir)
+		if skipReason != "" {
+			plan.skips = append(plan.skips, TransferSkip{Path: rel, Reason: skipReason})
+			continue
+		}
 		plan.entries = append(plan.entries, transferEntry{
 			rel:         rel,
 			source:      entry.GetPath(),
-			destination: filepath.Join(destinationRoot, filepath.FromSlash(rel)),
+			destination: destination,
 			size:        entry.GetSizeBytes(),
 			mode:        entry.GetMode(),
 			modified:    modifiedTime(entry),
@@ -664,7 +679,7 @@ func (r *Registrar) runPull(ctx context.Context, files sandboxdv1.FileServiceCli
 			return moved, fmt.Errorf("creating %s on this workstation: %w", filepath.Dir(entry.destination), err)
 		}
 
-		callCtx, cancel := context.WithTimeout(ctx, r.deps.callTimeout())
+		callCtx, cancel := context.WithTimeout(ctx, r.deps.streamTimeout(entry.size))
 		written, err := r.pullFile(callCtx, files, entry)
 		cancel()
 		if err != nil {
@@ -734,6 +749,16 @@ func (r *Registrar) pullFile(ctx context.Context, files sandboxdv1.FileServiceCl
 		case *sandboxdv1.ReadFileResponse_Result:
 			result = event.Result
 		}
+	}
+
+	// The stream is metadata, then chunks, then exactly one result. Ending
+	// without one means the read did not finish, and the bytes that did arrive
+	// are a prefix of the file rather than the file. Committing that is the
+	// same failure as committing a truncated read, arrived at from the other
+	// direction, and nil-safe getters would report it as a whole file.
+	if result == nil {
+		return 0, fmt.Errorf(
+			"the sandbox ended the read of %s without reporting a result, so whether the file arrived whole is unknown; it was not written", entry.source)
 	}
 
 	// A truncated read is a failed transfer, not a smaller file. Committing it
@@ -810,6 +835,37 @@ func localFileDestination(destination, remoteSource string, allowOutside bool) (
 		return localWriteTarget(filepath.Join(resolved, base), allowOutside)
 	}
 	return resolved, nil
+}
+
+// localEntryDestination places one pulled entry under the destination root,
+// refusing a name that would put it anywhere else.
+//
+// The root is checked once, when the pull is planned. This checks every entry
+// against it, because the name each one lands under comes from the sandbox —
+// the untrusted side of this system — and two ordinary things turn a name into
+// a way out of the tree:
+//
+//   - A file literally called `..\..\x` is a legal filename on Linux, and the
+//     separator normalisation that lets a Windows sandbox's `cmd\app\main.go`
+//     mean `cmd/app/main.go` turns that name into a traversal. Anything a
+//     sandbox's own workload can create, it can name.
+//   - A directory *inside* the destination that is a symlink pointing out of
+//     it. The root's own resolution never saw it, and MkdirAll writes straight
+//     through it.
+//
+// Past two levels either one leaves the working directory the pull confinement
+// exists to enforce, so the check is the confinement's, applied per entry
+// rather than only to the root it was composed from.
+func localEntryDestination(root, rel string, allowOutside bool) (destination, skipReason string) {
+	candidate := filepath.Join(root, filepath.FromSlash(rel))
+	inside, err := filepath.Rel(root, candidate)
+	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
+		return "", fmt.Sprintf("the sandbox names it %q, which does not stay inside the destination directory", rel)
+	}
+	if _, err := localWriteTarget(candidate, allowOutside); err != nil {
+		return "", "it resolves outside this workstation's working directory, which a pull may not write to; a directory in the destination tree is a symlink pointing out of it"
+	}
+	return candidate, ""
 }
 
 // localWriteTarget resolves a local write destination and refuses one outside

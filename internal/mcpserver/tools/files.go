@@ -381,7 +381,7 @@ func (r *Registrar) sandboxWrite(ctx context.Context, _ *mcp.CallToolRequest, ta
 		return WriteResult{}, target.Call().Map(err)
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, r.deps.callTimeout())
+	callCtx, cancel := context.WithTimeout(ctx, r.deps.streamTimeout(u64(len(in.Content))))
 	defer cancel()
 
 	resp, err := writeStream(callCtx, files, &sandboxdv1.WriteFileHeader{
@@ -429,6 +429,7 @@ func writeStream(ctx context.Context, files sandboxdv1.FileServiceClient, header
 		return nil, err
 	}
 
+	var sent uint64
 	buf := make([]byte, writeChunkBytes)
 	for {
 		n, readErr := content.Read(buf)
@@ -440,12 +441,17 @@ func writeStream(ctx context.Context, files sandboxdv1.FileServiceClient, header
 				// the stream, and its own error is the useful one: take it
 				// from CloseAndRecv rather than reporting the write end's
 				// generic "broken pipe".
-				resp, closeErr := stream.CloseAndRecv()
-				if closeErr != nil {
+				//
+				// If that comes back clean, this end still knows something the
+				// agent's answer does not: content was left unsent, so whatever
+				// is at the path is a prefix of what was asked for. Returning
+				// the response would report a short write as a complete one.
+				if _, closeErr := stream.CloseAndRecv(); closeErr != nil {
 					return nil, closeErr
 				}
-				return resp, nil
+				return nil, fmt.Errorf("the write stream stopped accepting content after %d bytes, so the file was not written whole: %w", sent, err)
 			}
+			sent += u64(n)
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
@@ -847,6 +853,18 @@ func (r *Registrar) sandboxGrep(ctx context.Context, _ *mcp.CallToolRequest, tar
 		case *sandboxdv1.GrepResponse_Summary:
 			summary = event.Summary
 		}
+	}
+
+	// The stream is zero or more matches then exactly one summary. Without it
+	// there is no match count and no files_searched, and the nil-safe getters
+	// below would render both as zero — which this tool then says out loud as
+	// "No matches in 0 files searched". A search that did not finish must not
+	// come back as a search that found nothing: the model's next move after
+	// "no matches" is to stop looking.
+	if summary == nil {
+		return GrepResult{}, fmt.Errorf(
+			"sandbox %s ended the search for %s without a summary, so how much of the tree was read is unknown; this is not \"no matches\"",
+			target.Name(), in.Pattern)
 	}
 
 	out.MatchCount = summary.GetMatchesFound()

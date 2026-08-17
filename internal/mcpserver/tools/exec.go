@@ -44,6 +44,18 @@ const (
 	// named in a timeout report is the limit that actually bit.
 	DefaultExecTimeout = 120 * time.Second
 
+	// maxExecTimeoutSeconds bounds what timeout_seconds may ask for.
+	//
+	// The agent has its own maximum and refuses anything above it, naming the
+	// number — which is the check that matters, and this one does not try to
+	// second-guess it. This exists because the deadline below is 2×timeout, and
+	// time.Duration is nanoseconds in an int64: past roughly 146 years the
+	// multiplication wraps negative, the context is born expired, and the model
+	// is told its call "timed out — raise timeout_seconds", which is the one
+	// thing that would make it worse. A week is far under that and far over
+	// anything a command held open on one RPC should ask for.
+	maxExecTimeoutSeconds = 7 * 24 * 60 * 60
+
 	// execCallGrace is the slack added to the RPC deadline over the command's
 	// own timeout.
 	//
@@ -124,6 +136,11 @@ func (r *Registrar) sandboxExec(ctx context.Context, _ *mcp.CallToolRequest, tar
 	}
 	if in.TimeoutSeconds < 0 {
 		return ExecResult{}, fmt.Errorf("timeout_seconds is %d; it must not be negative", in.TimeoutSeconds)
+	}
+	if in.TimeoutSeconds > maxExecTimeoutSeconds {
+		return ExecResult{}, fmt.Errorf(
+			"timeout_seconds is %d, which is over the %d this tool will hold one call open for. Exec holds the RPC for the lifetime of the command; use sandbox_process_start for work meant to outlive a call",
+			in.TimeoutSeconds, maxExecTimeoutSeconds)
 	}
 	if in.MaxOutputBytes < 0 {
 		return ExecResult{}, fmt.Errorf("max_output_bytes is %d; it must not be negative", in.MaxOutputBytes)
@@ -206,12 +223,12 @@ func (r *Registrar) sandboxExec(ctx context.Context, _ *mcp.CallToolRequest, tar
 			target.Name())
 	}
 
-	return renderExecResult(result, in, timeout, outputCap, stdout, stderr), nil
+	return renderExecResult(result, in, timeout, outputCap, int64(bufferCap), stdout, stderr), nil
 }
 
 // renderExecResult turns the terminal ExecResult and the two collected streams
 // into what the model reads.
-func renderExecResult(result *sandboxdv1.ExecResult, in ExecArgs, timeout time.Duration, outputCap int64, stdout, stderr *boundedBuffer) ExecResult {
+func renderExecResult(result *sandboxdv1.ExecResult, in ExecArgs, timeout time.Duration, outputCap, bufferCap int64, stdout, stderr *boundedBuffer) ExecResult {
 	out := ExecResult{
 		ExitCode:   result.GetExitCode(),
 		Stdout:     stdout.String(),
@@ -221,7 +238,15 @@ func renderExecResult(result *sandboxdv1.ExecResult, in ExecArgs, timeout time.D
 		Signal:     result.GetSignal(),
 	}
 
+	// The note names the cap that actually bit. Above maxExecBufferBytes the
+	// caller's max_output_bytes is not the binding limit any more, and telling
+	// a model to raise the argument it already raised sends it round the same
+	// loop with a bigger number.
 	capNote := fmt.Sprintf("Output was capped at %d bytes; raise max_output_bytes (the agent clamps it to its own maximum) or narrow the command.", outputCap)
+	if outputCap > bufferCap {
+		capNote = fmt.Sprintf("Output was capped at %d bytes, which is this server's own ceiling on one exec result: max_output_bytes was %d and raising it further will not lift this. Narrow the command, or redirect the output to a file on the sandbox and read it in windows.",
+			bufferCap, outputCap)
+	}
 	out.Truncation = truncationFrom(result.GetTruncation(), capNote).
 		merge(stdout.truncation(capNote)).
 		merge(stderr.truncation(capNote))

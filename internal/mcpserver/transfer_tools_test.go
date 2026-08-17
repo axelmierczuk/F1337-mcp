@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/mcpserver/tools"
@@ -457,6 +458,130 @@ func TestTransfer_PullOutsideTheWorkingDirectoryIsRefused(t *testing.T) {
 	assert.FileExists(t, outside)
 }
 
+// namingFiles serves a directory listing whose entry names are the caller's,
+// and a one-chunk read for any file in it. It stands in for a sandbox holding
+// files somebody chose the names of — which is every sandbox, since the point
+// of one is running code that writes files.
+type namingFiles struct {
+	sandboxdv1.FileServiceClient
+	root  string
+	names []string
+}
+
+func (n *namingFiles) StatPath(_ context.Context, in *sandboxdv1.StatPathRequest, _ ...grpc.CallOption) (*sandboxdv1.StatPathResponse, error) {
+	return &sandboxdv1.StatPathResponse{Exists: true, Metadata: &sandboxdv1.FileMetadata{
+		Path: in.GetPath(), IsDir: true, ModifiedAt: timestamppb.Now(),
+	}}, nil
+}
+
+func (n *namingFiles) ListDirectory(_ context.Context, _ *sandboxdv1.ListDirectoryRequest, _ ...grpc.CallOption) (*sandboxdv1.ListDirectoryResponse, error) {
+	resp := &sandboxdv1.ListDirectoryResponse{Path: n.root}
+	for _, name := range n.names {
+		resp.Entries = append(resp.Entries, &sandboxdv1.FileMetadata{
+			// Composed the way the agent's own walk composes one: the resolved
+			// root, a separator, then the name as it is on disk.
+			Path: n.root + "/" + name, SizeBytes: 7, Mode: 0o644, ModifiedAt: timestamppb.Now(),
+		})
+	}
+	return resp, nil
+}
+
+func (n *namingFiles) ReadFile(context.Context, *sandboxdv1.ReadFileRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[sandboxdv1.ReadFileResponse], error) {
+	return &recvStream[sandboxdv1.ReadFileResponse]{messages: []*sandboxdv1.ReadFileResponse{
+		{Event: &sandboxdv1.ReadFileResponse_Chunk{Chunk: []byte("owned!\n")}},
+		{Event: &sandboxdv1.ReadFileResponse_Result{Result: &sandboxdv1.ReadResult{}}},
+	}}, nil
+}
+
+// TestTransfer_APulledNameCannotEscapeTheDestination.
+//
+// The names in a pulled tree come from the sandbox, and a sandbox is the side
+// of this system that runs code nobody vetted. Two of them are a way out of the
+// destination directory:
+//
+//   - `..\..\x` is an ordinary filename on Linux, where a backslash is not a
+//     separator. The normalisation that lets a Windows sandbox's
+//     `cmd\app\main.go` mean `cmd/app/main.go` turns it into a traversal.
+//   - `../x` outright, from an agent that is not the one this server thinks it
+//     is talking to.
+//
+// Both used to be joined under the destination and written wherever they
+// landed, which past two levels is outside the working directory the local
+// confinement exists to enforce — the tool's one safety property on this side,
+// bypassed by a filename. They are skipped and reported now, and the rest of
+// the tree still arrives.
+//
+// Driven through a fake so it runs on every platform: the interesting name
+// cannot be created on Windows, and the property is not Unix's.
+func TestTransfer_APulledNameCannotEscapeTheDestination(t *testing.T) {
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{})
+
+	remote := f.path("results")
+	f.clients.filesOverride = &namingFiles{
+		FileServiceClient: f.backend.files,
+		root:              remote,
+		names:             []string{"real.txt", `..\..\escaped.txt`, "../also-escaped.txt"},
+	}
+
+	destination := filepath.Join(local, "pulled")
+	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+		"direction": "pull", "source": remote, "destination": destination, "recursive": true,
+	}))
+
+	assert.Equal(t, 1, out.Files, "only the entry that stays inside the destination is transferred")
+	assert.FileExists(t, filepath.Join(destination, "real.txt"))
+
+	require.Equal(t, 2, out.SkippedCount, "and both escaping names are reported, not silently dropped")
+	for _, skip := range out.Skipped {
+		assert.Contains(t, skip.Reason, "inside the destination directory")
+	}
+
+	// The names resolve to a sibling of the working directory and to its
+	// parent. Nothing may exist at either.
+	assert.NoFileExists(t, filepath.Join(filepath.Dir(local), "escaped.txt"))
+	assert.NoFileExists(t, filepath.Join(local, "also-escaped.txt"))
+	assert.NoFileExists(t, filepath.Join(local, "escaped.txt"))
+}
+
+// TestTransfer_APulledEntryCannotEscapeThroughASymlinkedDirectory.
+//
+// The destination root is checked once, with its symlinks resolved. A
+// *subdirectory* of it that is a link out is a second way through the same
+// door: MkdirAll walks straight into it and the file lands wherever it points.
+func TestTransfer_APulledEntryCannotEscapeThroughASymlinkedDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink on Windows needs a privilege CI does not grant")
+	}
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{})
+
+	remote := f.path("results")
+	f.clients.filesOverride = &namingFiles{
+		FileServiceClient: f.backend.files,
+		root:              remote,
+		names:             []string{"keep/real.txt", "logs/secret.txt"},
+	}
+
+	// The destination exists already, with one subdirectory pointing out of the
+	// working directory — the shape a repeat pull into a prepared tree has.
+	destination := filepath.Join(local, "pulled")
+	escapeTarget := t.TempDir()
+	require.NoError(t, os.MkdirAll(destination, 0o750))
+	require.NoError(t, os.Symlink(escapeTarget, filepath.Join(destination, "logs")))
+
+	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
+		"direction": "pull", "source": remote, "destination": destination, "recursive": true,
+	}))
+
+	assert.Equal(t, 1, out.Files)
+	assert.FileExists(t, filepath.Join(destination, "keep", "real.txt"))
+	require.Equal(t, 1, out.SkippedCount)
+	assert.Contains(t, out.Skipped[0].Reason, "outside this workstation's working directory")
+	assert.NoFileExists(t, filepath.Join(escapeTarget, "secret.txt"),
+		"a link out of the working directory must not be written through")
+}
+
 // TestTransfer_ASymlinkedDestinationCannotEscapeTheWorkingDirectory. Checking
 // the path as written would let a link inside the working directory point
 // anywhere at all.
@@ -479,6 +604,30 @@ func TestTransfer_ASymlinkedDestinationCannotEscapeTheWorkingDirectory(t *testin
 
 	assert.Contains(t, text, "outside this workstation's working directory")
 	assert.NoFileExists(t, filepath.Join(escapeTarget, "landed.txt"))
+}
+
+// TestTransfer_APushDestinationOutsideTheJailIsRejected.
+//
+// The other side of the same coin: on the sandbox it is the agent's jail that
+// decides, and this asserts the refusal reaches the model as the agent's own
+// words — naming the roots — rather than as a transfer that reports zero files
+// and no reason. Run with exec disabled, the one configuration in which an
+// agent has a jail at all.
+func TestTransfer_APushDestinationOutsideTheJailIsRejected(t *testing.T) {
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{execDisabled: true})
+
+	source := filepath.Join(local, "payload.txt")
+	writeLocal(t, source, "payload\n", 0o644)
+	outside := filepath.Join(t.TempDir(), "escaped.txt")
+
+	text := f.fails("sandbox_transfer", map[string]any{
+		"direction": "push", "source": source, "destination": outside,
+	})
+
+	assert.Contains(t, text, "outside the allowed roots")
+	assert.Contains(t, text, f.remote, "the refusal names the roots the model may use")
+	assert.NoFileExists(t, outside)
 }
 
 // TestTransfer_PushIsNotConfinedToTheWorkingDirectory. The confinement is on
@@ -576,8 +725,10 @@ func TestTransfer_APulledFileIsNeverHeldWhole(t *testing.T) {
 	destination := filepath.Join(local, "large.bin")
 
 	// A 64 MiB file arrives as a thousand 64 KiB chunks; sampling every
-	// sixteenth keeps sixty-odd collections rather than a thousand.
-	sampler := newHeapSampler(16)
+	// sixteenth keeps sixty-odd collections rather than a thousand. The
+	// baseline is taken when the handler starts, not here.
+	sampler := &heapSampler{every: 16}
+	f.clients.onFiles = sampler.start
 	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
 
 	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
@@ -609,7 +760,8 @@ func TestTransfer_APushedFileIsNeverHeldWhole(t *testing.T) {
 	writeGeneratedFile(t, source, heapPayload)
 	destination := f.path("large.bin")
 
-	sampler := newHeapSampler(16)
+	sampler := &heapSampler{every: 16}
+	f.clients.onFiles = sampler.start
 	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
 
 	out := structured[transferResult](t, f.ok("sandbox_transfer", map[string]any{
@@ -665,6 +817,93 @@ func TestTransfer_ATruncatedReadIsNotCommitted(t *testing.T) {
 
 	assert.Contains(t, text, "truncated")
 	assert.NoFileExists(t, destination, "a truncated read must not be renamed into place")
+}
+
+// resultlessFiles serves a ReadFile stream that delivers a chunk and then ends
+// cleanly, with no result message. It is the shape of a read that stopped
+// early without anything raising an error — a stream cut by something in the
+// middle, or an agent that is not the one this server believes it is talking
+// to. The bytes that arrived are a prefix of the file, and nothing in them says
+// so.
+type resultlessFiles struct {
+	sandboxdv1.FileServiceClient
+}
+
+func (r *resultlessFiles) ReadFile(context.Context, *sandboxdv1.ReadFileRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[sandboxdv1.ReadFileResponse], error) {
+	return &recvStream[sandboxdv1.ReadFileResponse]{messages: []*sandboxdv1.ReadFileResponse{
+		{Event: &sandboxdv1.ReadFileResponse_Chunk{Chunk: []byte("the first part only")}},
+	}}, nil
+}
+
+// TestTransfer_AReadThatNeverReportedAResultIsNotCommitted.
+//
+// The truncation check catches a read the sandbox *said* it cut short. This is
+// the same partial file arriving without that admission: the getters are all
+// nil-safe, so an absent result reads as "not truncated" and the prefix is
+// renamed into place under the real name. Every later reader treats it as
+// whole, and so does the next push's unchanged check, which compares sizes and
+// would never correct it.
+func TestTransfer_AReadThatNeverReportedAResultIsNotCommitted(t *testing.T) {
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{})
+
+	source := f.path("big.bin")
+	writeRemote(t, source, strings.Repeat("z", 8192))
+	destination := filepath.Join(local, "big.bin")
+
+	f.clients.filesOverride = &resultlessFiles{FileServiceClient: f.backend.files}
+
+	text := f.fails("sandbox_transfer", map[string]any{
+		"direction": "pull", "source": source, "destination": destination,
+	})
+
+	assert.Contains(t, text, "without reporting a result")
+	assert.NoFileExists(t, destination, "a read that never finished must not be renamed into place")
+}
+
+// symlinkSourceFiles answers StatPath with a symlink, which is what the agent
+// reports for one: metadata describing the *link*, not its target.
+type symlinkSourceFiles struct {
+	sandboxdv1.FileServiceClient
+}
+
+func (s *symlinkSourceFiles) StatPath(_ context.Context, in *sandboxdv1.StatPathRequest, _ ...grpc.CallOption) (*sandboxdv1.StatPathResponse, error) {
+	return &sandboxdv1.StatPathResponse{Exists: true, Metadata: &sandboxdv1.FileMetadata{
+		Path: in.GetPath(), SizeBytes: 11, Mode: 0o777, IsSymlink: true,
+		SymlinkTarget: "/etc/shadow", ModifiedAt: timestamppb.Now(),
+	}}, nil
+}
+
+// ReadFile answers as the agent does: it follows the link and returns the
+// target's bytes. Without the refusal in front of it, that is what lands.
+func (s *symlinkSourceFiles) ReadFile(context.Context, *sandboxdv1.ReadFileRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[sandboxdv1.ReadFileResponse], error) {
+	return &recvStream[sandboxdv1.ReadFileResponse]{messages: []*sandboxdv1.ReadFileResponse{
+		{Event: &sandboxdv1.ReadFileResponse_Chunk{Chunk: []byte("root:x:0:0\n")}},
+		{Event: &sandboxdv1.ReadFileResponse_Result{Result: &sandboxdv1.ReadResult{}}},
+	}}, nil
+}
+
+// TestTransfer_PullingASymlinkIsRefusedRatherThanFollowed.
+//
+// A recursive pull skips every link it walks past. A pull whose *source* is one
+// used to follow it, and ReadFile follows links agent-side — so the file the
+// link points at arrived under the link's name. Worse, the metadata describing
+// a link is the link's own: its size, which the unchanged check then compares
+// against, and its mode, which on Linux is 0777. "Pull that file" quietly
+// produced a world-writable copy of something else.
+func TestTransfer_PullingASymlinkIsRefusedRatherThanFollowed(t *testing.T) {
+	local := localWorkspace(t)
+	f := newAgentFixture(t, backendOptions{})
+	f.clients.filesOverride = &symlinkSourceFiles{FileServiceClient: f.backend.files}
+
+	destination := filepath.Join(local, "landed.txt")
+	text := f.fails("sandbox_transfer", map[string]any{
+		"direction": "pull", "source": f.path("link.txt"), "destination": destination,
+	})
+
+	assert.Contains(t, text, "symlink")
+	assert.Contains(t, text, "/etc/shadow", "the refusal names what it points at")
+	assert.NoFileExists(t, destination)
 }
 
 // --------------------------------------------------- interruption

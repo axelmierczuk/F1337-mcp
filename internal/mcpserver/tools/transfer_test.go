@@ -84,6 +84,31 @@ func TestTransferKey_AgreesAcrossSeparatorSpellings(t *testing.T) {
 	}
 }
 
+// TestCheckCaps_RefusesNamingTheLimitThatStoppedIt.
+//
+// Both caps, because only the file count is reachable from a test that builds a
+// real tree — materialising 256 MiB to watch a comparison is a quarter of a
+// gigabyte of CI disk for one branch of one if. The count cap's wiring into the
+// walk is covered end to end by TestTransfer_FileCountCapNamesTheLimit; this
+// pins what each refusal says, which is the part #25 asks for: the limit named,
+// and the way under it.
+func TestCheckCaps_RefusesNamingTheLimitThatStoppedIt(t *testing.T) {
+	assert.NoError(t, checkCaps(MaxTransferFiles, MaxTransferBytes),
+		"the limits themselves are allowed; it is passing them that is not")
+
+	err := checkCaps(MaxTransferFiles+1, 0)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "5000")
+		assert.Contains(t, err.Error(), "exclude", "and how to get under it")
+	}
+
+	err = checkCaps(1, MaxTransferBytes+1)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "256.0 MiB", "named in the units the result reports sizes in")
+		assert.Contains(t, err.Error(), "exclude")
+	}
+}
+
 // TestUnchangedRemote_ComparesSizeThenAge is the age half.
 //
 // The rule is rsync's quick check minus the modification time this protocol

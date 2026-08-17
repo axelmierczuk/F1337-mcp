@@ -133,6 +133,14 @@ type backendClients struct {
 	// what went over the wire rather than only what came back.
 	execOverride  sandboxdv1.ExecServiceClient
 	filesOverride sandboxdv1.FileServiceClient
+	// onFiles runs when a handler asks for a file client, which is the first
+	// thing every one of these handlers does and so the earliest point in a
+	// tool call a test can observe from the outside. The memory tests take
+	// their baseline here: by this moment the protocol has decoded the
+	// request's arguments — for sandbox_write that is the content itself,
+	// which nothing on this side can avoid holding — and the handler has not
+	// yet touched them, so everything measured after it is the handler's own.
+	onFiles func()
 }
 
 func (c *backendClients) Host(string, string) (sandboxdv1.HostServiceClient, error) {
@@ -147,6 +155,9 @@ func (c *backendClients) Exec(string, string) (sandboxdv1.ExecServiceClient, err
 }
 
 func (c *backendClients) Files(string, string) (sandboxdv1.FileServiceClient, error) {
+	if c.onFiles != nil {
+		c.onFiles()
+	}
 	if c.filesOverride != nil {
 		return c.filesOverride, nil
 	}

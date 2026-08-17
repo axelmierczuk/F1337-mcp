@@ -36,6 +36,16 @@ import (
 //     still running, not a before-and-after delta. An implementation that
 //     buffered the whole payload and released it at the end shows almost no
 //     delta afterwards, which is the exact regression this is here to catch.
+//
+// And one thing about *where the baseline is taken* is load-bearing too. It is
+// the moment the handler asks for its file client — the first thing every one
+// of these handlers does, and the earliest point in a tool call observable from
+// outside it (see backendClients.onFiles). It used to be the header message of
+// the write stream, which is later, and the gap between the two was somewhere a
+// whole copy could hide: a handler that did []byte(in.Content) before opening
+// the stream had already made its extra copy by the time the baseline was
+// taken, and the assertion passed. Taking it at the client lookup means every
+// copy the handler makes, anywhere, is on the far side of the baseline.
 
 // liveHeap forces a collection and reports what is still reachable.
 func liveHeap() uint64 {
@@ -201,17 +211,14 @@ type samplingWrite struct {
 	sampler *heapSampler
 }
 
-// Send rebaselines on the header and samples on every chunk after it.
+// Send samples on every content chunk. The header carries none, so it is not
+// worth a stop-the-world collection.
 //
-// The header is the last moment before any content moves, so a baseline taken
-// there excludes whatever the caller already holds — for sandbox_write that is
-// the request's own content string, which arrived whole over the protocol and
-// is nothing the handler can do anything about. What is left is exactly the
-// question worth asking: does the handler make a *second* copy of it.
+// It deliberately does not re-baseline: the baseline belongs at the start of
+// the handler, not at the last moment before content moves. See the note on
+// where the baseline is taken, above.
 func (s *samplingWrite) Send(msg *sandboxdv1.WriteFileRequest) error {
-	if _, isHeader := msg.GetEvent().(*sandboxdv1.WriteFileRequest_Header); isHeader {
-		s.sampler.start()
-	} else {
+	if _, isHeader := msg.GetEvent().(*sandboxdv1.WriteFileRequest_Header); !isHeader {
 		s.sampler.tick()
 	}
 	return s.ClientStreamingClient.Send(msg)

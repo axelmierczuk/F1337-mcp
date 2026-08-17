@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -296,9 +297,12 @@ func TestWrite_LargeContentIsStreamedRatherThanSentWhole(t *testing.T) {
 // protocol rather than the code: sandbox_write takes its content as a tool
 // *argument*, so a 64 MiB write is a 64 MiB JSON string that MCP has already
 // decoded whole before the handler is reached. No choice on this side changes
-// that. The baseline is therefore taken at the header message — the last
-// moment before any content moves — so what is measured is the copy the
-// handler could avoid rather than the one it cannot.
+// that, so that copy is in the baseline and is not what is being measured.
+//
+// What is measured is every copy the handler makes after that, and the
+// baseline is taken at the first thing it does — asking for a file client —
+// rather than at the write stream's header, which is late enough for a copy
+// made on the way there to hide behind it.
 func TestWrite_LargeContentIsNotCopiedWhole(t *testing.T) {
 	if testing.Short() {
 		t.Skip("moves 64 MiB")
@@ -306,8 +310,11 @@ func TestWrite_LargeContentIsNotCopiedWhole(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("large.bin")
 
-	// The sampler is started by the header message, not here; see samplingWrite.
+	// Started when the handler asks for its file client, not here: at this
+	// point the request has not even been sent, so the content string it
+	// carries is not yet live and would not be in the baseline.
 	sampler := &heapSampler{every: 16}
+	f.clients.onFiles = sampler.start
 	f.clients.filesOverride = &samplingFiles{FileServiceClient: f.backend.files, sampler: sampler}
 
 	out := structured[writeResult](t, f.ok("sandbox_write", map[string]any{
@@ -322,6 +329,56 @@ func TestWrite_LargeContentIsNotCopiedWhole(t *testing.T) {
 	require.Equal(t, int64(heapPayload), info.Size())
 
 	assertHeapBounded(t, sampler, heapPayload, "sandbox_write")
+}
+
+// refusingWrite is a WriteFile stream that accepts the header and then refuses
+// content, while its CloseAndRecv answers as though everything had arrived.
+//
+// That combination is not perverse: a client stream's Send reports only that
+// the connection is gone, and the useful error normally comes back from
+// CloseAndRecv — so a response with no error is exactly what a caller that
+// trusted CloseAndRecv alone would act on. This end knows better; it counted
+// what it sent.
+type refusingWrite struct {
+	grpc.ClientStream
+	sent int
+}
+
+func (w *refusingWrite) Send(*sandboxdv1.WriteFileRequest) error {
+	w.sent++
+	if w.sent == 1 {
+		return nil // the header
+	}
+	return io.EOF
+}
+
+func (w *refusingWrite) CloseAndRecv() (*sandboxdv1.WriteFileResponse, error) {
+	return &sandboxdv1.WriteFileResponse{Path: "/remote/big", BytesWritten: 0, Created: true}, nil
+}
+
+type refusingWriteFiles struct {
+	sandboxdv1.FileServiceClient
+}
+
+func (r *refusingWriteFiles) WriteFile(context.Context, ...grpc.CallOption) (grpc.ClientStreamingClient[sandboxdv1.WriteFileRequest, sandboxdv1.WriteFileResponse], error) {
+	return &refusingWrite{}, nil
+}
+
+// TestWrite_AStreamThatStoppedAcceptingContentIsNotReportedAsAWrite.
+//
+// The write reports what the agent says it received. If the stream stops
+// accepting content part way and the close still answers cleanly, what is at
+// the path is a prefix of what was asked for — and returning that answer says
+// "written" about a file that was not.
+func TestWrite_AStreamThatStoppedAcceptingContentIsNotReportedAsAWrite(t *testing.T) {
+	f := newAgentFixture(t, backendOptions{})
+	f.clients.filesOverride = &refusingWriteFiles{FileServiceClient: f.backend.files}
+
+	text := f.fails("sandbox_write", map[string]any{
+		"path": "/remote/big", "content": strings.Repeat("a", 200*1024),
+	})
+
+	assert.Contains(t, text, "not written whole")
 }
 
 // ------------------------------------------------------------------ edit
@@ -506,6 +563,32 @@ func TestGrep_ReportsTruncationAndHowLittleWasRead(t *testing.T) {
 	assert.True(t, out.Truncation.Truncated)
 	assert.Contains(t, out.Truncation.Note, "max_matches")
 	assert.Contains(t, out.Truncation.Note, "unsearched")
+}
+
+// summarylessFiles serves a Grep stream that ends without a summary.
+type summarylessFiles struct {
+	sandboxdv1.FileServiceClient
+}
+
+func (s *summarylessFiles) Grep(context.Context, *sandboxdv1.GrepRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[sandboxdv1.GrepResponse], error) {
+	return &recvStream[sandboxdv1.GrepResponse]{messages: []*sandboxdv1.GrepResponse{}}, nil
+}
+
+// TestGrep_ASearchWithoutASummaryIsNotReportedAsNoMatches.
+//
+// The summary carries the match count and how many files the walk read. Absent,
+// the nil-safe getters make both zero — and this tool then says so in words:
+// "No matches in 0 files searched". That is a search which did not happen,
+// rendered as a search that found nothing, and the model's next move after "no
+// matches" is to stop looking there.
+func TestGrep_ASearchWithoutASummaryIsNotReportedAsNoMatches(t *testing.T) {
+	f := newAgentFixture(t, backendOptions{})
+	f.clients.filesOverride = &summarylessFiles{FileServiceClient: f.backend.files}
+
+	text := f.fails("sandbox_grep", map[string]any{"pattern": "TODO", "root": f.remote})
+
+	assert.Contains(t, text, "without a summary")
+	assert.NotContains(t, text, "No matches")
 }
 
 // TestGrep_FilesOnlyReturnsNames.

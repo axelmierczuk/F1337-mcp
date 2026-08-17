@@ -208,6 +208,26 @@ func TestExec_ArgvIsRequired(t *testing.T) {
 	assert.Contains(t, text, "argv")
 }
 
+// TestExec_AnAbsurdTimeoutIsRefusedRatherThanWrappedAround.
+//
+// The RPC deadline is twice the timeout, in nanoseconds, in an int64. Past
+// about 146 years that multiplication wraps negative — the context is born
+// expired, the call fails instantly, and the error tells the model its call
+// timed out and to raise timeout_seconds.
+func TestExec_AnAbsurdTimeoutIsRefusedRatherThanWrappedAround(t *testing.T) {
+	f := newAgentFixture(t, backendOptions{})
+
+	// 2^33 seconds: past the point where twice it, in nanoseconds, leaves the
+	// range of a time.Duration.
+	text := f.fails("sandbox_exec", map[string]any{
+		"argv": []any{"true"}, "timeout_seconds": 1 << 33,
+	})
+
+	assert.Contains(t, text, "timeout_seconds")
+	assert.Contains(t, text, "sandbox_process_start", "and where work that long belongs")
+	assert.NotContains(t, text, "timed out", "it is a refusal, not a call that ran and expired")
+}
+
 // TestExec_StdinIsDelivered.
 func TestExec_StdinIsDelivered(t *testing.T) {
 	f := newAgentFixture(t, backendOptions{})
