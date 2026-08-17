@@ -203,6 +203,36 @@ func TestSelection_Clear(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// TestSelection_ClearForSandboxReachesEveryClient covers what deregistering
+// a sandbox has to do. Selections are keyed by client identity, so the client
+// running the removal is rarely the only one pointing at it, and a selection
+// left pointing at a sandbox that no longer exists is worse than none.
+func TestSelection_ClearForSandboxReachesEveryClient(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	require.NoError(t, r.SetSelection("client-1", "build-box"))
+	require.NoError(t, r.SetSelection("client-2", "build-box"))
+	require.NoError(t, r.SetSelection("client-3", "gpu-01"))
+
+	cleared, err := r.ClearSelectionsFor("build-box")
+	require.NoError(t, err)
+	assert.Equal(t, 2, cleared)
+
+	for _, client := range []string{"client-1", "client-2"} {
+		_, ok, err := r.GetSelection(client)
+		require.NoError(t, err)
+		assert.Falsef(t, ok, "%s should no longer have a selection", client)
+	}
+
+	name, ok, err := r.GetSelection("client-3")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "gpu-01", name, "a selection pointing elsewhere must be left alone")
+
+	cleared, err = r.ClearSelectionsFor("build-box")
+	require.NoError(t, err)
+	assert.Zero(t, cleared, "clearing again is not an error and clears nothing")
+}
+
 func TestMalformedFile_ClearErrorNamingPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.yaml")

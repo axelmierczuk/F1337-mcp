@@ -59,9 +59,30 @@ survive a restart.
 
 `sandbox_select` sets (2) and returns a handle usable as (1).
 
+There is deliberately no fourth rule. A fleet of exactly one sandbox does not
+resolve implicitly either: a fleet grows from one to two without anyone
+revisiting the calls written while it had one member.
+
+**Client identity** is taken from `_meta`, in order: the `io.sandboxd/clientId`
+key, if the client sets one; otherwise the client implementation name, which
+protocol `2026-07-28` carries in `_meta` as
+`io.modelcontextprotocol/clientInfo`; otherwise a per-process fallback. Keying
+on the name rather than name-and-version means upgrading a client does not
+silently drop its selection. A client that runs several concurrent sessions and
+wants each to hold its own target sets `io.sandboxd/clientId`.
+
+**Handles** are derived from the sandbox name — `sbx_` plus a truncated
+SHA-256 — rather than minted and stored. That makes them stable across a
+restart of both the server and the registry with nothing extra to persist, and
+opaque enough that a model cannot construct one for a sandbox it was never
+given.
+
 Every tool result carries the resolved sandbox name. This is not diagnostic
 garnish — silent target confusion is the most destructive failure mode
-available to this system, and it is invisible without an echo.
+available to this system, and it is invisible without an echo. The echo is
+enforced structurally rather than by convention: a tool's output type must
+embed the echo field to satisfy the registration helper's type constraint, and
+the helper overwrites it with the resolved name after the handler returns.
 
 ## Transport
 

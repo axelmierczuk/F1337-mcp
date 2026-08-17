@@ -291,3 +291,30 @@ func (r *Registry) ClearSelection(clientID string) error {
 		return nil
 	})
 }
+
+// ClearSelectionsFor removes every client's sticky default that points at
+// sandboxName, returning how many were cleared.
+//
+// Selections are keyed by client identity, so deregistering a sandbox has to
+// reach all of them: the client that ran sandbox_remove is rarely the only
+// one that had it selected, and a selection left pointing at a sandbox that
+// no longer exists is worse than no selection at all. Callers should clear
+// before removing, so the intermediate state is "registered but unselected"
+// rather than "selected but missing".
+func (r *Registry) ClearSelectionsFor(sandboxName string) (int, error) {
+	cleared := 0
+	err := r.mutate(func(s *state) error {
+		cleared = 0
+		for clientID, selected := range s.Selections {
+			if selected == sandboxName {
+				delete(s.Selections, clientID)
+				cleared++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return cleared, nil
+}
