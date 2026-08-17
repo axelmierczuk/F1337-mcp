@@ -204,6 +204,12 @@ message LogLine {
   // outran the log buffer. Reported rather than hidden so the model knows its
   // view of the log has a hole in it.
   uint64 dropped_before = 4;
+  // True when this line was split because it exceeded the agent's per-line cap,
+  // and the next line on the same stream is its continuation. A process that
+  // emits a minified bundle or a progress bar on one line has its output split
+  // rather than dropped, and this is what tells a reader the two halves belong
+  // together.
+  bool continued = 5;
 }
 
 message LogSummary {
