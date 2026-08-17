@@ -1018,6 +1018,12 @@ type LogLine struct {
 	// outran the log buffer. Reported rather than hidden so the model knows its
 	// view of the log has a hole in it.
 	DroppedBefore uint64 `protobuf:"varint,4,opt,name=dropped_before,json=droppedBefore,proto3" json:"dropped_before,omitempty"`
+	// True when this line was split because it exceeded the agent's per-line cap,
+	// and the next line on the same stream is its continuation. A process that
+	// emits a minified bundle or a progress bar on one line has its output split
+	// rather than dropped, and this is what tells a reader the two halves belong
+	// together.
+	Continued     bool `protobuf:"varint,5,opt,name=continued,proto3" json:"continued,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1078,6 +1084,13 @@ func (x *LogLine) GetDroppedBefore() uint64 {
 		return x.DroppedBefore
 	}
 	return 0
+}
+
+func (x *LogLine) GetContinued() bool {
+	if x != nil {
+		return x.Continued
+	}
+	return false
 }
 
 type LogSummary struct {
@@ -1589,12 +1602,13 @@ const file_sandboxd_v1_process_proto_rawDesc = "" +
 	"\x16GetProcessLogsResponse\x12*\n" +
 	"\x04line\x18\x01 \x01(\v2\x14.sandboxd.v1.LogLineH\x00R\x04line\x123\n" +
 	"\asummary\x18\x02 \x01(\v2\x17.sandboxd.v1.LogSummaryH\x00R\asummaryB\a\n" +
-	"\x05event\"\xab\x01\n" +
+	"\x05event\"\xc9\x01\n" +
 	"\aLogLine\x12+\n" +
 	"\x06stream\x18\x01 \x01(\x0e2\x13.sandboxd.v1.StreamR\x06stream\x128\n" +
 	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x12\n" +
 	"\x04text\x18\x03 \x01(\tR\x04text\x12%\n" +
-	"\x0edropped_before\x18\x04 \x01(\x04R\rdroppedBefore\"\xc1\x01\n" +
+	"\x0edropped_before\x18\x04 \x01(\x04R\rdroppedBefore\x12\x1c\n" +
+	"\tcontinued\x18\x05 \x01(\bR\tcontinued\"\xc1\x01\n" +
 	"\n" +
 	"LogSummary\x12%\n" +
 	"\x0elines_returned\x18\x01 \x01(\x04R\rlinesReturned\x12#\n" +

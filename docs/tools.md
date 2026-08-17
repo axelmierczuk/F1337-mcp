@@ -169,7 +169,12 @@ Following is **always bounded**. A call that never returns cannot be
 distinguished from a hung agent, and the model cannot recover from it.
 
 Dropped lines are reported inline as `dropped_before`, so a gap in the log is
-visible rather than silent.
+visible rather than silent. A line longer than the agent's per-line cap is split
+rather than dropped, and every piece but the last carries `continued`.
+
+Lines the supervisor itself wrote — a restart, a backoff, a decision to give up,
+an adoption note — are tagged as neither `stdout` nor `stderr`, so asking for one
+of those streams returns only what the process said.
 
 ### `sandbox_process_signal`
 Signal or stop a process.
