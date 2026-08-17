@@ -19,32 +19,37 @@
 //
 // A targeted tool looks like this end to end:
 //
-//	type readArgs struct {
+//	type editArgs struct {
 //	    tools.TargetArgs        // supplies the optional `sandbox` argument
-//	    Path string `json:"path" jsonschema:"absolute path on the sandbox"`
+//	    Path      string `json:"path" jsonschema:"absolute path on the sandbox"`
+//	    OldString string `json:"old_string" jsonschema:"exact text to replace"`
+//	    NewString string `json:"new_string" jsonschema:"replacement text"`
 //	}
 //
-//	type readResult struct {
+//	type editResult struct {
 //	    tools.Echo              // supplies the mandatory `sandbox` echo
-//	    Content string `json:"content"`
+//	    Diff         string `json:"diff"`
+//	    Replacements int    `json:"replacements"`
 //	}
 //
-//	func register(r *tools.Registrar) {
+//	func registerFiles(r *tools.Registrar) {
 //	    tools.AddTargeted(r, &mcp.Tool{
-//	        Name:        "sandbox_read",
-//	        Description: "Read a file from the selected sandbox.",
-//	    }, func(ctx context.Context, req *mcp.CallToolRequest, t *selection.Target, in readArgs) (readResult, error) {
+//	        Name:        "sandbox_edit",
+//	        Description: "Replace an exact string in a file on the selected sandbox.",
+//	    }, func(ctx context.Context, req *mcp.CallToolRequest, t *selection.Target, in editArgs) (editResult, error) {
 //	        files, err := r.Deps().Clients.Files(t.Name(), t.Address())
 //	        if err != nil {
-//	            return readResult{}, err
+//	            return editResult{}, err
 //	        }
-//	        resp, err := files.ReadFile(ctx, &sandboxdv1.ReadFileRequest{Path: in.Path})
+//	        resp, err := files.EditFile(ctx, &sandboxdv1.EditFileRequest{
+//	            Path: in.Path, OldString: in.OldString, NewString: in.NewString,
+//	        })
 //	        if err != nil {
 //	            c := t.Call()
-//	            c.Subject = "path " + in.Path
-//	            return readResult{}, c.Map(err)   // central gRPC → tool error mapping
+//	            c.Subject = "path " + in.Path       // what a NotFound is reported against
+//	            return editResult{}, c.Map(err)     // central gRPC → tool error mapping
 //	        }
-//	        return readResult{Content: resp.GetContent()}, nil
+//	        return editResult{Diff: resp.GetDiff(), Replacements: int(resp.GetReplacements())}, nil
 //	    })
 //	}
 //
@@ -52,6 +57,10 @@
 // sets out.Sandbox. Resolution happens before it runs; if it fails, the
 // handler is not called at all and the model gets the structured no-target
 // error naming sandbox_select.
+//
+// A streaming RPC works the same way — take the stream from the client,
+// consume it under the handler's context, and map the first error through
+// [selection.Target.Call] exactly as above.
 //
 // # Errors
 //
@@ -277,8 +286,10 @@ type FleetHandler[In, Out any] func(ctx context.Context, req *mcp.CallToolReques
 // rather than on a resolved sandbox, and so names its own subject.
 //
 // sandbox_add echoes the sandbox it registered, sandbox_remove the one it
-// deregistered, sandbox_list the one currently selected — empty, and only
-// empty, when nothing is selected.
+// deregistered, sandbox_list the one currently selected. Empty is permitted
+// here and only here, for the case where nothing is selected — a targeted
+// tool cannot reach its handler without a resolved target, so its echo is
+// never empty.
 func AddFleet[In any, Out any, POut interface {
 	*Out
 	echoer
