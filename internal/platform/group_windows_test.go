@@ -226,6 +226,37 @@ func TestJobObject_ClosedGroupRefusesSignals(t *testing.T) {
 	require.True(t, platform.ProcessExists(pid), "Close without KillOnClose must not kill anything")
 }
 
+// TestJobObject_UnassignedLeaderIsNotReportedAsKilled is the exported-API half
+// of the rule TestTerminate_UnassignedLeaderIsNotReportedAsKilled pins on
+// terminate directly: the state it needs is reachable from outside the
+// package, so this is a defect a caller can hit rather than an internal
+// invariant.
+//
+// A group whose Adopt failed still holds a job handle, still knows the pid, and
+// is not isolated. TerminateJobObject then succeeds against a job holding
+// nothing, and reporting that as success tells the supervisor it killed a
+// process it never touched. Adopt fails here because the pid is already gone;
+// in the field it fails because AssignProcessToJobObject is refused on a host
+// where the agent is itself inside a job that forbids nesting.
+func TestJobObject_UnassignedLeaderIsNotReportedAsKilled(t *testing.T) {
+	t.Parallel()
+
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+	defer group.Close()
+
+	pid := deadPID(t)
+
+	require.Error(t, group.Adopt(&os.Process{Pid: pid}),
+		"assigning a pid that names nothing must fail")
+	require.False(t, group.Isolated(), "a failed Adopt leaves nothing in the job")
+	require.Equal(t, pid, group.PID(), "the pid is still the only thing left to act on")
+
+	require.ErrorIs(t, group.Kill(), platform.ErrProcessNotFound,
+		"an empty job proves nothing about a process that was never assigned to it, "+
+			"so the leader's own answer is the caller's")
+}
+
 // TestJobObject_KillRacingClose covers the job handle's lifetime.
 //
 // Kill and Close are both public, and `defer g.Close()` next to a Kill from a
@@ -240,6 +271,18 @@ func TestJobObject_ClosedGroupRefusesSignals(t *testing.T) {
 // interleaving. Every outcome must be either success or the closed-group
 // error. An invalid-handle error from TerminateJobObject can only come from a
 // handle that Close had already released, which is precisely the defect.
+//
+// Be clear about what that is worth. With the lock held across the whole call
+// the interleaving is impossible by construction, so this asserts a
+// postcondition rather than detecting the fault; and against the unfixed code
+// it is a poor detector, because the window between reading g.job and reaching
+// TerminateJobObject is a few instructions wide and 40 unsynchronised pairs of
+// goroutines are unlikely to land in it. Its dependable value is what it rules
+// out on every run: that two public methods contending for the same mutex, one
+// of which calls into the kernel while holding it, neither deadlock nor
+// panic. A test that could force the fault would need a way to suspend Signal
+// mid-call, which nothing here has; the second audit round agreed it cannot be
+// forced rather than pretending otherwise.
 func TestJobObject_KillRacingClose(t *testing.T) {
 	for i := range 40 {
 		group, err := platform.NewProcessGroup(platform.GroupConfig{})
@@ -247,11 +290,17 @@ func TestJobObject_KillRacingClose(t *testing.T) {
 
 		pid, exited := sleeperInGroup(t, group)
 
+		// Release both goroutines from the same barrier rather than letting
+		// the second start whenever it is scheduled. It does not make the
+		// interleaving reachable, but it stops the odds being worse than they
+		// need to be.
 		var wg sync.WaitGroup
+		start := make(chan struct{})
 		results := make(chan error, 2)
 		wg.Add(2)
-		go func() { defer wg.Done(); results <- group.Kill() }()
-		go func() { defer wg.Done(); results <- group.Close() }()
+		go func() { defer wg.Done(); <-start; results <- group.Kill() }()
+		go func() { defer wg.Done(); <-start; results <- group.Close() }()
+		close(start)
 		wg.Wait()
 		close(results)
 

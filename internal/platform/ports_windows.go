@@ -55,18 +55,21 @@ func extendedTCPTable(family uint32) ([]byte, error) {
 			first = &buf[0]
 		}
 
-		// The pointer conversions stay inside the call expression, and buf is
-		// kept alive across it, so the buffer cannot be collected or moved
-		// between taking its address and the kernel writing into it.
+		// The pointer conversions stay inside the call expression, and both
+		// objects the kernel writes into are kept alive across it, so neither
+		// can be collected between taking its address and the write. size is
+		// an out-parameter as much as buf is: GetExtendedTcpTable stores the
+		// required length there on ERROR_INSUFFICIENT_BUFFER.
 		ret, _, _ := procGetExtendedTCPTable.Call(
-			uintptr(unsafe.Pointer(first)),
-			uintptr(unsafe.Pointer(&size)),
-			0, // bOrder: sorting is irrelevant, skip the work
+			uintptr(unsafe.Pointer(first)), //nolint:gosec // G103: LazyProc.Call takes ...uintptr; the table buffer has no other form
+			uintptr(unsafe.Pointer(&size)), //nolint:gosec // G103: LazyProc.Call takes ...uintptr; the size in/out-parameter has no other form
+			0,                              // bOrder: sorting is irrelevant, skip the work
 			uintptr(family),
 			uintptr(tcpTableOwnerPIDListener),
 			0,
 		)
 		runtime.KeepAlive(buf)
+		runtime.KeepAlive(&size)
 
 		switch windows.Errno(ret) {
 		case windows.ERROR_SUCCESS:

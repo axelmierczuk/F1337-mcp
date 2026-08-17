@@ -77,7 +77,7 @@ func newProcessGroup(cfg GroupConfig) (*ProcessGroup, error) {
 		_, err := windows.SetInformationJobObject(
 			job,
 			windows.JobObjectExtendedLimitInformation,
-			uintptr(unsafe.Pointer(&info)),
+			uintptr(unsafe.Pointer(&info)), //nolint:gosec // G103: SetInformationJobObject's parameter is a uintptr; there is no pointer-typed form
 			uint32(unsafe.Sizeof(info)),
 		)
 		runtime.KeepAlive(&info)
@@ -112,12 +112,17 @@ func openProcessGroup(pid int, name string) (*ProcessGroup, error) {
 	// would in a direct syscall.Syscall call. Nothing reads namePtr after this
 	// line, so without KeepAlive the collector is free to reclaim the UTF-16
 	// buffer while OpenJobObjectW is reading it.
-	handle, _, _ := procOpenJobObject.Call(uintptr(jobObjectAllAccess), 0, uintptr(unsafe.Pointer(namePtr)))
+	handle, _, _ := procOpenJobObject.Call(uintptr(jobObjectAllAccess), 0, uintptr(unsafe.Pointer(namePtr))) //nolint:gosec // G103: LazyProc.Call takes ...uintptr; a Win32 string argument has no other form
 	runtime.KeepAlive(namePtr)
 	if handle == 0 {
-		// The job is gone: every handle to it closed, which on a job created
-		// without kill-on-close leaves the processes running but unmanaged.
-		// Degrade to single-process control rather than refusing to adopt.
+		// The job could not be opened. Usually that means it is gone — every
+		// handle to it closed, which on a job created without kill-on-close
+		// leaves the processes running but unmanaged — but it also covers a
+		// job in another session and one whose DACL does not grant this agent
+		// full access. The three are not distinguished because the answer is
+		// the same for all of them: degrade to single-process control rather
+		// than refuse to adopt, and let Isolated report the loss of the tree
+		// guarantee.
 		return g, nil
 	}
 
@@ -142,7 +147,7 @@ func processInJob(job windows.Handle, pid uint32) bool {
 	// result is written by the kernel, so it must still be where it was when
 	// its address was taken. See the KeepAlive note in openProcessGroup.
 	var result int32
-	r, _, _ := procIsProcessInJb.Call(uintptr(h), uintptr(job), uintptr(unsafe.Pointer(&result)))
+	r, _, _ := procIsProcessInJb.Call(uintptr(h), uintptr(job), uintptr(unsafe.Pointer(&result))) //nolint:gosec // G103: LazyProc.Call takes ...uintptr; the PBOOL out-parameter has no other form
 	runtime.KeepAlive(&result)
 	return r != 0 && result != 0
 }
@@ -173,6 +178,11 @@ func (g *ProcessGroup) ConfigurePTYCommand(cmd *pty.Cmd) {
 
 // Adopt assigns the started child to the job object. See the type comment for
 // the race this cannot close.
+//
+// When it returns an error the group still knows the child's pid but has not
+// assigned it, so Signal and Kill fall back to the leader alone and report the
+// leader's own result. Isolated stays false; a supervisor that ignores this
+// error is a supervisor that will not reach the child's descendants.
 func (g *ProcessGroup) Adopt(p *os.Process) error {
 	if p == nil {
 		return ErrNoProcess
@@ -241,6 +251,18 @@ func (g *ProcessGroup) GroupID() int { return 0 }
 //
 // SignalHup, SignalUSR1 and SignalUSR2 return ErrSignalUnsupported.
 //
+// ErrProcessNotFound does not mean the same thing here as it does on Unix.
+// Unix reports it when the whole group is empty, because that is what kill(2)
+// says. When this group has a job object holding the process, terminating the
+// job succeeds whether or not anything was still inside it, so a group whose
+// processes have all exited reports success rather than ErrProcessNotFound;
+// distinguishing the two needs a QueryInformationJobObject process-id-list
+// walk this package does not do. When there is no job — the degraded
+// single-process path, and the case where Adopt never assigned the child —
+// the leader's own answer is reported, and ErrProcessNotFound there does mean
+// gone. Use [SameProcess] or [ProcessExists] to ask about liveness; do not
+// infer it from this error.
+//
 // The lock is held across the whole call rather than only across the field
 // read. g.job is a kernel handle, and copying it out before releasing the lock
 // leaves a window in which Close can release it: the value then names nothing,
@@ -268,7 +290,7 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 		}
 		return nil
 	case SignalTerm, SignalKill:
-		return terminate(g.job, g.pid)
+		return terminate(g.job, g.pid, g.isolated)
 	case SignalUnspecified, SignalHup, SignalUSR1, SignalUSR2:
 		return fmt.Errorf("%w: %s", ErrSignalUnsupported, sig)
 	default:
@@ -283,28 +305,48 @@ const stillActive = 259
 // terminate kills the job, then the leader.
 //
 // Both, because a child that spawned grandchildren before the job assignment
-// landed is still in the agent's care. But the job is the guarantee: when it
-// goes down, the tree is gone, and whether the leader could also be terminated
-// individually afterwards says nothing about whether the caller's request
-// succeeded. TerminateProcess against a process that has already exited fails
-// with ERROR_ACCESS_DENIED, so reporting that error turns every successful
-// group kill into a failure.
-func terminate(job windows.Handle, pid uint32) error {
-	if job != 0 {
-		if err := windows.TerminateJobObject(job, 1); err != nil {
-			// The job did not go down. The leader is then the only thing left
-			// to try, and its error is the one worth reporting.
-			jobErr := fmt.Errorf("platform: terminating job object: %w", err)
-			if leaderErr := terminateProcess(pid); leaderErr != nil {
-				return errors.Join(jobErr, leaderErr)
-			}
-			return jobErr
-		}
-		// Best effort, and deliberately unchecked: it is normally already dead.
-		_ = terminateProcess(pid)
-		return nil
+// landed is still in the agent's care. TerminateProcess against a process that
+// has already exited fails with ERROR_ACCESS_DENIED, so reporting that error
+// unconditionally would turn every successful group kill into a failure.
+//
+// Which of the two answers is the caller's depends on whether the job actually
+// holds the process, which is what assigned records:
+//
+//   - Assigned. The job is the guarantee: when it goes down the tree is gone,
+//     and whether the leader could also be terminated individually afterwards
+//     says nothing about the caller's request. The leader's error is dropped.
+//   - Not assigned. TerminateJobObject then succeeds against a job that holds
+//     nothing, which proves nothing about the process the caller asked about.
+//     Adopt leaves a group in exactly this state when OpenProcess or
+//     AssignProcessToJobObject fails — and AssignProcessToJobObject does fail
+//     in the field, on a host where the agent itself is already inside a job
+//     that forbids nesting. Dropping the leader's error there reports a live,
+//     unreachable process as killed: a failure reported as success, and the
+//     supervisor stops trying. The Unix implementation has never had this
+//     problem, because a group it could not create is a group it signals by
+//     pid, and kill(2)'s answer is passed straight back.
+func terminate(job windows.Handle, pid uint32, assigned bool) error {
+	if job == 0 {
+		return terminateProcess(pid)
 	}
-	return terminateProcess(pid)
+
+	if err := windows.TerminateJobObject(job, 1); err != nil {
+		// The job did not go down. The leader is then the only thing left to
+		// try, and its error is the one worth reporting.
+		jobErr := fmt.Errorf("platform: terminating job object: %w", err)
+		if leaderErr := terminateProcess(pid); leaderErr != nil {
+			return errors.Join(jobErr, leaderErr)
+		}
+		return jobErr
+	}
+
+	leaderErr := terminateProcess(pid)
+	if !assigned {
+		return leaderErr
+	}
+	// Best effort, and deliberately dropped: the leader is normally already
+	// dead, killed by the job going down a moment ago.
+	return nil
 }
 
 // terminateProcess kills a single process, treating "it already exited" as

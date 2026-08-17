@@ -1,5 +1,20 @@
 package platform
 
+import "errors"
+
+// ErrKillOnCloseNamedJob reports the one GroupConfig that cannot mean
+// anything: a named job that also dies when its last handle closes.
+//
+// Name exists so a restarted agent can reopen the job with OpenProcessGroup.
+// KillOnClose destroys the job, and every process in it, when the agent that
+// created it exits. Asking for both is asking to re-adopt processes that the
+// restart has already killed — and the killing is the part that happens. It is
+// refused rather than resolved, because either resolution silently gives the
+// caller the other one's behaviour.
+var ErrKillOnCloseNamedJob = errors.New(
+	"platform: KillOnClose with a job Name: the name exists to survive an agent restart, " +
+		"and KillOnClose is what stops it surviving")
+
 // GroupConfig configures a [ProcessGroup] before the child is spawned.
 type GroupConfig struct {
 	// Name gives the Windows job object a kernel object name, so a restarted
@@ -27,8 +42,28 @@ type GroupConfig struct {
 	//     is designed to avoid. Pair false with a Name so the job can be
 	//     reopened after the restart.
 	//
-	// The zero value is therefore the supervisor's setting, not exec's.
+	// The zero value is therefore the supervisor's setting, not exec's. That
+	// asymmetry is deliberate: forgetting it in exec leaks a grandchild for
+	// the life of one RPC, and forgetting it in the supervisor takes down
+	// every supervised process on the host at the next agent restart. The
+	// cheaper mistake is the one left available.
+	//
+	// Setting it together with Name is refused outright; see
+	// ErrKillOnCloseNamedJob.
 	KillOnClose bool
+}
+
+// validate rejects configurations whose two halves contradict each other.
+//
+// It lives here rather than in the Windows implementation, and applies on every
+// platform even though both fields are ignored on Unix, so that a caller
+// developing on macOS gets the error on their own machine instead of shipping
+// it to the only platform that would act on it.
+func (c GroupConfig) validate() error {
+	if c.KillOnClose && c.Name != "" {
+		return ErrKillOnCloseNamedJob
+	}
+	return nil
 }
 
 // NewProcessGroup prepares the OS mechanism that keeps a child and its
@@ -47,7 +82,12 @@ type GroupConfig struct {
 // agent's own process group, and a later Signal that would have hit the agent
 // itself. Adopt detects that and leaves [ProcessGroup.Isolated] false; a
 // supervisor that cares should check it.
-func NewProcessGroup(cfg GroupConfig) (*ProcessGroup, error) { return newProcessGroup(cfg) }
+func NewProcessGroup(cfg GroupConfig) (*ProcessGroup, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	return newProcessGroup(cfg)
+}
 
 // OpenProcessGroup returns a handle to the group of a process this agent did
 // not spawn in this run — the re-adoption path after a daemon restart.

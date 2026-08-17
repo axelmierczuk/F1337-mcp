@@ -35,7 +35,15 @@ func readResources(diskPath string) (Resources, error) {
 
 	var status memoryStatusEx
 	status.Length = uint32(unsafe.Sizeof(status))
-	if ret, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&status))); ret != 0 {
+	// status is written by the kernel, and LazyProc.Call is an ordinary Go
+	// function: the argument-list rule that pins an unsafe.Pointer for the
+	// duration of a call applies only to calls made directly to an assembly
+	// implementation. Without KeepAlive the collector may reclaim status while
+	// GlobalMemoryStatusEx is writing into it. See the same note in
+	// group_windows.go and ports_windows.go.
+	ret, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&status))) //nolint:gosec // G103: LazyProc.Call takes ...uintptr; the MEMORYSTATUSEX out-parameter has no other form
+	runtime.KeepAlive(&status)
+	if ret != 0 {
 		res.MemoryTotalBytes = status.TotalPhys
 		res.MemoryAvailableBytes = status.AvailPhys
 	}

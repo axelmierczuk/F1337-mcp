@@ -286,6 +286,36 @@ func TestProcessGroup_SignalAfterExit(t *testing.T) {
 	require.ErrorIs(t, err, platform.ErrProcessNotFound)
 }
 
+// TestProcessGroup_UnisolatedSignalReportsTheLeader states the cross-platform
+// rule the Windows implementation was corrected to match: when the group
+// mechanism did not take, the leader is the only thing that was ever acted on,
+// so the leader's answer is the caller's.
+//
+// Unix gets this for free, because an unisolated group signals a bare pid and
+// kill(2)'s errno is passed straight back. Windows did not: its job object
+// terminates successfully whether or not anything is inside it, so a group
+// whose Adopt failed reported a live, unreached process as killed. Pinning the
+// rule here as well as there keeps the two from drifting apart again, on the
+// two runners where it is cheapest to check.
+func TestProcessGroup_UnisolatedSignalReportsTheLeader(t *testing.T) {
+	t.Parallel()
+
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+	defer group.Close()
+
+	// ConfigureCommand deliberately not called, so the child never leaves the
+	// test binary's own group and Adopt leaves Isolated false.
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	require.NoError(t, cmd.Start())
+	require.NoError(t, group.Adopt(cmd.Process))
+	require.False(t, group.Isolated())
+	require.NoError(t, cmd.Wait())
+
+	require.ErrorIs(t, group.Signal(platform.SignalTerm), platform.ErrProcessNotFound,
+		"the leader is gone and nothing else was ever in this group, so this must not read as success")
+}
+
 func TestProcessGroup_SignalBeforeAdopt(t *testing.T) {
 	t.Parallel()
 

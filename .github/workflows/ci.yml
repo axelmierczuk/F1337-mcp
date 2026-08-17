@@ -65,9 +65,28 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Once per target OS, not once for the host. Linting only GOOS=linux
+      # leaves every _windows.go and _darwin.go file unlinted, which is how a
+      # gosec finding inside a _linux.go file reached a green local run and a
+      # red CI once already. The test matrix covers `go vet` on all three
+      # runners; only the linters were host-only, and cross-linting needs no
+      # runner of that OS. Kept as three steps in one job rather than a matrix
+      # so the required check stays named "Lint".
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.6.2
+        env:
+          GOOS: linux
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.6.2
+        env:
+          GOOS: darwin
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.6.2
+        env:
+          GOOS: windows
 
   cross-compile:
     name: Cross-compile agent

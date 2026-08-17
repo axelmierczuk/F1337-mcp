@@ -101,10 +101,18 @@ build-agent-all:
 test:
 	go test -race -count=1 ./...
 
-## lint: run golangci-lint
+# A host-only lint cannot see another platform's build-tagged files, and this
+# repo has shipped two green-locally, red-in-CI pushes that way: a gosec finding
+# inside a _linux.go file, and a test that did not compile on Windows. CI's test
+# matrix already runs `go vet` on all three runners; the linters only ever saw
+# the host. Loop here so the gap closes before the push rather than after it.
+## lint: run golangci-lint for every target OS
 .PHONY: lint
 lint:
-	$(TOOLS_DIR)/golangci-lint run
+	@for os in linux darwin windows; do \
+		echo "  linting GOOS=$$os"; \
+		GOOS=$$os $(TOOLS_DIR)/golangci-lint run || exit 1; \
+	done
 
 ## fmt: format Go sources and proto definitions
 .PHONY: fmt

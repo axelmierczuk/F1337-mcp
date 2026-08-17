@@ -3,6 +3,16 @@ version: "2"
 run:
   timeout: 5m
 
+# Report every finding. The defaults cap a linter at 50 issues and, worse, cap
+# repeated issues with the same text at 3 — which silently truncated the G103
+# unsafe findings in the Win32 interop to three of the six that exist, and hid
+# the two sites that were genuinely missing a runtime.KeepAlive. A lint list
+# that quietly stops short is worse than a long one, because it is read as
+# complete.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
 linters:
   enable:
     - errcheck
