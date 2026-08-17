@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"gopkg.in/yaml.v3"
 
 	sandboxdv1 "github.com/axelmierczuk/sandboxd-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/sandboxd-mcp/internal/agent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/cli/sandboxdagent"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/registry"
 	"github.com/axelmierczuk/sandboxd-mcp/internal/security/ca"
@@ -122,15 +122,18 @@ func TestEnroll_FullLoop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, cp.ca.CertPEM(), caPEM)
 
-	// The config the daemon will read points at all three.
-	var cfg sandboxdagent.Config
-	cfgData, err := os.ReadFile(filepath.Join(agentDir, "agent.yaml"))
+	// The config the daemon will read points at all three, and loads through
+	// the same path the daemon loads it by.
+	cfg, err := agent.Load(filepath.Join(agentDir, "agent.yaml"))
 	require.NoError(t, err)
-	require.NoError(t, yaml.Unmarshal(cfgData, &cfg))
 	assert.Equal(t, "build-box", cfg.Name)
-	assert.FileExists(t, cfg.CertFile)
-	assert.FileExists(t, cfg.KeyFile)
-	assert.FileExists(t, cfg.CAFile)
+	assert.FileExists(t, cfg.TLS.Certificate)
+	assert.FileExists(t, cfg.TLS.PrivateKey)
+	assert.FileExists(t, cfg.TLS.CABundle)
+	// The OU the agent will demand of clients is the one the CA stamps on a
+	// control leaf. If enroll wrote anything else, every control plane in the
+	// fleet would be rejected at the handshake.
+	assert.Equal(t, "sandboxd-control", cfg.TLS.RequireClientOU)
 
 	// And the control plane recorded the host, including what it reported
 	// about itself.
