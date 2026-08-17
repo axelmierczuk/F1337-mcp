@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"syscall"
 	"testing"
 	"time"
 
@@ -191,33 +190,9 @@ func TestServe_StartsServesAndStopsCleanly(t *testing.T) {
 	}
 }
 
-// The same thing driven by a real SIGTERM, which is what systemd and launchd
-// actually send.
-//
-// Sending a signal to the test process is safe only while serve's handler is
-// installed, so the test waits for the daemon to be serving first and for it
-// to exit afterwards.
-func TestServe_ShutsDownOnSIGTERM(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows has no SIGTERM; the service manager stops the process through the SCM")
-	}
-	ea := newEnrolledAgent(t, t.TempDir())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	codes, out := runServe(ctx, t, "serve", "--config", ea.configPath)
-
-	waitServing(t, ea)
-
-	require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
-
-	select {
-	case code := <-codes:
-		assert.Equal(t, 0, code, out.String())
-	case <-time.After(20 * time.Second):
-		t.Fatal("serve did not exit on SIGTERM")
-	}
-}
+// The same thing driven by a real SIGTERM lives in serve_signal_unix_test.go:
+// syscall.Kill does not exist on Windows, so it has to be excluded at build
+// time rather than skipped at run time.
 
 // An exec-disabled agent with an empty allowed_roots is refused, and the
 // refusal names the override rather than leaving the operator to guess.

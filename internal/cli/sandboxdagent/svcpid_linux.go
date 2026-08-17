@@ -6,13 +6,22 @@ import (
 	"strings"
 )
 
+// systemdUnitName is the unit this binary asks systemd about.
+//
+// It is a constant rather than a parameter because there is exactly one unit
+// this command can legitimately query: its own. Taking a name would mean the
+// argv handed to systemctl depended on something a caller chose, and the only
+// honest way to keep that safe would be to validate it back down to this. The
+// constant is the constraint, expressed where it cannot drift.
+const systemdUnitName = ServiceName + ".service"
+
 // servicePID asks systemd for the unit's main PID.
 //
 // kardianos/service reports only running or stopped, so the PID comes from the
 // service manager directly. A zero MainPID means systemd knows the unit but is
 // not running it.
-func servicePID(name string) (int, bool) {
-	out, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", name+".service").Output()
+func servicePID() (int, bool) {
+	out, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", systemdUnitName).Output()
 	if err != nil {
 		return 0, false
 	}

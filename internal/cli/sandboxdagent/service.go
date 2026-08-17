@@ -296,7 +296,7 @@ func runServiceStatus(out io.Writer) error {
 	p.Printf("service %s: %s\n", ServiceName, describeStatus(status))
 	p.Printf("platform:   %s\n", service.Platform())
 	if status == service.StatusRunning {
-		if pid, ok := servicePID(ServiceName); ok {
+		if pid, ok := servicePID(); ok {
 			p.Printf("pid:        %d\n", pid)
 		} else {
 			p.Println("pid:        unavailable")

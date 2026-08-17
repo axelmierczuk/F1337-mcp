@@ -9,9 +9,11 @@ import (
 // servicePID reads the job's PID from launchctl.
 //
 // `launchctl list <label>` prints a plist-ish block whose PID key is present
-// only while the job is running.
-func servicePID(name string) (int, bool) {
-	out, err := exec.Command("launchctl", "list", name).Output()
+// only while the job is running. The label is the package constant, not a
+// parameter: there is one job this command may ask about, and that is the one
+// it registered.
+func servicePID() (int, bool) {
+	out, err := exec.Command("launchctl", "list", ServiceName).Output()
 	if err != nil {
 		return 0, false
 	}

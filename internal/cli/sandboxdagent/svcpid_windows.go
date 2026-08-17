@@ -5,14 +5,14 @@ import (
 )
 
 // servicePID queries the SCM for the service's process ID.
-func servicePID(name string) (int, bool) {
+func servicePID() (int, bool) {
 	m, err := mgr.Connect()
 	if err != nil {
 		return 0, false
 	}
 	defer func() { _ = m.Disconnect() }()
 
-	s, err := m.OpenService(name)
+	s, err := m.OpenService(ServiceName)
 	if err != nil {
 		return 0, false
 	}
