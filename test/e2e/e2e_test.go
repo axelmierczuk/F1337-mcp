@@ -1,0 +1,225 @@
+//go:build integration
+
+// Package e2e runs the product end to end.
+//
+// Every other test in this repository stops at a seam: the agent's services are
+// exercised over bufconn, the MCP tools against fake clients, the CA against a
+// signed leaf nobody ever handshakes with. This package starts the real
+// binaries — `fleetctl`, two `fleet-agent` daemons on different ports, and
+// `fleet-mcp` driven over stdio JSON-RPC exactly as an agent CLI drives it —
+// and asserts on what a client sees.
+//
+// # What it needs
+//
+// A Go toolchain and a loopback interface. Nothing else: no Docker, no root,
+// no network. The suite builds the three binaries once per run into a
+// temporary directory and enrolls every sandbox against a CA it creates and
+// throws away.
+//
+// The one exception is [TestExecTimeoutKillsTheWholeProcessTreeInContainer],
+// which re-runs one scenario inside a Linux container so that "nothing
+// survived" can be asserted against a whole PID namespace rather than against a
+// process group. It skips unless FLEET_E2E_DOCKER=1. See README.md.
+//
+// # Assertions
+//
+// On recorded facts and observable state, never on how long something took.
+// Two tests in internal/agent/process were rewritten because they timed
+// wall-clock gaps that bracketed a process teardown; the same mistake here,
+// where every assertion crosses three processes and a TLS handshake, would
+// produce a suite nobody trusts. [waitFor] polls for a condition with a
+// generous deadline and reports what it last saw; nothing sleeps a fixed
+// duration and then asserts.
+package e2e
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+)
+
+// bins are the three binaries under test, built once by TestMain.
+var bins binaries
+
+// binaries locates the built commands.
+type binaries struct {
+	dir      string
+	agent    string
+	mcp      string
+	fleetctl string
+	// helpers is the workload the scenarios run on a sandbox: a dev server, a
+	// process that keeps talking, a process tree. See testdata/helpers.
+	helpers string
+}
+
+// repoRoot is the module root, found by walking up from the test's working
+// directory until go.mod appears.
+var repoRoot string
+
+func TestMain(m *testing.M) {
+	code, err := runMain(m)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e:", err)
+		os.Exit(1)
+	}
+	os.Exit(code)
+}
+
+// runMain does TestMain's work with errors instead of exits, so the temporary
+// build directory is removed on every path out.
+func runMain(m *testing.M) (int, error) {
+	root, err := findRepoRoot()
+	if err != nil {
+		return 0, err
+	}
+	repoRoot = root
+
+	dir, err := os.MkdirTemp("", "fleet-e2e-bin")
+	if err != nil {
+		return 0, fmt.Errorf("create build directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	if bins, err = buildBinaries(dir); err != nil {
+		return 0, err
+	}
+	return m.Run(), nil
+}
+
+// buildBinaries compiles the three commands into dir.
+//
+// The binaries are built rather than run through `go run` so that a test can
+// start, kill and restart a daemon without a compile step in the middle of the
+// scenario it is measuring — and so that the pid the test holds is the agent's
+// own, not a `go run` wrapper that would swallow the signal.
+func buildBinaries(dir string) (binaries, error) {
+	targets := []string{"./cmd/...", "./test/e2e/testdata/helpers"}
+	for _, target := range targets {
+		cmd := exec.Command("go", "build", "-o", dir+string(os.PathSeparator), target)
+		cmd.Dir = repoRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return binaries{}, fmt.Errorf("build %s: %w\n%s", target, err, out)
+		}
+	}
+	b := binaries{
+		dir:      dir,
+		agent:    filepath.Join(dir, exeName("fleet-agent")),
+		mcp:      filepath.Join(dir, exeName("fleet-mcp")),
+		fleetctl: filepath.Join(dir, exeName("fleetctl")),
+		helpers:  filepath.Join(dir, exeName("helpers")),
+	}
+	for _, path := range []string{b.agent, b.mcp, b.fleetctl, b.helpers} {
+		if _, err := os.Stat(path); err != nil {
+			return binaries{}, fmt.Errorf("built binary missing: %w", err)
+		}
+	}
+	return b, nil
+}
+
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+func findRepoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no go.mod above %s", dir)
+		}
+		dir = parent
+	}
+}
+
+// requireSupportedHost skips every scenario on a platform the suite cannot
+// drive yet.
+//
+// The workloads the scenarios run on a sandbox are POSIX: `sh -c`, `cat`,
+// `true`, and a process tree whose members are killed by group. A Windows agent
+// is a supported target of the product and is covered by the unit tests on the
+// CI matrix — internal/platform's job objects, signals and path handling all
+// have Windows tests — but nothing here has been written to drive one, and a
+// suite that half-skipped its way through Windows would report a coverage it
+// does not have. See README.md.
+func requireSupportedHost(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the end-to-end suite drives sandbox workloads with POSIX commands; a Windows sandbox needs its own scenarios (see test/e2e/README.md)")
+	}
+}
+
+// waitFor polls until cond reports true, and fails the test with the last
+// detail cond returned if the deadline passes first.
+//
+// Every wait in this package goes through here. The rule the suite follows is
+// that an assertion may depend on a fact being *eventually* observable, and may
+// never depend on when: a scenario that crosses three processes, a TLS
+// handshake and a filesystem has no meaningful upper bound on any single step,
+// and a test that asserts one produces a failure that says nothing about the
+// product.
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() (bool, string)) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	var detail string
+	for {
+		ok, d := cond()
+		if ok {
+			return
+		}
+		detail = d
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s: %s", timeout, what, detail)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// freePort returns a loopback port nothing is listening on.
+//
+// It closes the listener before returning, so the port is only probably still
+// free — the usual race, and unavoidable for a daemon that takes its address
+// from a config file written before it starts. Callers pass the port to a
+// process that binds it immediately and then wait for the bind to be
+// observable, so the race closes in the one place it could matter.
+func freePort(t *testing.T) int {
+	t.Helper()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a loopback port: %v", err)
+	}
+	port := lis.Addr().(*net.TCPAddr).Port
+	if err := lis.Close(); err != nil {
+		t.Fatalf("release the reserved port: %v", err)
+	}
+	return port
+}
+
+// dialable reports whether something is accepting TCP connections at addr.
+func dialable(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// contains is strings.Contains, named for how the assertions read.
+func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
