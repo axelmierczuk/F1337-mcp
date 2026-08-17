@@ -211,6 +211,14 @@ Stop and start again from the same spec, optionally waiting for readiness.
 Returns line-numbered content plus metadata. Binary files are detected and
 reported rather than mangled into text.
 
+`total_lines` is exact only when `total_lines_exact` is set. Counting lines
+means reading every byte, so the agent stops at a size bound rather than reading
+a gigabyte to answer a windowed read; past that bound the number reports how far
+the count got. Do not render "line 40 of N" without checking the flag.
+
+Line endings are never rewritten. A CRLF file reads back with its CRLF intact,
+on every platform.
+
 ### `sandbox_write`
 | Argument | Type | Notes |
 | --- | --- | --- |
@@ -235,17 +243,32 @@ With `replace_all` false, the edit **fails unless `old_string` matches exactly
 once**. This mirrors the contract of the agent's built-in edit tool, which is
 what makes the remote version feel native — and the uniqueness requirement is
 what stops an ambiguous match from quietly editing the wrong line. Returns a
-unified diff.
+unified diff, trimmed to a few lines of context around each change.
+
+Line endings are preserved. A `new_string` whose endings disagree with the
+file's is refused rather than mixed in, and an `old_string` that fails to match
+only because of them says so.
 
 ### `sandbox_ls`
 `path`, `recursive`, `include_hidden`, `limit`.
 
 ### `sandbox_glob`
-`pattern` (e.g. `**/*.go`), `root`, `limit`, `respect_gitignore`.
+`pattern` (e.g. `**/*.go`), `root`, `limit`, `respect_gitignore`,
+`include_default_ignored`.
+
+The pattern is anchored at `root`: `*.go` does not recurse and `**/*.go` does.
+Results are files, sorted by modification time, newest first. `.git`,
+`node_modules`, `vendor` and `target` are skipped unless
+`include_default_ignored` is set.
 
 ### `sandbox_grep`
 `pattern` (RE2), `root`, `include_glob`, `case_insensitive`, `context_lines`,
-`max_matches`, `files_only`, `respect_gitignore`.
+`max_matches`, `files_only`, `respect_gitignore`, `include_default_ignored`.
+
+`include_glob` uses gitignore semantics rather than the anchored ones of
+`sandbox_glob`: `*.go` matches at any depth. `max_matches` stops the walk rather
+than truncating a finished search, so the summary's `files_searched` reports how
+little of the tree was read.
 
 Executed on the agent, so searching a large tree does not stream the tree across
 the network first.
