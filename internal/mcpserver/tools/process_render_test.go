@@ -149,6 +149,46 @@ func TestProcessLine_BoundsTheProcessName(t *testing.T) {
 	assert.Equal(t, 2, rows, "one row per process: %q", table)
 }
 
+// The adoption note is the supervisor's whole explanation of why a process the
+// caller started is now ORPHANED, and the longest note it writes is the one
+// that matters most. Bounding it at the last-log-line width cut that note
+// mid-clause, dropping "the pid will not be signalled" — the half that says
+// what the agent did about it. The structured field carries the sentence; the
+// table cell is still a cell.
+func TestProcessLine_KeepsTheWholeAdoptionNote(t *testing.T) {
+	now := time.Now()
+	note := "pid 44213 was reused by another process (start identity linux:8123456:44213, " +
+		"expected linux:7987654:44213), so this record was not re-adopted and the pid will not be signalled"
+	require.Greater(t, len(note), maxLastLogLine, "the note this test is about must be longer than a log-line cell")
+
+	line := processLine(&sandboxdv1.ProcessStatus{
+		Name:         "impostor",
+		State:        sandboxdv1.ProcessState_PROCESS_STATE_ORPHANED,
+		AdoptionNote: note,
+	}, now)
+
+	assert.Equal(t, note, line.AdoptionNote, "the explanation must arrive whole")
+	assert.NotContains(t, line.AdoptionNote, "…")
+
+	// The table borrows the last column for it when there is no output yet, and
+	// there it is a cell like any other: bounded, and one line.
+	table := renderProcessTable([]ProcessLine{line})
+	for _, l := range strings.Split(strings.TrimSpace(table), "\n") {
+		assert.LessOrEqual(t, len(l), 240, "a table row grew to fit the note: %q", l)
+	}
+	assert.Contains(t, table, "…", "the cell is clipped even though the field is not")
+
+	// A note long enough to be a paragraph is still bounded: nothing on the far
+	// side gets to size this result.
+	long := processLine(&sandboxdv1.ProcessStatus{
+		Name:         "verbose",
+		State:        sandboxdv1.ProcessState_PROCESS_STATE_ORPHANED,
+		AdoptionNote: strings.Repeat("z", 4000) + "\nsecond line",
+	}, now)
+	assert.LessOrEqual(t, len(long.AdoptionNote), maxAdoptionNote+4)
+	assert.NotContains(t, long.AdoptionNote, "\n", "a newline in the note would break the row that shows it")
+}
+
 // A row whose last column is empty must not carry the previous column's
 // padding. That is every row of a listing taken just after a fleet of services
 // was started, which is when a listing is most often taken.
