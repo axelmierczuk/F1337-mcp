@@ -513,6 +513,15 @@ func (s *Supervisor) spawn(r *record, fresh bool) error {
 	dir := r.dir
 	r.mu.Unlock()
 
+	// Where this run's output starts, taken before the run exists.
+	//
+	// The previous run's lines are all in the buffer by now: the monitor drains
+	// its tailers before it records the exit, and every path to a respawn goes
+	// through that exit. So this is the exact boundary between the two runs, and
+	// it is what stops a readiness probe crediting this run with the last one's
+	// announcement. See record.runFirstSeq.
+	firstSeq := r.buf.nextSequence()
+
 	name, args, err := commandLine(argv, shell)
 	if err != nil {
 		return err
@@ -611,6 +620,7 @@ func (s *Supervisor) spawn(r *record, fresh bool) error {
 	r.exited = exited
 	r.pid = cmd.Process.Pid
 	r.startID = startID
+	r.runFirstSeq = firstSeq
 	r.startedAt = now
 	r.stability = now
 	r.exitedAt = time.Time{}
@@ -640,7 +650,13 @@ func (s *Supervisor) spawn(r *record, fresh bool) error {
 	// The probe runs on the supervisor's goroutine and against the supervisor's
 	// context, whether or not anybody is waiting for it. wait_for_ready is only
 	// about whether StartProcess blocks.
-	run := &probeRun{done: make(chan struct{})}
+	s.startProbe(r, probe, firstSeq)
+	return nil
+}
+
+// startProbe attaches a readiness attempt to the record and runs it.
+func (s *Supervisor) startProbe(r *record, probe *probeSpec, fromSeq uint64) {
+	run := &probeRun{done: make(chan struct{}), fromSeq: fromSeq}
 	r.mu.Lock()
 	r.probeRun = run
 	r.mu.Unlock()
@@ -650,20 +666,26 @@ func (s *Supervisor) spawn(r *record, fresh bool) error {
 		defer s.wg.Done()
 		s.superviseProbe(r, probe, run)
 	}()
-	return nil
 }
 
 // probeRun is one readiness attempt, so that a caller waiting on it and the
 // supervisor running it are not the same goroutine.
+//
+// fromSeq is carried on the attempt rather than read off the record when the
+// probe needs it. An attempt is bound to the run it was started for, and a
+// probe that read the record instead could — in the window between a run ending
+// and the next one spawning — find itself scanning against the *next* run's
+// boundary and conclude something about a run that is already over.
 type probeRun struct {
-	done chan struct{}
-	err  error
+	done    chan struct{}
+	err     error
+	fromSeq uint64
 }
 
 // superviseProbe runs a probe to its conclusion and applies it to the state
 // machine.
 func (s *Supervisor) superviseProbe(r *record, probe *probeSpec, run *probeRun) {
-	err := probe.run(s.ctx, r, s.cfg.httpProbeTimeout, s.cfg.dialTimeout)
+	err := probe.run(s.ctx, r, run.fromSeq, s.cfg.httpProbeTimeout, s.cfg.dialTimeout)
 	run.err = err
 	defer close(run.done)
 

@@ -86,6 +86,7 @@ func (s *Supervisor) adopt(p persisted) error {
 	r.maxLogBytes = maxLogBytes
 	r.pid = p.PID
 	r.startID = p.StartID
+	r.runFirstSeq = p.RunFirstSeq
 	r.startedAt = p.StartedAt
 	r.exitedAt = p.ExitedAt
 	r.exitCode = p.ExitCode
@@ -182,8 +183,39 @@ func (s *Supervisor) adopt(p persisted) error {
 			s.watchAdopted(r, exited)
 		}()
 	}
+	s.resumeProbe(r)
 	r.persist()
 	return nil
+}
+
+// resumeProbe restarts the readiness probe of a re-adopted process that was
+// still being probed when the previous agent went away.
+//
+// STARTING is the state that says so: a process with a probe stays there until
+// the probe passes, and a record found in it describes a run whose readiness
+// nobody ever decided. Without this the decision is never made — the process
+// stays STARTING for the rest of its life, and a caller that waits for READY
+// waits forever for a server that has been serving since before the agent
+// restarted.
+//
+// This is the one place the pre-scan is the *only* possible source of evidence.
+// The process announced itself to the previous agent and will not announce
+// itself again, so the retained history is where that announcement is, and a
+// probe that ignored it would be watching for a line that has already been
+// printed. Bounding the scan to runFirstSeq is what keeps that from re-opening
+// #57 from the other side: the history also holds the runs before this one, and
+// their announcements are no more this run's evidence here than they are after
+// a restart.
+func (s *Supervisor) resumeProbe(r *record) {
+	r.mu.Lock()
+	probe, state, fromSeq := r.probe, r.state, r.runFirstSeq
+	r.mu.Unlock()
+	if probe == nil || state != sandboxdv1.ProcessState_PROCESS_STATE_STARTING {
+		return
+	}
+	s.log.Info("resuming a readiness probe that outlived the agent that started it",
+		"process_id", r.id, "name", r.nameOf(), "probe", probe.describe())
+	s.startProbe(r, probe, fromSeq)
 }
 
 // adoptionDecision applies the two-fact test and explains itself.

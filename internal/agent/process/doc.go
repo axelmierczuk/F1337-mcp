@@ -23,7 +23,9 @@
 //     followers. A readiness probe is one of those followers, which is what
 //     lets a log_pattern probe watch the stream without draining it.
 //   - logs.go serves GetProcessLogs. Every follow has a deadline, always.
-//   - probe.go decides when "spawned" has become "usable".
+//   - probe.go decides when "spawned" has become "usable". Per run, not per
+//     process: the log buffer outlives a restart, so each run records where its
+//     own output starts and a probe is bounded to it.
 //   - signal.go delivers signals to the process group, re-validating the pid
 //     against its recorded start identity every time.
 //   - store.go and adopt.go persist records atomically and work out, on

@@ -90,6 +90,136 @@ func TestReadoptionAcrossAnAgentRestart(t *testing.T) {
 	waitFor(t, 10*time.Second, "the re-adopted process to stop", func() bool { return !pidAlive(pid) })
 }
 
+// TestAReadoptedProcessIsReadyOnTheAnnouncementItAlreadyMade is the case that
+// stops #57 being fixed by simply deleting the pre-scan.
+//
+// A process that was still being probed when its agent went away announced
+// itself to that agent. It is not going to announce itself again — a dev server
+// says "listening on 3000" once — so the retained history is the only place
+// that evidence can be, and a probe that watched only for new output would
+// leave a serving process STARTING forever.
+//
+// Nothing here is timed. The helper stays silent until the test creates a file,
+// so the probe's first attempt cannot race the announcement: it has to time
+// out, which is what leaves the record in the state a re-adoption then has to
+// resolve.
+func TestAReadoptedProcessIsReadyOnTheAnnouncementItAlreadyMade(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	probe := testProbe(probeLogPattern, 300*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	marker := filepath.Join(t.TempDir(), "announce-now")
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv:          helperArgv(t, "announce-when", marker, "listening on 3000"),
+		name:          "announced-before-the-restart",
+		env:           helperEnviron(),
+		probe:         probe,
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+
+	id, pid := r.id, int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+
+	// The probe gives up on a process that has not said anything yet, which is
+	// the state a record has to be in for this to be about re-adoption at all.
+	require.IsType(t, &probeTimeoutError{}, first.waitForReady(context.Background(), r))
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_STARTING, r.currentState())
+
+	// Now it announces itself, and this agent captures it and writes it to the
+	// history on disk.
+	require.NoError(t, os.WriteFile(marker, []byte("go"), 0o600))
+	waitForLine(t, r, 20*time.Second, "listening on 3000")
+
+	// The agent goes away. The process does not, and it will never print that
+	// line again.
+	require.NoError(t, first.Close())
+	require.True(t, pidAlive(pid))
+
+	second := newRawSupervisor(t, dir)
+	adopted, ok := second.lookup(id)
+	require.True(t, ok)
+	require.Contains(t, adopted.status().GetAdoptionNote(), "re-adopted")
+
+	waitState(t, adopted, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_READY)
+
+	// And the history is where it read that from, rather than a replay of the
+	// capture file: the announcement is in the re-adopted record's log exactly
+	// once. A resumed capture that re-read bytes the previous agent had already
+	// turned into lines would show it twice, and the probe would then have
+	// passed on new output rather than on the retained line — which is the
+	// claim this scenario would otherwise only appear to make.
+	require.Equal(t, 1, countLines(adopted, "listening on 3000"))
+
+	_, err = second.gracefulStop(adopted, 2*time.Second, true, true)
+	require.NoError(t, err)
+	waitFor(t, 10*time.Second, "the re-adopted process to stop", func() bool { return !pidAlive(pid) })
+}
+
+// TestReadoptionCarriesTheBoundaryBetweenRuns is the other side of the same
+// coin: the pre-scan a re-adoption performs is bounded by the same mark the
+// spawning agent recorded, so the history it reads is searched from the start
+// of *this* run rather than from the start of the file.
+//
+// Without the mark surviving the restart, a re-adopted process would be ready
+// on the announcement of a run that ended before the agent did.
+func TestReadoptionCarriesTheBoundaryBetweenRuns(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	probe := testProbe(probeLogPattern, 300*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	marker := filepath.Join(t.TempDir(), "announced")
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv:           helperArgv(t, "announce-once", marker, "listening on 3000"),
+		name:           "announces-once",
+		env:            helperEnviron(),
+		probe:          probe,
+		restartPolicy:  sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		restartBackoff: 20 * time.Millisecond,
+		maxLogBytes:    1 << 18,
+	}, false)
+	require.NoError(t, err)
+	require.NoError(t, first.waitForReady(context.Background(), r))
+
+	// A second run of the same process, which stays quiet. Its record is
+	// persisted as STARTING with the first run's announcement in the history
+	// beside it.
+	require.NoError(t, first.restart(r, time.Second))
+	id, pid := r.id, int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+	require.IsType(t, &probeTimeoutError{}, first.waitForReady(context.Background(), r))
+	waitForLine(t, r, 20*time.Second, "restarted without announcing")
+
+	require.NoError(t, first.Close())
+	require.True(t, pidAlive(pid))
+
+	second := newRawSupervisor(t, dir)
+	adopted, ok := second.lookup(id)
+	require.True(t, ok)
+	require.Contains(t, adopted.status().GetAdoptionNote(), "re-adopted")
+	require.Equal(t, 1, countLines(adopted, "listening on 3000"),
+		"the first run's announcement has to be in the restored history, or this proves nothing")
+
+	// The resumed probe reads that history and must not take the first run's
+	// announcement for this run's. It has nothing else to find, so it times out
+	// and the process stays STARTING.
+	require.IsType(t, &probeTimeoutError{}, second.waitForReady(context.Background(), adopted))
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_STARTING, adopted.currentState())
+
+	_, err = second.gracefulStop(adopted, 2*time.Second, true, true)
+	require.NoError(t, err)
+	waitFor(t, 10*time.Second, "the re-adopted process to stop", func() bool { return !pidAlive(pid) })
+}
+
 // lastTick is the highest "tick N" index captured so far.
 func lastTick(t *testing.T, r *record) int {
 	t.Helper()

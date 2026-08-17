@@ -232,22 +232,41 @@ func (e *probeTimeoutError) Error() string {
 // run blocks until the probe passes, the process exits, the timeout elapses, or
 // ctx is cancelled.
 //
+// fromSeq is the log sequence at which the run being probed begins. Everything
+// below it belongs to some earlier run of the same process and is not evidence
+// about this one; see the pre-scan below and record.runFirstSeq.
+//
 // ctx here is the caller's, not the supervisor's: a StartProcess whose client
 // disconnects stops waiting. It never stops the process, and the probe keeps
 // running on the supervisor's own goroutine — see supervisor.superviseProbe.
-func (p *probeSpec) run(ctx context.Context, r *record, httpTimeout, dialTimeout time.Duration) error {
+func (p *probeSpec) run(ctx context.Context, r *record, fromSeq uint64, httpTimeout, dialTimeout time.Duration) error {
 	started := time.Now()
 
 	// The subscription is taken before the first attempt, and it carries the
 	// lines already buffered. Subscribing after reading the buffer would leave
 	// a gap exactly wide enough to miss the "listening on :3000" that a fast
 	// process prints before the probe is set up.
+	//
+	// The pre-scan is bounded to this run because the buffer is not. A restart
+	// keeps the process's whole log history — that is what makes the output of
+	// the run that died readable afterwards — so an unbounded pre-scan matches
+	// the *previous* run's announcement and reports READY before the new run
+	// has printed a byte (#57). Under restart_policy: always that made
+	// readiness a latch: once satisfied, satisfied for every automatic restart
+	// of a service that was crash-looping.
+	//
+	// Only the pre-scan needs the bound. Everything arriving on the
+	// subscription was appended after the snapshot, which is after the mark,
+	// so it is this run's by construction.
 	var subCh <-chan delivery
 	if p.kind == probeLogPattern {
 		existing, sub := r.buf.snapshot()
 		defer r.buf.unsubscribe(sub)
 		for _, line := range existing {
-			if p.pattern.MatchString(line.Text) {
+			if line.Seq < fromSeq {
+				continue
+			}
+			if p.matches(line) {
 				return nil
 			}
 		}
@@ -284,13 +303,30 @@ func (p *probeSpec) run(ctx context.Context, r *record, httpTimeout, dialTimeout
 				// The buffer closed: the record is being removed.
 				return fmt.Errorf("readiness probe (%s) stopped: the process record was removed", p.describe())
 			}
-			if p.pattern.MatchString(d.line.Text) {
+			if p.matches(d.line) {
 				return nil
 			}
 		case <-ticker.C:
 		case <-changed:
 		}
 	}
+}
+
+// matches reports whether a captured line is the announcement the probe is
+// waiting for.
+//
+// Only what the process itself said counts. The supervisor writes its own
+// decisions into the same log — restarts, backoff, giving up — tagged as
+// neither stdout nor stderr, and log_pattern is documented as matching a line
+// on stdout or stderr. Left in, they are not merely off-contract: the note the
+// supervisor writes when a probe gives up quotes the pattern that gave up, so a
+// probe resumed on that process afterwards would find its own failure in the
+// history and read it as success.
+func (p *probeSpec) matches(line logLine) bool {
+	if line.Stream == sandboxdv1.Stream_STREAM_UNSPECIFIED {
+		return false
+	}
+	return p.pattern.MatchString(line.Text)
 }
 
 // probeExit builds the error for a process that died mid-probe.

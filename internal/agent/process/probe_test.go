@@ -2,8 +2,10 @@ package process
 
 import (
 	"context"
+	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +76,134 @@ func TestLogPatternProbeDoesNotConsumeTheLog(t *testing.T) {
 	require.NoError(t, ts.streamLogs(context.Background(), r, logRequest{sel: selector{tail: 100}}, stream))
 	require.Contains(t, stream.texts(), "ready to serve",
 		"the line the probe matched on must still be readable")
+}
+
+// TestLogPatternProbeIgnoresTheRunBeforeThisOne is #57 at the seam it happens.
+//
+// A restart keeps the process's log buffer — that is what makes the output of
+// the run that died readable afterwards — so the pre-scan is looking at the
+// previous run's lines as well as this run's. It must credit only this run's.
+//
+// Nothing here waits on a duration. The helper announces once per marker file,
+// so the second run cannot print the pattern however long anyone watches, and
+// the probe's own verdict is the recorded fact the assertions are on.
+func TestLogPatternProbeIgnoresTheRunBeforeThisOne(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t)
+
+	probe := testProbe(probeLogPattern, 300*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	marker := filepath.Join(t.TempDir(), "announced")
+	r, err := ts.startProbed("announces-once", probe, "announce-once", marker, "listening on 3000")
+	require.NoError(t, err, "the first run announces itself and is ready")
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_READY, r.currentState())
+
+	require.NoError(t, ts.restart(r, time.Second))
+	err = ts.waitForReady(context.Background(), r)
+
+	require.Error(t, err, "the restarted run never printed the pattern, so its probe cannot have passed")
+	require.IsType(t, &probeTimeoutError{}, err)
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_STARTING, r.currentState(),
+		"a process whose probe has not passed is STARTING, not READY")
+
+	// The restarted run is alive and talking; it is only the announcement it
+	// does not repeat. Without this the test would also pass against a probe
+	// that had somehow lost the process.
+	waitForLine(t, r, 10*time.Second, "restarted without announcing")
+	require.Equal(t, 1, countLines(r, "listening on 3000"),
+		"the helper announces once per marker file; more than one would mean the scenario, not the product, is wrong")
+}
+
+// TestARestartedProcessIsReadyOnItsOwnOutput is the other half. Bounding the
+// pre-scan must not cost a restart its readiness: a process that announces
+// itself on every run is ready again on every run.
+func TestARestartedProcessIsReadyOnItsOwnOutput(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t)
+
+	probe := testProbe(probeLogPattern, 10*time.Second)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	r, err := ts.startProbed("announces-always", probe, "announce", "50", "stdout", "listening on 3000")
+	require.NoError(t, err)
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_READY, r.currentState())
+
+	require.NoError(t, ts.restart(r, time.Second))
+	require.NoError(t, ts.waitForReady(context.Background(), r))
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_READY, r.currentState())
+
+	// And it is the second run's own announcement it passed on, not the first's:
+	// there are two of them in the log by the time it is ready again.
+	require.Equal(t, 2, countLines(r, "listening on 3000"))
+}
+
+// TestTheProbePreScanIsBoundedAtTheMarkAndNotBefore pins the boundary itself,
+// without a process in the way.
+//
+// The two halves are one line apart: the same text, matched or ignored
+// according to which side of the mark it was appended on. A pre-scan that
+// ignored everything — the shape a fix that simply deleted it would have — is
+// as red here as one that ignored nothing.
+func TestTheProbePreScanIsBoundedAtTheMarkAndNotBefore(t *testing.T) {
+	t.Parallel()
+
+	probe := testProbe(probeLogPattern, 200*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	buf := newLogBuffer(50, nil)
+	buf.append(sandboxdv1.Stream_STREAM_STDOUT, "listening on 3000", time.Now(), false)
+	mark := buf.nextSequence()
+	r := &record{buf: buf, changed: make(chan struct{})}
+
+	err := probe.run(context.Background(), r, mark, time.Second, time.Second)
+	require.IsType(t, &probeTimeoutError{}, err,
+		"the only matching line was printed before this run began")
+
+	buf.append(sandboxdv1.Stream_STREAM_STDOUT, "listening on 3000", time.Now(), false)
+	require.NoError(t, probe.run(context.Background(), r, mark, time.Second, time.Second),
+		"the same line, printed by this run, is exactly what the pre-scan is for")
+}
+
+// TestALogPatternProbeDoesNotMatchTheSupervisorsOwnNotes: log_pattern is
+// documented as matching a line on stdout or stderr, and the supervisor's
+// notes are neither.
+//
+// The note that matters most is the one it writes when a probe gives up,
+// because it quotes the pattern that gave up. A probe that read the
+// supervisor's notes would find that line in the history — which is exactly
+// what a probe resumed after an agent restart reads — and take its own failure
+// for the process's announcement.
+func TestALogPatternProbeDoesNotMatchTheSupervisorsOwnNotes(t *testing.T) {
+	t.Parallel()
+
+	probe := testProbe(probeLogPattern, 200*time.Millisecond)
+	probe.patternSrc = `ready`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	buf := newLogBuffer(50, nil)
+	buf.note(`supervisor: readiness probe (log_pattern "ready") did not pass within 30s; the process is still running and its logs are readable`)
+	r := &record{buf: buf, changed: make(chan struct{})}
+
+	require.IsType(t, &probeTimeoutError{}, probe.run(context.Background(), r, 0, time.Second, time.Second),
+		"the supervisor talking about the probe is not the process announcing itself")
+
+	buf.append(sandboxdv1.Stream_STREAM_STDOUT, "ready to serve", time.Now(), false)
+	require.NoError(t, probe.run(context.Background(), r, 0, time.Second, time.Second))
+}
+
+// countLines is how many captured lines contain substr.
+func countLines(r *record, substr string) int {
+	n := 0
+	for _, line := range r.buf.ringLines() {
+		if strings.Contains(line.Text, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 func TestTCPProbeWaitsForSomethingToListen(t *testing.T) {
