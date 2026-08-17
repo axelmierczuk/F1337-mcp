@@ -119,9 +119,10 @@ func TestSocksProxyCarriesCurlThroughTheSandbox(t *testing.T) {
 		return rec["remote_host"] == "nowhere.invalid"
 	}, "the unresolvable name reaching the agent")
 
-	// Stopping the command releases the listener, which is the half a caller
-	// can check: a proxy that reported itself stopped and kept the port would
-	// hold it against the next process to want it.
+	// Stopping the command shuts the proxy down on its own terms rather than by
+	// dying — see socksProxy.stop, which is where that distinction lives. The
+	// released port is checked after it as a corollary: it is what a caller
+	// notices, but on its own it would be the operating system's doing.
 	proxy.stop(t)
 	waitFor(t, 30*time.Second, "the proxy's listener to close", func() (bool, string) {
 		if !dialable(proxy.address) {
@@ -365,7 +366,34 @@ func (f *fleet) startSocks(a *agent, args ...string) *socksProxy {
 	return &socksProxy{proc: p, address: address, banner: p.stdout()}
 }
 
-func (s *socksProxy) stop(t *testing.T) { s.proc.terminate(t) }
+// stop signals the proxy the way a service manager or Ctrl-C does, and
+// requires that it shut itself down rather than merely died.
+//
+// "The listener is gone afterwards" is deliberately *not* the assertion, for
+// the same reason the MCP-server-exit scenario was replaced: a process that
+// exits releases its listeners whether or not any code asked it to, so a check
+// shaped that way reports success for a command whose signal handling does
+// nothing at all. Ripping signal.NotifyContext out of `fleetctl socks` leaves
+// the port free on the next line and this function red — the default
+// disposition for SIGTERM kills the process, and a killed process prints no
+// closing summary and exits non-zero.
+//
+// What only the graceful path produces is that summary: it is written after
+// Serve returns, which needs the signal to have been caught and the listener
+// closed under it.
+func (s *socksProxy) stop(t *testing.T) {
+	t.Helper()
+	s.proc.terminate(t)
+
+	if s.proc.waitErr != nil {
+		t.Fatalf("fleetctl socks exited with %v rather than shutting down on its own terms:\nstdout:\n%s\nstderr:\n%s",
+			s.proc.waitErr, s.proc.stdout(), s.proc.stderr())
+	}
+	if !contains(s.proc.stdout(), "stopped "+s.address) {
+		t.Fatalf("fleetctl socks never reported stopping %s, so its shutdown was the process dying rather than the command closing its listener:\nstdout:\n%s\nstderr:\n%s",
+			s.address, s.proc.stdout(), s.proc.stderr())
+	}
+}
 
 // startDestinationServer runs an HTTP server standing in for something on the
 // sandbox's network, and returns its port.
