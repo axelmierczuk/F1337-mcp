@@ -199,6 +199,17 @@ var echoFixtures = map[string]struct {
 	"sandbox_transfer": {args: map[string]any{
 		"sandbox": "build-box", "direction": "push", "source": "server.go", "destination": "/srv/app/server.go",
 	}, echoes: "build-box", targeted: true},
+
+	"sandbox_process_start": {
+		args:     map[string]any{"sandbox": "build-box", "argv": []any{"npm", "run", "dev"}, "name": "web-dev"},
+		echoes:   "build-box",
+		targeted: true,
+	},
+	"sandbox_process_list":    {args: map[string]any{"sandbox": "build-box"}, echoes: "build-box", targeted: true},
+	"sandbox_process_logs":    {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
+	"sandbox_process_signal":  {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1", "graceful_stop": true}, echoes: "build-box", targeted: true},
+	"sandbox_process_restart": {args: map[string]any{"sandbox": "build-box", "process_id": "proc-1"}, echoes: "build-box", targeted: true},
+	"sandbox_forward":         {args: map[string]any{"sandbox": "build-box", "remote_port": 3000}, echoes: "build-box", targeted: true},
 }
 
 // TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox is the walk the
@@ -210,6 +221,23 @@ func TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox(t *testing.T) {
 	listed, err := newFixture(t, fixtureOptions{}).session.ListTools(t.Context(), &mcp.ListToolsParams{})
 	require.NoError(t, err)
 	require.NotEmpty(t, listed.Tools)
+
+	// The walk is driven from tools/list, which is what makes it cover a tool
+	// the moment it is registered — and is also the one thing it cannot check
+	// about itself. A registration lost to a merge shortens the list, and a
+	// walk over a shorter list passes without ever mentioning what is missing:
+	// two milestones landing side by side each add a registerX line to the same
+	// Register, and a resolution that takes one side wholesale unregisters the
+	// other's tools silently. So the check runs both ways — every listed tool
+	// needs a fixture, and every fixture has to have been listed.
+	listedNames := map[string]bool{}
+	for _, tool := range listed.Tools {
+		listedNames[tool.Name] = true
+	}
+	for name := range echoFixtures {
+		assert.Truef(t, listedNames[name],
+			"%s has a fixture but is not registered: a tool that stopped being registered is a tool this walk would otherwise stop covering without saying so", name)
+	}
 
 	for _, tool := range listed.Tools {
 		fixture, ok := echoFixtures[tool.Name]

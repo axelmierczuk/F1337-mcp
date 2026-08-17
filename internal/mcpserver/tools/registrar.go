@@ -246,6 +246,11 @@ type Registrar struct {
 	server *mcp.Server
 	deps   Deps
 
+	// forwards owns every open port forward. It lives on the Registrar rather
+	// than inside a handler because a forward outlives the call that opened
+	// it: see [Registrar.Close], and forward.go.
+	forwards *forwardManager
+
 	mu            sync.Mutex
 	registrations []Registration
 }
@@ -355,5 +360,7 @@ func Register(server *mcp.Server, deps Deps) *Registrar {
 	registerExec(r)
 	registerFiles(r)
 	registerTransfer(r)
+	registerProcess(r)
+	registerForward(r)
 	return r
 }

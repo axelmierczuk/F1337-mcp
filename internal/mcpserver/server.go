@@ -177,6 +177,11 @@ func New(opts Options) (*Server, error) {
 		ProbeTimeout: opts.ProbeTimeout,
 		CallTimeout:  opts.CallTimeout,
 	})
+	// Some tools own state that outlives the call that created it —
+	// sandbox_forward's local listeners, which is the whole point of a
+	// forward. Released here, so a listener cannot survive the process that
+	// opened it and hold its port against the next one.
+	s.closers = append(s.closers, s.registrar.Close)
 
 	logger.Debug("mcp server ready",
 		"registry", registryPath, "tools", len(s.registrar.Registrations()))
@@ -243,9 +248,17 @@ func (s *Server) Close() error {
 	s.closers = nil
 	s.closeMu.Unlock()
 
+	// In reverse, so what was built last is released first. The client pool is
+	// registered before the tools that use it, and the registrar's own Close
+	// joins the goroutines carrying forwarded connections over the pool's
+	// channels — closing the pool underneath them first would drop every one of
+	// those connections with an RPC error on the way out, and would leave the
+	// forward's listener accepting new ones onto a channel that is already
+	// gone. Releasing in the order things were created is a shutdown that tears
+	// the transport out from under its users.
 	var firstErr error
-	for _, closeFn := range closers {
-		if err := closeFn(); err != nil && firstErr == nil {
+	for i := len(closers) - 1; i >= 0; i-- {
+		if err := closers[i](); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

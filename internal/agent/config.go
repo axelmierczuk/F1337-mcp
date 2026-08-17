@@ -60,6 +60,7 @@ type Config struct {
 
 	Exec    ExecConfig    `yaml:"exec"`
 	Process ProcessConfig `yaml:"process"`
+	Forward ForwardConfig `yaml:"forward"`
 	Audit   AuditConfig   `yaml:"audit"`
 	Log     LogConfig     `yaml:"log"`
 
@@ -150,6 +151,63 @@ type ProcessConfig struct {
 	RingBufferLines    int      `yaml:"ring_buffer_lines"`
 	DefaultGracePeriod Duration `yaml:"default_grace_period"`
 	MaxFollowDuration  Duration `yaml:"max_follow_duration"`
+}
+
+// ForwardConfig bounds the port forwarder (#26).
+//
+// The one setting that matters here is AllowedHosts, and its default of "none"
+// is a security decision rather than a conservative-looking blank. See the
+// field.
+type ForwardConfig struct {
+	// Enabled turns ForwardService on. It defaults to true — forwarding a dev
+	// server's port to the workstation is what closes the remote dev loop —
+	// and an operator who wants the agent to do no networking on a caller's
+	// behalf sets it to false.
+	//
+	// A pointer because the default is true: a plain bool cannot tell
+	// "enabled: false" from a key the operator never wrote.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// AllowedHosts are the non-loopback hosts a forward may target on this
+	// host's network. It is empty by default, and that default is the point.
+	//
+	// A forward to loopback reaches only what this agent's own machine is
+	// serving. A forward to an arbitrary host reaches anything the machine's
+	// network reaches — so an agent with no restriction is a general-purpose
+	// network pivot into whatever it sits in, available to anyone who can call
+	// it. On a fleet spanning a laptop, a home lab and a cloud VPC that is a
+	// genuinely bad default, and it is bad in a way nobody notices until it is
+	// used, because forwarding to loopback works perfectly without it.
+	//
+	// Entries are matched literally against the requested host, case-
+	// insensitively. Anything not listed must resolve entirely to loopback
+	// addresses or the forward is refused.
+	AllowedHosts []string `yaml:"allowed_hosts,omitempty"`
+
+	// MaxConnections bounds the concurrent forwarded connections this agent
+	// will carry. Zero means the default.
+	MaxConnections int `yaml:"max_connections,omitempty"`
+
+	// DialTimeout bounds the connection to the sandbox-side port. Zero means
+	// the default.
+	DialTimeout Duration `yaml:"dial_timeout,omitempty"`
+}
+
+// IsEnabled reports whether ForwardService is on. An unset field means yes.
+func (f ForwardConfig) IsEnabled() bool { return f.Enabled == nil || *f.Enabled }
+
+// HostAllowed reports whether host is on the explicit non-loopback allow list.
+//
+// It answers only that question. A host that is not listed is not thereby
+// refused — it is refused unless it resolves entirely to loopback, which is
+// the caller's check, because it needs a resolver and a context.
+func (f ForwardConfig) HostAllowed(host string) bool {
+	for _, allowed := range f.AllowedHosts {
+		if strings.EqualFold(strings.TrimSpace(allowed), strings.TrimSpace(host)) {
+			return true
+		}
+	}
+	return false
 }
 
 // AuditConfig configures the forensic record written by #17.
@@ -305,6 +363,16 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Process.MaxFollowDuration <= 0 {
 		c.Process.MaxFollowDuration = Duration(60 * time.Second)
+	}
+	if c.Forward.Enabled == nil {
+		enabled := true
+		c.Forward.Enabled = &enabled
+	}
+	if c.Forward.MaxConnections <= 0 {
+		c.Forward.MaxConnections = 64
+	}
+	if c.Forward.DialTimeout <= 0 {
+		c.Forward.DialTimeout = Duration(10 * time.Second)
 	}
 	if c.Audit.MaxBytes <= 0 {
 		c.Audit.MaxBytes = 64 * 1024 * 1024

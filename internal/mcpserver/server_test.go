@@ -243,7 +243,14 @@ func TestServer_RegistersTheFleetGroup(t *testing.T) {
 		targeted[registration.Name] = registration.Targeted
 	}
 
-	assert.Equal(t, map[string]bool{
+	// Checked by name rather than by comparing the whole map: later milestones
+	// register their own groups, and a whole-map comparison makes every one of
+	// them a change to this test without telling anyone anything about the
+	// groups it exists to pin — #48's eight tools below were added to the
+	// comparison for exactly that reason, and would have had to be added again
+	// by every group that followed. Each entry still has to be registered and
+	// still has to target the way it says.
+	for name, wantTargeted := range map[string]bool{
 		"sandbox_list":   false,
 		"sandbox_select": false,
 		"sandbox_add":    false,
@@ -258,7 +265,12 @@ func TestServer_RegistersTheFleetGroup(t *testing.T) {
 		"sandbox_glob":     true,
 		"sandbox_grep":     true,
 		"sandbox_transfer": true,
-	}, targeted)
+	} {
+		got, ok := targeted[name]
+		if assert.Truef(t, ok, "%s must be registered", name) {
+			assert.Equalf(t, wantTargeted, got, "%s targets the wrong way round", name)
+		}
+	}
 }
 
 // TestServer_StartsWithoutCredentials covers the fresh-workstation case: a

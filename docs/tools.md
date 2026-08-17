@@ -76,7 +76,10 @@ Deregister a sandbox locally. Does not uninstall the agent.
 
 Clears the sticky selection of **every** client pointing at it, not just the
 caller's — a selection left aimed at a sandbox that no longer exists is worse
-than no selection.
+than no selection. It also closes any [port forwards](#sandbox_forward)
+reaching it and reports them in `forwards_closed`: the channel behind them is
+dropped on removal, so what would be left is a local port that accepts a
+connection and then drops it.
 
 ### `sandbox_info`
 Full detail for one sandbox: platform, kernel, CPU and memory, disk, detected
@@ -148,15 +151,16 @@ Spawn a supervised process.
 | `name` | string | **Required.** Label, e.g. `web-dev`. Must be unique among running processes unless `replace_existing`. |
 | `working_dir` | string | |
 | `env` | string[] | |
-| `ready_probe` | object | One of `log_pattern`, `tcp_port`, `http_get_url`, `uptime_seconds`, plus `timeout_seconds`. |
-| `wait_for_ready` | bool | Block until the probe passes, up to its timeout. |
+| `ready_probe` | object | Exactly one of `log_pattern`, `tcp_port`, `http_get_url`, `uptime_seconds`, plus `timeout_seconds`. Both seconds arguments are capped at an hour; a negative one is refused. |
+| `wait_for_ready` | bool | Block until the probe passes. Defaults to **true whenever `ready_probe` is set**. |
 | `restart_policy` | enum | `never` (default), `on_failure`, `always`. |
 | `max_restarts` | int | |
 | `replace_existing` | bool | Stop and replace a process with the same name. |
 
-Returns the process status, and `ready_error` if the probe did not pass in time.
-A process that fails its probe is left running so its logs can be read; stopping
-it is the caller's decision.
+Returns the process status, and `ready_error` **plus `recent_logs`** if the probe
+did not pass in time. A process that fails its probe is left running so its logs
+can be read; stopping it is the caller's decision. The logs come back with the
+failure because otherwise the model's next move is always another tool call.
 
 Refused with `PermissionDenied` on an agent configured with
 `exec.enabled: false`: starting a supervised process runs a command, and that
@@ -166,6 +170,13 @@ is the one configuration where `allowed_roots` is a real boundary.
 that needs eight seconds to bind will refuse the connection the model makes one
 second later, and the model will conclude the server is broken.
 
+`ready_probe` is a flat object with one condition set and no discriminator to
+get wrong. Setting none, or setting two, is refused with a message naming the
+four. It is the highest-leverage schema in this group: a model that cannot
+construct the probe omits it, and omitting it is the failure the feature exists
+to prevent. `wait_for_ready` defaults to true when a probe is present for the
+same reason — a probe that is configured and not waited on is no probe at all.
+
 ### `sandbox_process_list`
 All tracked processes, including exited ones not yet reaped.
 
@@ -174,10 +185,27 @@ All tracked processes, including exited ones not yet reaped.
 | `states` | string[] | Filter by state. |
 | `name_pattern` | string | RE2 filter on name. |
 
-Each entry: `process_id`, `name`, `argv`, `state`, `pid`, `started_at`,
-`exit_code`, `restart_count`, `last_log_line`, `listening_ports`, and
-`adoption_note` when the agent had to reason about whether the process survived
-a daemon restart.
+Returns `table`, the listing rendered as fixed-width columns, plus `processes`,
+the same listing structured. The table is the field to read: twenty processes
+are legible in it in a way twenty JSON objects are not, and staying legible at
+twenty is the point — a listing that needs a follow-up call to understand has
+failed.
+
+```
+STATE       NAME     PID    UPTIME  RST  PORTS      LAST LOG
+ready       web-dev  41221  3m12s   0    3000       ready in 812ms - http://localhost:3000
+ready       api      41230  3m10s   2    8080,9229  listening on :8080
+running     worker   41244  2m58s   0    -          picked up job 4471
+crashed(1)  migrate  -      41s     0    -          relation "users" does not exist
+```
+
+Each structured entry: `process_id`, `name`, `command`, `state`, `pid`,
+`started_at`, `uptime`, `exit_code`, `restart_count`, `last_log_line`,
+`listening_ports`, and `adoption_note` when the agent had to reason about
+whether the process survived a daemon restart. The process id is not a column —
+it is long, uniform, and would cost more than the rest of the table put
+together; the name is what a reader scans by. A process that has exited reports
+no pid, because something else owns that number now.
 
 ### `sandbox_process_logs`
 Buffered output, optionally following new output.
@@ -190,18 +218,38 @@ Buffered output, optionally following new output.
 | `since` | timestamp | |
 | `filter_pattern` | string | RE2. |
 | `follow` | bool | Stream new output after the replay. |
-| `follow_seconds` | int | Bound on following. Clamped to the agent's maximum. |
+| `follow_seconds` | int | Bound on following, default 20. Clamped to the agent's maximum; a negative one is refused rather than treated as the default. |
 
 Following is **always bounded**. A call that never returns cannot be
-distinguished from a hung agent, and the model cannot recover from it.
+distinguished from a hung agent, and the model cannot recover from it. A process
+producing no output at all still returns at the deadline, with
+`follow_deadline_reached` set.
 
-Dropped lines are reported inline as `dropped_before`, so a gap in the log is
-visible rather than silent. A line longer than the agent's per-line cap is split
-rather than dropped, and every piece but the last carries `continued`.
+Returns `logs`, one rendered block, plus `lines_returned`, `lines_dropped`,
+`follow_deadline_reached`, `state` and `truncation`. In the block:
 
-Lines the supervisor itself wrote — a restart, a backoff, a decision to give up,
-an adoption note — are tagged as neither `stdout` nor `stderr`, so asking for one
-of those streams returns only what the process said.
+```
+> vite dev
+  VITE v5.4.2  ready in 812 ms
+E| warn: 'sass' is deprecated, use 'sass-embedded'
+--- 1834 line(s) dropped: the process outran the log buffer ---
+hmr update /src/App.tsx
+S| supervisor: restarting in 1s (restart 1 of 5)
+```
+
+stdout is unprefixed, because it is the common case and a prefix on it is paid
+for on every line. stderr is `E| `. Lines the supervisor itself wrote — a
+restart, a backoff, a decision to give up, an adoption note — are neither
+`stdout` nor `stderr` and are marked `S| `, so asking for one of those streams
+returns only what the process said.
+
+Dropped lines are marked **inline, in sequence**, so a gap in the log is visible
+rather than silent: two lines that were never adjacent must not read as though
+they were. A line longer than the agent's per-line cap is split rather than
+dropped, and every piece but the last ends in ` [+]`.
+
+The block is capped. Past the cap the oldest lines go and the omission is stated
+at the top of what is left, as well as in `truncation`.
 
 ### `sandbox_process_signal`
 Signal or stop a process.
@@ -220,8 +268,32 @@ leaves orphans behind — the bundler under `npm run dev` keeps the port. On
 Windows the agent terminates the job object instead of delivering a POSIX
 signal.
 
+A graceful stop returns `escalated_to_kill`: true means the process did not exit
+within `grace_seconds` of SIGTERM and was killed, so it flushed nothing. Signal
+and restart calls against a `process_id` the agent does not have fail with the
+ids it does have, each with its name and state — an error the model can act on
+rather than one that costs it a list call.
+
 ### `sandbox_process_restart`
 Stop and start again from the same spec, optionally waiting for readiness.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `process_id` | string | **Required.** |
+| `grace_seconds` | int | |
+| `wait_for_ready` | bool | Defaults to true. |
+| `ready_timeout_seconds` | number | How long the probe may take after the restart. Defaults to 30, the agent's own probe default. |
+
+A restart re-runs the probe the process already has, and this side never saw
+it — `sandbox_process_list` does not report a process's probe. So the call's
+deadline is sized from the agent's default, and a process started with a longer
+`ready_probe.timeout_seconds` needs the same number here, or the call gives up
+before the agent does and reports a timeout for a restart that is still working.
+
+The `process_id` is preserved and so is the log history: a restart is the same
+process, not a similar one. `restart_count` is deliberately **not** incremented
+— it is the supervisor's automatic-restart budget, and restarting by hand must
+not spend the recovery the policy is holding in reserve.
 
 ---
 
@@ -399,17 +471,62 @@ sized for a question, so the cap above is a size a transfer can actually reach
 on a link slower than a laboratory's. The same applies to `sandbox_write`.
 
 ### `sandbox_forward`
-Forward a sandbox port to the workstation.
+Forward a sandbox port to the workstation. **This is `ssh -L`.**
+
+```
+sandbox_forward(remote_port=3000, local_port=3000)
+  ==  ssh -L 3000:localhost:3000 sandbox
+```
 
 | Argument | Type | Notes |
 | --- | --- | --- |
-| `remote_port` | int | **Required.** |
-| `local_port` | int | 0 picks a free port. |
+| `remote_port` | int | **Required.** Port on the sandbox. |
+| `local_port` | int | 0 (the default) picks a free port and reports it. |
 | `remote_host` | string | Defaults to loopback on the sandbox. |
-| `stop` | bool | Tear down an existing forward. |
+| `stop` | bool | Tear down the forward for this `remote_port` **and `remote_host`**. |
 
-Returns the local address. Defaulting `remote_host` to loopback keeps the agent
-from being turned into a general-purpose network pivot by accident.
+A forward is identified by its sandbox, `remote_host` and `remote_port`
+together, so a `stop` that omits the `remote_host` the forward was opened with
+names a different forward and finds nothing. The call that stops a forward is
+in the result that opened it.
+
+Returns `local_address`, plus `active_forwards`: every forward this MCP server
+holds, on every sandbox, in the result of **every** call — so the model can see
+what is already open without a tool that does nothing else.
 
 Closes the remote dev loop: start a server with `sandbox_process_start`, forward
 its port, then reach it over `localhost` exactly as if it were local.
+
+**Not implemented, deliberately.** There is no reverse forward (`ssh -R`) and no
+dynamic SOCKS proxy (`ssh -D`). The `ssh -L` framing above is the right mental
+model precisely because it is exact, and it would stop being useful if the two
+modes it does not cover were left ambiguous.
+
+**Lifetime is owned by the MCP server, not by the call.** A forward stays open
+across unrelated tool calls until `stop: true` or the MCP server exits; the
+server releases every local listener on the way out, so a port cannot be held
+by a process that is gone.
+
+**Loopback on both ends.**
+
+- The **local** listener binds `127.0.0.1` only. Binding every interface would
+  publish a tunnel into the sandbox to everyone on the workstation's network.
+- `remote_host` defaults to the sandbox's own loopback, and anything else is
+  refused unless the operator listed it in `forward.allowed_hosts` in the agent
+  config. An agent that will connect anywhere on request is a general-purpose
+  pivot into whatever network it sits in, usable by anyone who can reach it —
+  and forwarding a dev server works identically without that capability, so
+  nothing legitimate notices the restriction. The check resolves the requested
+  host and requires *every* address it resolves to to be loopback, then dials
+  the address that passed.
+
+**Non-loopback connections are audited.** Every connection to a target that is
+not the sandbox's own loopback appends a line to the agent's audit log —
+succeeded, refused, or failed — carrying the principal, the requested host and
+port, the address actually dialed, and the bytes each way. Never the bytes
+themselves. Loopback forwards are not recorded. See
+[security.md](security.md#the-pivot-surface).
+
+The sandbox-side port is checked before a local listener is opened, so a
+forward pointed at a port nothing is serving fails with an error naming it,
+rather than leaving a local port that accepts connections and then drops them.

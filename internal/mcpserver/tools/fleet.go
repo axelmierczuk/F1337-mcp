@@ -483,6 +483,9 @@ type RemoveResult struct {
 	// SelectionsCleared counts the clients whose sticky default pointed at
 	// this sandbox and was dropped.
 	SelectionsCleared int `json:"selections_cleared"`
+	// ForwardsClosed are the local addresses of the port forwards that reached
+	// this sandbox and were torn down with it.
+	ForwardsClosed []string `json:"forwards_closed,omitempty"`
 	// Note states what removal did not do.
 	Note string `json:"note"`
 }
@@ -513,13 +516,39 @@ func (r *Registrar) sandboxRemove(_ context.Context, _ *mcp.CallToolRequest, in 
 	if err := d.Fleet.Remove(sb.Name); err != nil {
 		return RemoveResult{}, "", err
 	}
+	// The forwards that reached it, before the channel they run over. A forward
+	// is owned by this process rather than by the call that opened it, so
+	// nothing else would ever close this one — and removing the sandbox closes
+	// the pooled channel underneath it, leaving a local port that accepts a
+	// connection and then drops it. That is the one outcome a caller cannot
+	// diagnose, which is why the tool preflights against it when opening a
+	// forward; arriving at it from this end is no better.
+	//
+	// Order matters, and it is this way round: dropping the channel first
+	// leaves a window in which the listener is still accepting and every
+	// connection it takes opens a stream on a channel that has just closed —
+	// the accepts-and-then-drops symptom, reached in the middle of the code
+	// that exists to prevent it. Closing the forwards first also means the
+	// per-connection goroutines this joins are joined while the transport they
+	// are using is still there.
+	var forwardsClosed []string
+	if r.forwards != nil {
+		forwardsClosed = r.forwards.stopForSandbox(sb.Name)
+	}
 	if d.Clients != nil {
 		d.Clients.Remove(sb.Name)
 	}
 
+	note := "Deregistered locally only. The agent is still installed and running on the host; uninstalling it is a separate operator action."
+	if len(forwardsClosed) > 0 {
+		note += fmt.Sprintf(" %d port forward(s) reaching it were closed with it (%s); a forward to a sandbox this server can no longer dial would accept connections and drop them.",
+			len(forwardsClosed), strings.Join(forwardsClosed, ", "))
+	}
+
 	return RemoveResult{
 		SelectionsCleared: cleared,
-		Note:              "Deregistered locally only. The agent is still installed and running on the host; uninstalling it is a separate operator action.",
+		ForwardsClosed:    forwardsClosed,
+		Note:              note,
 	}, sb.Name, nil
 }
 

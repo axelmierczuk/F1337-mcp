@@ -9,3 +9,9 @@ package agent
 // this package's decision rather than a standard-library default that could
 // change.
 var AuthorizePeerForTest = authorizePeer
+
+// AuditForTest exposes the daemon's audit-log construction, so the warnings it
+// emits about its own configuration can be asserted on. They are the only thing
+// standing between "every record names its host" and an operator finding out it
+// does not when the records are already off-box.
+var AuditForTest = auditFor
