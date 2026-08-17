@@ -28,8 +28,11 @@ message ExecRequest {
   // "sh -c" to fall back on.
   repeated string argv = 1;
 
-  // Working directory. Must resolve inside an allowed root. Empty means the
-  // agent's configured default working directory.
+  // Working directory. An ordinary path: an agent that runs commands is not
+  // confined by a path check, so the path jail is wired in only on an agent
+  // with exec disabled and there are no allowed roots for this to be outside
+  // of. It must exist and be a directory. Empty means the agent's default,
+  // which is the home directory of the account the daemon runs as.
   string working_dir = 2;
 
   // Environment variables to set, as KEY=VALUE. The agent does not inherit its

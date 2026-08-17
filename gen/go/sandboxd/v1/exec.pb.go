@@ -29,8 +29,11 @@ type ExecRequest struct {
 	// entire class of quoting and injection bugs, and because Windows has no
 	// "sh -c" to fall back on.
 	Argv []string `protobuf:"bytes,1,rep,name=argv,proto3" json:"argv,omitempty"`
-	// Working directory. Must resolve inside an allowed root. Empty means the
-	// agent's configured default working directory.
+	// Working directory. An ordinary path: an agent that runs commands is not
+	// confined by a path check, so the path jail is wired in only on an agent
+	// with exec disabled and there are no allowed roots for this to be outside
+	// of. It must exist and be a directory. Empty means the agent's default,
+	// which is the home directory of the account the daemon runs as.
 	WorkingDir string `protobuf:"bytes,2,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
 	// Environment variables to set, as KEY=VALUE. The agent does not inherit its
 	// own daemon environment wholesale; it starts from a documented base

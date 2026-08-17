@@ -159,22 +159,77 @@ cannot talk its way past.
 - **argv, not a shell string.** Commands are exec'd directly. This removes a
   class of quoting and injection bugs, and it is the only thing that works
   uniformly across platforms — Windows has no `sh -c`. `shell: true` is opt-in.
+- **The daemon's environment is not inherited.** A command starts from a
+  documented base — `PATH`, `HOME`, `TMPDIR`, the locale, and on Windows the
+  variables a process cannot start without — and the request's `env` is applied
+  on top. The daemon's own environment holds whatever the thing that installed
+  the service was holding: a CI runner's registry token, an operator's cloud
+  credentials, a `GITHUB_TOKEN` from the shell that ran the installer. Handing
+  that to every command a model asks for would be a credential leak with a
+  remote trigger.
 - **Caps.** Wall-clock timeout, maximum output bytes, maximum concurrent
-  supervised processes. Exceeded caps are reported to the caller, never silently
-  applied: output that was truncated is always marked as truncated.
-- **Command policy.** Optional per-agent allow and deny lists. The default is
-  allow-all, which is honest about what the service is rather than implying a
-  security boundary that a deny list does not actually provide.
+  processes, enforced centrally so that no two services can disagree about them.
+  Exceeded caps are reported to the caller, never silently applied: truncated
+  output is always marked as truncated, and a timeout above the agent's maximum
+  is refused with the maximum named rather than quietly shortened.
+- **Killing means killing the group.** On timeout or a caller hanging up, the
+  agent signals the process group — a session on Unix, a job object on
+  Windows — not the leader. `sh -c 'make -j8'` is nine processes, and
+  signalling one of them leaves eight compilers running with nobody watching.
+- **Command policy.** Optional per-agent allow and deny lists, matched on the
+  resolved executable path rather than the string as given, so `/bin/../bin/sh`
+  does not walk past a rule naming `sh`. The default is allow-all, which is
+  honest about what the service is rather than implying a security boundary
+  that a deny list does not actually provide.
+
+  Judge these as operational guardrails, not as confinement. Two things they
+  cannot do:
+
+  - **A name is not an identity.** An allow list holding `python3` admits any
+    file called `python3` anywhere on the host, including one the caller wrote a
+    moment ago. Prefer absolute paths.
+  - **An allowed interpreter allows everything it can run.** `python3`, `perl`,
+    `node` and `make` on an allow list are each a shell by another name.
 
 ## Audit
 
-Every exec and every write appends a JSONL record: timestamp, authenticated
-principal, argv or path, working directory, exit status. Append-only, rotated by
-size.
+Every exec — and, as they land, every write, edit, process start and signal —
+appends one JSONL record: timestamp, authenticated principal (the client
+certificate's common name), RPC, argv and the resolved executable, working
+directory, outcome, exit status, duration. Append-only, rotated by size with a
+configurable number of retained segments.
 
-This is a forensic record, not an enforcement mechanism. A caller who can
-execute code on the host can also reach the audit file. Ship it off-host if it
-needs to survive the host.
+**What it never contains.** There is no field for environment values, file
+contents, stdin, command output or the enrollment token, and none may be added.
+An audit log that captures secrets is a new place to steal them from, and one
+with weaker handling than whatever it copied them out of: it gets shipped
+off-box, read by people debugging something unrelated, and kept long after the
+credential in it was supposed to have been rotated.
+
+That rule is about the record, not only about its field list. An error message
+is written into a field, and a caller chooses much of what goes into one — the
+`PATH` a failed lookup searched, an environment entry quoted back at whoever
+malformed it. Those are redacted in the record and left intact in the error the
+caller receives: the caller sent them, and an exec caller can read the agent's
+environment with a command in any case, so telling it costs nothing that
+writing it down would not cost more.
+
+**What it does contain, and the limitation that follows.** Argv is recorded, so
+`mysql -pHUNTER2` writes that password into the file. The argument list is the
+whole point of an exec record and there is no reliable way to tell a password
+from a path, so this is a limitation to work with rather than a bug to fix: pass
+credentials in the environment, which is never recorded.
+
+**`audit.required` is a real choice.** With it set, an RPC whose record could
+not be written fails — an agent that must not act unrecorded. Without it, the
+failure is logged and the call proceeds — an agent that must keep serving when
+its log volume fills. Neither is guessed for you.
+
+**It is forensic, not preventive.** A caller who can execute code on the host
+can also reach the audit file: append to it, truncate it, or delete it. The log
+is what you read afterwards to find out what happened, and it is only as
+trustworthy as the host it sits on. Ship it off-host if it needs to survive the
+host.
 
 ## Installer
 

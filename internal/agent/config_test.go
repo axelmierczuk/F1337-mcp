@@ -64,6 +64,15 @@ func TestLoad_ShippedExample(t *testing.T) {
 	assert.Equal(t, 60*time.Second, cfg.Process.MaxFollowDuration.Duration())
 
 	assert.True(t, cfg.Audit.Enabled)
+	assert.False(t, cfg.Audit.Required, "the example ships the serving default, and says what the other choice is for")
+	assert.EqualValues(t, 67108864, cfg.Audit.MaxBytes)
+	assert.Equal(t, 5, cfg.Audit.RetainSegments)
+	// The example's command policy is empty, which is default-allow. An
+	// example that shipped a deny list would imply this agent is confined by
+	// one, which is the thing docs/security.md exists to stop implying.
+	assert.Empty(t, cfg.Exec.DenyCommands)
+	assert.Empty(t, cfg.Exec.AllowCommands)
+
 	if runtime.GOOS != "windows" {
 		assert.Equal(t, "/var/log/sandboxd/audit.jsonl", cfg.Audit.Path)
 		// Validate insists allowed_roots are absolute, which the example's are

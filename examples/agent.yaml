@@ -37,14 +37,35 @@ exec:
   # Running commands is what this product is for, so this defaults to true.
   # Setting it to false is what makes allowed_roots above a real boundary.
   enabled: true
-  # Default wall-clock limit for sandbox_exec.
+  # Default wall-clock limit for sandbox_exec. On expiry the agent SIGTERMs the
+  # command's whole process group, then SIGKILLs it.
   default_timeout: "120s"
+  # A request asking for longer than this is refused, with this value named,
+  # rather than quietly shortened — a shortened one comes back as timed_out and
+  # is indistinguishable from the command overrunning the caller's own limit.
   max_timeout: "3600s"
   # Output beyond this is dropped, with the omission reported to the caller.
+  # The agent keeps draining the command's pipes past the cap: a process
+  # blocked writing to a full pipe never exits.
   max_output_bytes: 2097152
   # Optional command policy. Empty deny list means default-allow: treat this
   # agent as a remote code execution service, because that is what it is.
+  #
+  # Both lists match on the resolved executable path, its symlink target, their
+  # base names, and the full argv — so "sh" also catches /bin/../bin/sh, and an
+  # entry may name a subcommand ("git push"). Entries may be filepath globs.
+  # Deny is evaluated first.
+  #
+  # These are operational guardrails, not confinement. A name is not an
+  # identity — an allow list holding "python3" admits any file so named,
+  # including one the caller just wrote — and an allowed interpreter allows
+  # everything it can run. See docs/security.md.
   deny_commands: []
+  # When non-empty, this becomes an allow list and anything absent is refused.
+  # Prefer absolute paths here.
+  # allow_commands:
+  #   - "/usr/bin/make"
+  #   - "/usr/local/go/bin/go"
 
 process:
   max_concurrent: 32
@@ -57,9 +78,25 @@ process:
   max_follow_duration: "60s"
 
 audit:
-  # Append-only JSONL record of every exec and every write.
+  # Append-only JSONL record of every exec and every write: timestamp,
+  # authenticated principal, RPC, argv and resolved path, working directory,
+  # outcome, exit status, duration.
+  #
+  # Never the environment, file contents, stdin or command output. It is a
+  # forensic record, not an enforcement mechanism — a caller who can run
+  # commands on this host can also reach this file. Ship it off-host if it
+  # needs to survive the host.
   path: "/var/log/sandboxd/audit.jsonl"
   enabled: true
+  # With this set, an RPC whose audit record could not be written fails.
+  # Without it, the failure is logged and the call proceeds. Choose the one
+  # your agent is for: "must not act unrecorded", or "must keep serving when
+  # the log volume fills".
+  required: false
+  # Rotation. The live file is moved to audit.jsonl.1 at this size, older
+  # segments shift down, and anything past retain_segments is deleted.
+  max_bytes: 67108864
+  retain_segments: 5
 
 # Supervised process records live here, so they survive a daemon restart — and
 # an uninstall, which deliberately leaves this directory alone.
