@@ -210,10 +210,21 @@ func TestSocks_RefusalByTheDisabledSettingIsAudited(t *testing.T) {
 	assert.Contains(t, rec.Error, "forward.socks_enabled")
 }
 
-// A proxied connection to the agent's own loopback is permitted and, like every
-// other loopback connection, not recorded: it reaches a port on a machine the
-// caller already has command execution on.
-func TestSocks_LoopbackIsPermittedAndNotRecorded(t *testing.T) {
+// A proxied connection to the agent's own loopback is permitted, and it is
+// recorded — unlike a forward to the same place.
+//
+// The two are not the same question. A forward's destination is named up front
+// and fixed for the life of the listener, so the log adds nothing the
+// configuration does not already say. A proxy's destination is chosen per
+// connection by whoever holds the proxy, so the log is the only thing that can
+// answer "where did this go" — and one that dropped the loopback connections
+// would answer it wrongly rather than incompletely.
+//
+// It is also the only reading under which the two postures agree: an agent with
+// an empty allow list treats every proxied target as off-box and already
+// recorded these, so without this the answer turned on a setting that had
+// nothing to do with the connection.
+func TestSocks_LoopbackIsPermittedAndRecorded(t *testing.T) {
 	port := echoServer(t)
 	svc := newService(t, agent.ForwardConfig{
 		SocksEnabled: true,
@@ -226,8 +237,40 @@ func TestSocks_LoopbackIsPermittedAndNotRecorded(t *testing.T) {
 	require.True(t, opened.GetSuccess(), opened.GetError())
 	drain(t, stream)
 
-	assert.Empty(t, records(t, svc),
-		"a proxied connection to the sandbox's own loopback adds volume without adding an answer")
+	rec := waitForRecord(t, svc)
+	assert.Equal(t, policy.OutcomeOK, rec.Outcome)
+	assert.Equal(t, "127.0.0.1", rec.RemoteHost,
+		"a proxy's destination is chosen per connection, so the log is the only place it exists")
+	assert.Equal(t, uint32(port), rec.RemotePort) //nolint:gosec // a test's own listener port
+
+	// And the forward path is untouched: the same destination, forwarded, is
+	// still the volume this exemption exists to keep out of the log.
+	forwarded, opened, err := open(socksContext(t), t, client, port, "127.0.0.1")
+	require.NoError(t, err)
+	require.True(t, opened.GetSuccess(), opened.GetError())
+	drain(t, forwarded)
+
+	assert.Len(t, records(t, svc), 1,
+		"a forward to the sandbox's own loopback adds volume without adding an answer")
+}
+
+// The refusal for want of the capability is recorded wherever it was aimed. It
+// is by the agent's own account about the capability rather than the
+// destination, so a record that appeared only for off-box targets would miss
+// exactly the probe an operator wants to see: somebody pointed a proxy at an
+// agent that does not serve one.
+func TestSocks_RefusalByTheDisabledSettingIsAuditedEvenForLoopback(t *testing.T) {
+	svc := newService(t, agent.ForwardConfig{})
+	client := serve(t, svc)
+
+	_, _, err := openSocks(socksContext(t), t, client, 8080, "127.0.0.1")
+	require.Error(t, err)
+	assert.Equal(t, codes.PermissionDenied, status.Code(err))
+
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, policy.OutcomeDenied, rec.Outcome)
+	assert.Equal(t, "forward.socks_enabled", rec.Rule)
+	assert.Equal(t, "127.0.0.1", rec.RemoteHost)
 }
 
 // ---------------------------------------------------- the forward path
@@ -302,4 +345,16 @@ func TestSocks_StartupLogAnnouncesAnUnrestrictedProxy(t *testing.T) {
 	malformed := warnings(agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{"10.0.0.0/33"}}, true)
 	assert.Contains(t, malformed, "not a valid address or CIDR block")
 	assert.Contains(t, malformed, "10.0.0.0/33")
+
+	// The one that fails the other way. "10.0.4.7/24" is a valid block and a
+	// plausible way to write "this one host", and it permits two hundred and
+	// fifty-four others — wider than the operator wrote, which is the direction
+	// an allow list must not fail in quietly.
+	wide := warnings(agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{"10.0.4.7/24"}}, true)
+	assert.Contains(t, wide, "wider than the address they name")
+	assert.Contains(t, wide, "10.0.4.0/24")
+
+	// And a block written as its own network has nothing to answer for.
+	exact := warnings(agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{"10.0.4.0/24"}}, true)
+	assert.NotContains(t, exact, "wider than")
 }

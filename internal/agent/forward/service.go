@@ -112,6 +112,18 @@ func logPosture(log *slog.Logger, cfg agent.ForwardConfig, audited bool) {
 			"consequence", "each is matched as a hostname, so it permits nothing unless a caller asks for that exact name")
 	}
 
+	if widened := cfg.WidenedAllowedHosts(); len(widened) > 0 {
+		// A block whose host bits are set is not malformed, so the check above
+		// cannot see it — and "10.0.4.7/24" is a plausible way to write "this
+		// one host" that permits two hundred and fifty-four others. This is the
+		// one direction the allow list fails in that is wider than the operator
+		// wrote, so it is said out loud rather than left to be discovered.
+		log.Warn("forward.allowed_hosts has entries wider than the address they name",
+			"entries", strings.Join(widened, "; "),
+			"consequence", "a mask covers the whole block, not the address in front of it",
+			"remedy", "write the block's own address, or drop the mask to permit only that host")
+	}
+
 	switch {
 	case cfg.SocksAllowsAnyHost():
 		// The loudest thing this agent has to say about itself. An unrestricted
@@ -310,9 +322,9 @@ type call struct {
 	// proxy asked for. See the field's contract in forward.proto: it selects
 	// which policy applies and can only ever make it stricter.
 	socks bool
-	// offBox reports that the target is not this machine's own loopback, which
-	// is the whole test for whether this connection is recorded. See
-	// [Service.record].
+	// offBox reports that the target is not this machine's own loopback. With
+	// socks, it is what decides whether this connection is recorded. See
+	// [Service.record] and [call.recordable].
 	offBox bool
 	// rule names the configuration that refused the connection, when one did.
 	rule string
@@ -333,6 +345,28 @@ func (c *call) reportedHost() string {
 	return c.requested
 }
 
+// recordable reports whether this connection belongs in the audit log.
+//
+// A forward to the sandbox's own loopback does not. It reaches a port on a host
+// the caller already has full command execution on, so recording it would add
+// volume without adding an answer — and volume is not free: it is what makes
+// the interesting lines hard to find.
+//
+// A *proxied* connection does, wherever it went. The two are not the same
+// question. A forward's destination is in the configuration, named up front and
+// fixed for the life of the listener; a proxy's is chosen per connection by
+// whoever holds the proxy, so "what did this reach" is answerable only from the
+// log. A record that dropped the loopback ones would answer it wrongly rather
+// than incompletely: an operator counting a proxy's connections would find
+// three hundred where there were five hundred, with nothing saying so.
+//
+// It is also the only reading that makes the two postures agree. An agent with
+// an empty allow list resolves nothing and treats every proxied target as
+// off-box, so it already recorded these; without this, whether a proxy's
+// connection to loopback appeared in the log turned on a setting that had
+// nothing to do with it.
+func (c *call) recordable() bool { return c.offBox || c.socks }
+
 // deny records a refusal by configuration and returns the caller's error.
 func (s *Service) deny(c *call, rule string, err error) error {
 	c.rule = rule
@@ -349,19 +383,17 @@ func (s *Service) errored(c *call, err error) error {
 // record writes the connection's audit record and returns the error this RPC
 // ends with.
 //
-// Only a connection whose target is off this machine is recorded. A forward to
-// the sandbox's own loopback reaches a port on a host the caller already has
-// full command execution on, so recording it would add volume without adding
-// an answer — and volume is not free: it is what makes the interesting lines
-// hard to find. A forward to anywhere else is the agent acting as a pivot into
-// the network it sits in, and that is the event this log exists for.
+// Which connections are recorded is [call.recordable]'s decision: a forward to
+// anywhere but this machine's own loopback, and every proxied connection. Both
+// are the agent acting as a pivot into the network it sits in, and that is the
+// event this log exists for.
 //
 // audit.required is honoured on the same terms as the exec path: with it set, a
 // record that could not be written fails the call. Here that means a connection
 // which has already happened ends in an error rather than a clean close, which
 // is the honest report — the agent could not record what it did.
 func (s *Service) record(c *call, outcome policy.Outcome, rpcErr error) error {
-	if !c.offBox || !s.audit.Enabled() {
+	if !c.recordable() || !s.audit.Enabled() {
 		return rpcErr
 	}
 

@@ -318,6 +318,35 @@ func (f ForwardConfig) MalformedAllowedHosts() []string {
 	return bad
 }
 
+// WidenedAllowedHosts returns the allow-list entries whose CIDR block covers
+// more than the address written in front of the mask, each rendered as the
+// block it actually permits.
+//
+// "10.0.4.7/24" is a valid block and a plausible way to write "this one host",
+// and it permits two hundred and fifty-four others. Nothing in
+// [ForwardConfig.MalformedAllowedHosts] can see it — net.ParseCIDR succeeds,
+// because the entry is not malformed, only wider than it reads. The cost of
+// getting it wrong is an operator who believes they narrowed the pivot to one
+// machine and narrowed it to a subnet, which is exactly the mistake this whole
+// setting exists to prevent.
+//
+// So it is a line in the log rather than a refusal to start: the semantics are
+// the ones every other tool applies to a CIDR, and an agent that would not boot
+// over a mask an operator meant is worse than one that boots and says what the
+// mask means.
+func (f ForwardConfig) WidenedAllowedHosts() []string {
+	var widened []string
+	for _, allowed := range f.AllowedHosts {
+		entry := strings.TrimSpace(allowed)
+		ip, block, err := net.ParseCIDR(entry)
+		if err != nil || ip.Equal(block.IP) {
+			continue
+		}
+		widened = append(widened, fmt.Sprintf("%s permits all of %s", entry, block.String()))
+	}
+	return widened
+}
+
 // looksNumeric reports whether an entry is made only of the characters an IP
 // address is spelled with, which is what makes "10.0.4.256" a broken address
 // rather than an unusual hostname.

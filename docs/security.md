@@ -470,13 +470,21 @@ regardless.
 
 ### The record
 
-Every connection to a target that is **not** this machine's loopback appends a
-line to the [audit log](#audit), whether it succeeded, was refused, or failed —
-forwarded and proxied connections alike, in the same fields. An operator asking
-"what did this machine reach, for whom, and how much went through it" is asking
-one question, not two. Loopback connections are not recorded: they add volume
+Every connection appends a line to the [audit log](#audit), whether it
+succeeded, was refused, or failed — forwarded and proxied connections alike, in
+the same fields. An operator asking "what did this machine reach, for whom, and
+how much went through it" is asking one question, not two.
+
+A **forward** to this machine's own loopback is the one exception: it reaches a
+port on a host the caller already has command execution on, so it adds volume
 without adding an answer, and volume is what makes the lines that matter hard to
-find.
+find. **Every proxied connection is recorded, wherever it went**, including to
+loopback. The two are not the same question: a forward's destination is in the
+configuration, named up front and fixed for the life of the listener, while a
+proxy's is chosen per connection by whoever holds the proxy. Dropping a proxy's
+loopback connections would answer "where did this go" wrongly rather than
+incompletely — an operator counting a proxy's connections would find three
+hundred where there were five hundred, with nothing saying so.
 
 One line per connection, not per listener — a forward or a proxy is a listener
 that carries many connections over hours, and "a proxy was opened" answers

@@ -124,6 +124,35 @@ func TestAllowedHosts_MalformedEntriesAreReportedNotFatal(t *testing.T) {
 	assert.True(t, cfg.AddressAllowed(net.ParseIP("10.9.0.1")), "the entries that do parse still work")
 }
 
+// A block whose host bits are set is valid and wider than it reads.
+//
+// "10.0.4.7/24" is a plausible way to write "this one host" and it permits two
+// hundred and fifty-four others. MalformedAllowedHosts cannot see it, because
+// the entry is not malformed — net.ParseCIDR accepts it — so it is the one way
+// this list fails wider than the operator wrote, which is the direction that
+// matters for a pivot's allow list.
+func TestAllowedHosts_ABlockWiderThanItReadsIsReported(t *testing.T) {
+	cfg := agent.ForwardConfig{AllowedHosts: []string{
+		"10.0.4.7/24",      // meant one host, permits the block
+		"10.9.0.0/16",      // written as its own network: nothing to say
+		"2001:db8:1::5/48", // the same mistake in IPv6
+		"10.0.4.7",         // no mask at all, so exactly one host
+		"db.internal",      // a name
+		"10.0.0.0/33",      // malformed, which is the other check's business
+	}}
+
+	widened := cfg.WidenedAllowedHosts()
+	require.Len(t, widened, 2, "only the entries wider than they read: %v", widened)
+	assert.Contains(t, widened[0], "10.0.4.7/24")
+	assert.Contains(t, widened[0], "10.0.4.0/24", "the warning has to say what it actually permits")
+	assert.Contains(t, widened[1], "2001:db8:1::5/48")
+	assert.Contains(t, widened[1], "2001:db8:1::/48")
+
+	// And it is a report, not a refusal: the block still works, because these
+	// are the semantics every other tool applies to a mask.
+	assert.True(t, cfg.AddressAllowed(net.ParseIP("10.0.4.99")))
+}
+
 // The shipped example documents the setting; this is what stops it drifting
 // from what the code accepts.
 func TestSocksConfig_ShippedExampleParses(t *testing.T) {

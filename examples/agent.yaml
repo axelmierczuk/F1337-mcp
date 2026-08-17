@@ -116,11 +116,13 @@ forward:
   # pass, so a name answering with one permitted and one unpermitted address is
   # refused rather than allowed on whichever came back first.
   #
-  # Every connection to a host that is not this machine's loopback is written
-  # to the audit log below — successful, refused, or failed — with the host
-  # asked for, the address dialed, and how many bytes went each way. Never the
-  # bytes themselves. Loopback forwards are not recorded: they reach a port on
-  # a machine the caller already has exec on.
+  # Every connection is written to the audit log below — successful, refused,
+  # or failed — with the host asked for, the address dialed, and how many bytes
+  # went each way. Never the bytes themselves. A *forward* to this machine's own
+  # loopback is the one exception: it reaches a port on a machine the caller
+  # already has exec on. A proxied connection is recorded wherever it went,
+  # because a proxy's destination is chosen per connection and the log is the
+  # only place it exists.
   allowed_hosts: []
   # SOCKS5 proxying: the `ssh -D` equivalent, used by `fleetctl socks` and the
   # fleet_socks tool. Off by default, and separate from allowed_hosts above
