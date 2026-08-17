@@ -287,18 +287,33 @@ func TestProcessLogs_DroppedLinesAreMarkedInline(t *testing.T) {
 	// A line is genuinely gone only once it has fallen out of both.
 	f := newLiveFixture(t, liveAgentOptions{ringBufferLines: 20, maxLogBytes: 4096})
 
+	const lines = 8000
 	started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start",
-		f.startHelper("firehose", "spew", "8000"))
+		f.startHelper("firehose", "spew", strconv.Itoa(lines)))
 
-	var out tools.ProcessLogsResult
-	eventually(t, 30*time.Second, "the process to outrun the log ring and the rotated file", func() bool {
-		out = liveOK[tools.ProcessLogsResult](f, "sandbox_process_logs", map[string]any{
-			"process_id": started.Process.ProcessID,
-			"tail_lines": 4000,
-		})
-		return out.LinesDropped > 0
+	// Wait for the process to have written everything, then assert once.
+	//
+	// Polling the logs call instead is what this used to do, and it is a poll
+	// that fights the thing it is waiting for: the ring cannot cover a
+	// four-thousand-line tail, so every one of those calls re-reads the whole
+	// retained history off disk, and fifteen hundred of them in thirty seconds
+	// compete with the process for the same disk on the way to a conclusion
+	// about that process. The listing is cheap, and "the last line it will ever
+	// write has arrived" is a defined moment rather than an eventual one — at
+	// which eight thousand lines through a twenty-line ring and a 4 KiB log
+	// must have lost some, on every platform.
+	last := fmt.Sprintf("spew %d ", lines-1)
+	eventually(t, 90*time.Second, "the process to finish writing its output", func() bool {
+		list := liveOK[tools.ProcessListResult](f, "sandbox_process_list", map[string]any{})
+		return strings.Contains(findProcess(t, list, started.Process.ProcessID).LastLogLine, last)
 	})
 
+	out := liveOK[tools.ProcessLogsResult](f, "sandbox_process_logs", map[string]any{
+		"process_id": started.Process.ProcessID,
+		"tail_lines": 4000,
+	})
+	require.Positive(t, out.LinesDropped,
+		"a process that outran both the ring and the rotated file must have its drops counted")
 	assert.Contains(t, out.Logs, "dropped", "the gap must be marked in the rendered log")
 	assert.Contains(t, out.Note, "dropped")
 
@@ -369,7 +384,14 @@ func TestProcessSignal_GracefulStopReportsEscalationToKill(t *testing.T) {
 			// unreachable rather than untested.
 			t.Skip("Windows terminates the job object rather than delivering SIGTERM")
 		}
-		started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", f.startHelper("stubborn", "deaf"))
+		// Waited for, not assumed: the child ignores SIGTERM only once it has
+		// installed the disposition, and a signal that beats it there is
+		// delivered to a process that still dies on it.
+		args := f.startHelper("stubborn", "deaf")
+		args["ready_probe"] = map[string]any{"log_pattern": "ignoring SIGTERM", "timeout_seconds": 30}
+		started := liveOK[tools.ProcessStartResult](f, "sandbox_process_start", args)
+		require.Empty(t, started.ReadyError, "the child must have installed its signal handler before it is signalled")
+
 		out := liveOK[tools.ProcessSignalResult](f, "sandbox_process_signal", map[string]any{
 			"process_id":      started.Process.ProcessID,
 			"graceful_stop":   true,

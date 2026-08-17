@@ -137,7 +137,16 @@ func helperMain() {
 
 	case "deaf":
 		// Ignores SIGTERM, so a graceful stop has to escalate.
+		//
+		// It says so once the disposition is actually installed, and the test
+		// waits for that line with a ready probe. Without it the test races the
+		// child's own startup: sandbox_process_start returns as soon as the
+		// process is spawned, and a SIGTERM that arrives before this line has
+		// been printed is delivered to a process still carrying the default
+		// disposition, which kills it — so the stop does not escalate and the
+		// test fails, on a runner slow enough, having proved nothing.
 		signal.Ignore(syscall.SIGTERM, syscall.SIGINT)
+		fmt.Println("ignoring SIGTERM")
 		time.Sleep(time.Hour)
 
 	case "exit":
