@@ -12,6 +12,27 @@ PROTOC_GEN_GRPC_VERSION:= v1.6.2
 GOLANGCI_VERSION       := v2.6.2
 GO_TOOLCHAIN           := go1.25.13
 
+# Everything above that decides what ends up in .tools/, named once so CI can
+# key a cache on it (see tools-key). A pin that is missing from this list is a
+# pin whose bump would not change the cache key, which means CI would keep
+# serving the old binary from cache forever — worse than no cache at all. That
+# is what tools-key-check exists to prevent; it fails if the Makefile defines a
+# *_VERSION this list does not name.
+TOOL_PINS := \
+	BUF_VERSION \
+	PROTOC_GEN_GO_VERSION \
+	PROTOC_GEN_GRPC_VERSION \
+	GOLANGCI_VERSION \
+	GO_TOOLCHAIN
+
+# binary:expected-module-version, checked by tools-verify against what each
+# binary reports about itself.
+TOOL_BINS := \
+	buf:$(BUF_VERSION) \
+	protoc-gen-go:$(PROTOC_GEN_GO_VERSION) \
+	protoc-gen-go-grpc:$(PROTOC_GEN_GRPC_VERSION) \
+	golangci-lint:$(GOLANGCI_VERSION)
+
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -74,6 +95,76 @@ tools:
 	# whatever default the host happens to have.
 	GOBIN=$(TOOLS_DIR) GOTOOLCHAIN=$(GO_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 
+## tools-key: print the exact identity of everything `make tools` installs
+#
+# The target above is four `go install`s that compile for about two minutes to
+# produce byte-identical binaries every single run, because every input to them
+# is pinned. CI hashes this output into its .tools/ cache key so a run whose
+# pins have not moved can skip the compile entirely.
+#
+# It prints values, not names: the hash has to change when a version changes
+# and only then. Anything derived from the whole Makefile would bust the cache
+# on an unrelated edit; anything narrower than the pins would not bust it on a
+# bump, which is the failure that matters.
+.PHONY: tools-key
+tools-key: tools-key-check
+	@$(foreach v,$(TOOL_PINS),printf '%s=%s\n' '$(v)' '$($(v))';)
+
+## tools-key-check: fail if a pinned version is missing from TOOL_PINS
+#
+# A cache key that cannot change is the one way this cache can be worse than no
+# cache: it would serve the pre-bump binary until someone noticed by hand. So
+# make the omission loud rather than trusting whoever adds the fifth tool to
+# remember. Convention is what is scanned for — a pin is a `*_VERSION` (plus
+# the toolchain) assigned at column zero — so a pin named outside it still
+# needs adding to TOOL_PINS by hand.
+.PHONY: tools-key-check
+tools-key-check:
+	@pins=$$(awk '/^(GO_TOOLCHAIN|[A-Z][A-Z0-9_]*_VERSION)[ \t]*[:?+]*=/ { sub(/[ \t]*[:?+]*=.*/, ""); print }' $(firstword $(MAKEFILE_LIST))); \
+	if [ -z "$$pins" ]; then \
+		echo "tools-key-check: no pinned versions found in $(firstword $(MAKEFILE_LIST));" >&2; \
+		echo "  the cache key would be a constant and CI would never reinstall" >&2; \
+		exit 1; \
+	fi; \
+	for v in $$pins; do \
+		case " $(TOOL_PINS) " in \
+			*" $$v "*) ;; \
+			*) echo "tools-key-check: $$v is pinned here but missing from TOOL_PINS;" >&2; \
+			   echo "  CI keys its .tools/ cache on TOOL_PINS, so bumping $$v would hit a stale cache" >&2; \
+			   exit 1;; \
+		esac; \
+	done
+
+## tools-verify: assert .tools/ holds exactly the pinned versions
+#
+# `go install` is not the only thing that writes .tools/ any more — CI restores
+# it from a cache — and a cache that hands back the wrong binary is worse than
+# a slow one: these binaries decide what `buf lint` accepts and what the wire
+# check compares against. Cheap enough (four execs, no compiling) to run on
+# every restore, so ask each binary what it is instead of trusting the key that
+# fetched it. `go version -m` reads the module version and the building
+# toolchain out of the binary itself, which is the same claim for all four and
+# is not a `--version` flag anyone can reformat.
+.PHONY: tools-verify
+tools-verify:
+	@fail=0; \
+	for pair in $(TOOL_BINS); do \
+		bin=$${pair%%:*}; want=$${pair#*:}; path=$(TOOLS_DIR)/$$bin; \
+		if [ ! -x "$$path" ]; then \
+			echo "  $$bin: not in $(TOOLS_DIR)" >&2; fail=1; continue; \
+		fi; \
+		info=$$(go version -m "$$path") || { echo "  $$bin: not a Go binary" >&2; fail=1; continue; }; \
+		got=$$(echo "$$info" | awk '$$1 == "mod" { print $$3; exit }'); \
+		built=$$(echo "$$info" | awk 'NR == 1 { print $$2; exit }'); \
+		[ "$$got" = "$$want" ] || { echo "  $$bin: is $$got, want $$want" >&2; fail=1; }; \
+		[ "$$built" = "$(GO_TOOLCHAIN)" ] || { echo "  $$bin: built by $$built, want $(GO_TOOLCHAIN)" >&2; fail=1; }; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+		echo "  .tools/ does not match the pins in $(firstword $(MAKEFILE_LIST)); run 'make tools'" >&2; \
+		exit 1; \
+	fi; \
+	echo "  .tools/ matches every pin"
+
 ## proto: regenerate Go code from proto/
 .PHONY: proto
 proto:
@@ -109,21 +200,49 @@ build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/ ./cmd/...
 
 ## build-agent-all: cross-compile the agent for every supported platform
+#
+# Every platform is attempted even after one fails, and the failures are named
+# together at the end. This is CI's whole cross-compile job now rather than six
+# jobs paying six checkouts and six setup-gos for twenty seconds of work each,
+# and those six carried fail-fast: false: one platform breaking should still
+# tell you about the other five in the same run, not one per push.
 .PHONY: build-agent-all
 build-agent-all:
 	@mkdir -p $(BIN_DIR)
-	@for p in $(AGENT_PLATFORMS); do \
+	@failed=""; \
+	for p in $(AGENT_PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=""; \
 		[ "$$os" = "windows" ] && ext=".exe"; \
 		echo "  building fleet-agent $$os/$$arch"; \
 		GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags '$(LDFLAGS)' \
-			-o $(BIN_DIR)/fleet-agent-$$os-$$arch$$ext ./cmd/fleet-agent || exit 1; \
-	done
+			-o $(BIN_DIR)/fleet-agent-$$os-$$arch$$ext ./cmd/fleet-agent \
+			|| failed="$$failed $$os/$$arch"; \
+	done; \
+	if [ -n "$$failed" ]; then \
+		echo "  fleet-agent failed to build for:$$failed" >&2; \
+		exit 1; \
+	fi
 
 ## test: run unit tests with race detection
 .PHONY: test
 test:
 	go test -race -count=1 ./...
+
+## test-norace: run unit tests without the race detector
+#
+# Every other test run in this repository, and every job in CI, passes -race.
+# That is exactly how #56 sat green on main: a test that failed 5/5 without the
+# detector and passed 100% with it, because the detector's slowdown was what
+# made its assertion true. Twelve green jobs saw nothing, while `go test ./...`
+# — the command a contributor actually runs first — failed for everyone.
+#
+# So this is that command, kept here rather than typed into a workflow file, so
+# that what CI runs on Linux and what you can run on a laptop are the same
+# thing. A failure here with the -race jobs green is not a flake to re-run: it
+# means an assertion depends on how slow the machine was.
+.PHONY: test-norace
+test-norace:
+	go test -count=1 ./...
 
 ## test-integration: run the end-to-end suite against the real binaries
 #
@@ -196,6 +315,12 @@ vet:
 # CI's own lint job runs on one runner, so it sees one GOOS too; the test
 # matrix is what catches the rest, after a push. Running all three here means
 # finding it before.
+#
+# The one thing CI runs that this does not is test-norace. It is free there —
+# the x1 runner, in parallel with a test matrix that takes three minutes — and
+# it would be a third of this gate's wall clock here, paid by everyone on
+# every run. Run it by hand if you have touched anything whose assertion could
+# depend on how fast the machine is.
 .PHONY: check
 check: proto-lint proto-check vet lint test
 
