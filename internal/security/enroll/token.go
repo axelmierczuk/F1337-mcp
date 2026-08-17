@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +48,40 @@ var (
 	// ErrTokenUsed is returned when a token matches but was already
 	// redeemed.
 	ErrTokenUsed = errors.New("enroll: enrollment token already used")
+	// ErrTokenRevoked is returned when a token matches but the operator
+	// withdrew it before it was redeemed.
+	ErrTokenRevoked = errors.New("enroll: enrollment token revoked")
+
+	// ErrTokenIDUnknown is returned by Revoke when no token carries the given
+	// id.
+	ErrTokenIDUnknown = errors.New("enroll: no enrollment token with that id")
+	// ErrTokenIDAmbiguous is returned by Revoke when an id prefix matches more
+	// than one token.
+	ErrTokenIDAmbiguous = errors.New("enroll: that token id matches more than one token")
+)
+
+// TokenIDLength is how many hex characters of a token's stored hash identify it
+// to `fleetctl enroll list` and `fleetctl enroll revoke`.
+//
+// The id is derived from the hash rather than stored beside it, so it cannot
+// drift from the entry it names, and it is safe to print for the same reason the
+// hash is safe to store: the value it indexes carries 256 bits of entropy, so
+// nothing about it is recoverable from its digest. It is deliberately not any
+// part of the token itself — a listing must never show token material, in any
+// output mode.
+const TokenIDLength = 12
+
+// minTokenIDPrefix is the shortest prefix Revoke will act on. A one-character
+// id would routinely match several tokens, and the operator would learn that
+// only from an error; requiring a few characters makes the common case exact.
+const minTokenIDPrefix = 4
+
+// Token states, as `fleetctl enroll list` reports them.
+const (
+	StatePending = "pending"
+	StateUsed    = "used"
+	StateExpired = "expired"
+	StateRevoked = "revoked"
 )
 
 // MintOptions describes the token to mint and, crucially, the identity the
@@ -70,6 +105,10 @@ type MintOptions struct {
 // value is never stored on a TokenRecord — only what was known about it at
 // mint time and, after redemption, when and whether it was used.
 type TokenRecord struct {
+	// ID names this token without naming its value: the first TokenIDLength
+	// hex characters of the stored hash. It is derived on every read and never
+	// persisted, so it cannot disagree with the entry it identifies.
+	ID string `yaml:"-"`
 	// Name is the sandbox name reserved when the token was minted.
 	Name string `yaml:"name,omitempty"`
 	// Labels are operator-assigned metadata to attach to the sandbox once
@@ -84,10 +123,31 @@ type TokenRecord struct {
 	// Used and UsedAt record redemption. Used is set atomically by Redeem.
 	Used   bool      `yaml:"used"`
 	UsedAt time.Time `yaml:"used_at,omitempty"`
+	// Revoked and RevokedAt record the operator withdrawing a token before
+	// anyone redeemed it.
+	Revoked   bool      `yaml:"revoked,omitempty"`
+	RevokedAt time.Time `yaml:"revoked_at,omitempty"`
 }
 
 // Expired reports whether the token's TTL had elapsed as of now.
 func (r TokenRecord) Expired(now time.Time) bool { return now.After(r.ExpiresAt) }
+
+// State renders the token's state as of now, in the vocabulary `fleetctl
+// enroll list` prints. It lives here rather than in the CLI so a token's state
+// has one definition and the order of the checks — revoked before used before
+// expired — cannot differ between two places that ask.
+func (r TokenRecord) State(now time.Time) string {
+	switch {
+	case r.Revoked:
+		return StateRevoked
+	case r.Used:
+		return StateUsed
+	case r.Expired(now):
+		return StateExpired
+	default:
+		return StatePending
+	}
+}
 
 type tokenEntry struct {
 	// Hash is the hex-encoded SHA-256 of the token value. The plaintext is
@@ -177,6 +237,7 @@ func (s *TokenStore) Mint(opts MintOptions) (string, TokenRecord, error) {
 	}
 	sum := sha256.Sum256([]byte(token))
 	entry := &tokenEntry{Hash: hex.EncodeToString(sum[:]), Record: rec}
+	rec.ID = entry.id()
 
 	if err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
 		return append(entries, entry), true, nil
@@ -184,6 +245,14 @@ func (s *TokenStore) Mint(opts MintOptions) (string, TokenRecord, error) {
 		return "", TokenRecord{}, err
 	}
 	return token, rec, nil
+}
+
+// id returns the operator-facing identifier for this entry.
+func (e *tokenEntry) id() string {
+	if len(e.Hash) < TokenIDLength {
+		return e.Hash
+	}
+	return e.Hash[:TokenIDLength]
 }
 
 // Redeem validates token and, if it is unexpired and unused, atomically
@@ -206,6 +275,8 @@ func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
 				continue
 			}
 			switch {
+			case e.Record.Revoked:
+				outErr = ErrTokenRevoked
 			case e.Record.Used:
 				outErr = ErrTokenUsed
 			case e.Record.Expired(now):
@@ -214,6 +285,7 @@ func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
 				e.Record.Used = true
 				e.Record.UsedAt = now
 				out, outErr = e.Record, nil
+				out.ID = e.id()
 			}
 			break
 		}
@@ -240,12 +312,73 @@ func (s *TokenStore) List() ([]TokenRecord, error) {
 	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
 		out = make([]TokenRecord, 0, len(entries))
 		for _, e := range entries {
-			out = append(out, e.Record)
+			rec := e.Record
+			rec.ID = e.id()
+			out = append(out, rec)
 		}
 		return entries, false, nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// Revoke withdraws the token identified by id — a prefix of the id `enroll
+// list` prints — and returns the record it marked.
+//
+// The entry is marked rather than deleted. A revoked token that vanished from
+// the listing would leave the operator who just revoked it with no confirmation
+// and no record, and would report a later attempt to redeem it as an unknown
+// token rather than as one somebody withdrew.
+//
+// Revoking a token that was already used or has already expired is refused: it
+// is either a mistake about which token is which, or an operator believing they
+// have closed a window that closed itself. Neither should read as success.
+func (s *TokenStore) Revoke(id string) (TokenRecord, error) {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if len(id) < minTokenIDPrefix {
+		return TokenRecord{}, fmt.Errorf("enroll: token id %q is too short; give at least %d characters of the id from `fleetctl enroll list`",
+			id, minTokenIDPrefix)
+	}
+
+	now := time.Now().UTC()
+	var (
+		out    TokenRecord
+		outErr error
+	)
+	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
+		var matches []*tokenEntry
+		for _, e := range entries {
+			if strings.HasPrefix(e.Hash, id) {
+				matches = append(matches, e)
+			}
+		}
+		switch {
+		case len(matches) == 0:
+			outErr = fmt.Errorf("%w: %s", ErrTokenIDUnknown, id)
+			return entries, false, nil
+		case len(matches) > 1:
+			outErr = fmt.Errorf("%w: %s matches %d tokens; use more of the id", ErrTokenIDAmbiguous, id, len(matches))
+			return entries, false, nil
+		}
+
+		e := matches[0]
+		if state := e.Record.State(now); state != StatePending {
+			outErr = fmt.Errorf("enroll: token %s is already %s, so there is nothing to revoke", e.id(), state)
+			return entries, false, nil
+		}
+		e.Record.Revoked = true
+		e.Record.RevokedAt = now
+		out = e.Record
+		out.ID = e.id()
+		return entries, true, nil
+	})
+	if err != nil {
+		return TokenRecord{}, err
+	}
+	if outErr != nil {
+		return TokenRecord{}, outErr
 	}
 	return out, nil
 }
@@ -340,8 +473,8 @@ func (s *TokenStore) save(st tokenState) error {
 // incompatibly.
 const schemaVersion = 1
 
-// prune drops tokens that have been spent — used or expired — for longer than
-// spentTokenRetention.
+// prune drops tokens that have been spent — used, revoked, or expired — for
+// longer than spentTokenRetention.
 func prune(entries []*tokenEntry, now time.Time) []*tokenEntry {
 	out := entries[:0]
 	for _, e := range entries {
@@ -349,7 +482,13 @@ func prune(entries []*tokenEntry, now time.Time) []*tokenEntry {
 		if e.Record.Used && e.Record.UsedAt.After(spentAt) {
 			spentAt = e.Record.UsedAt
 		}
-		spent := e.Record.Used || e.Record.Expired(now)
+		// A token revoked well before its expiry is still retained until the
+		// expiry passes: the operator who revoked it should be able to see that
+		// it is revoked for as long as anyone might still try to use it.
+		if e.Record.Revoked && e.Record.RevokedAt.After(spentAt) {
+			spentAt = e.Record.RevokedAt
+		}
+		spent := e.Record.State(now) != StatePending
 		if spent && now.Sub(spentAt) > spentTokenRetention {
 			continue
 		}
