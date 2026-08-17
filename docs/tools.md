@@ -101,13 +101,17 @@ Run a command to completion.
 | `argv` | string[] | **Required.** Executable and arguments. Not shell-parsed. `argv[0]` is looked up in the effective `PATH` — the one the command will run with, not the daemon's — and never in the working directory. |
 | `working_dir` | string | An ordinary path: exec and the path jail are mutually exclusive, so there are no roots to resolve it against. Must exist and be a directory. Defaults to the agent account's home directory. |
 | `env` | string[] | `KEY=VALUE`. Applied over a documented base environment, not over the daemon's own. An entry replaces the base entry with the same name. |
-| `timeout_seconds` | int | SIGTERM to the process **group** on expiry, then SIGKILL after the grace period. On Windows there is no catchable equivalent, so the job object is terminated at the first step. Above the agent's `exec.max_timeout` the call is refused, naming the maximum, rather than quietly shortened. On a saturated agent the timeout bounds the wait for a free process slot and then the command itself, so a queued call can take up to twice it. |
-| `max_output_bytes` | int | Beyond this, output is truncated and marked. Above the agent's `exec.max_output_bytes` it is clamped to it — the truncation in the result is what reports that. |
+| `timeout_seconds` | int | SIGTERM to the process **group** on expiry, then SIGKILL after the grace period. On Windows there is no catchable equivalent, so the job object is terminated at the first step. Defaults to 120s, matching the agent's own default so that a timeout report names the limit that actually bit. Above the agent's `exec.max_timeout` the call is refused, naming the maximum, rather than quietly shortened. On a saturated agent the timeout bounds the wait for a free process slot and then the command itself, so a queued call can take up to twice it — the RPC deadline allows for that, so a hung agent still cannot hold the call open. |
+| `max_output_bytes` | int | Beyond this, output is truncated and marked. Defaults to 128 KiB: the agent's ceiling is sized for a program reading output, this default for a model reading it in context. Above the agent's `exec.max_output_bytes` it is clamped to it — the truncation in the result is what reports that. |
 | `shell` | bool | Run through the platform shell (`sh -c`, or `cmd /c` on Windows). Opt-in, because it reintroduces shell parsing of untrusted strings. The command policy then sees the shell, not the command inside it. |
 | `stdin` | string | Written to stdin, which is then closed. |
 
-Returns `exit_code`, `stdout`, `stderr`, `duration_ms`, `timed_out`,
-`truncation`.
+Returns `exit_code`, `stdout`, `stderr`, `duration_ms`, `timed_out`, `signal`,
+`truncation` and `note`. The exit code leads, before either stream, because it
+decides what the rest of the result means. stdout and stderr stay separate:
+merging them makes the model hunt for the one sentence that matters. A command
+that wrote to neither is reported as having produced no output, in words —
+a blank result is otherwise indistinguishable from a hung call.
 
 **A command that fails is a successful call.** A non-zero exit is reported in
 `exit_code`; the tool errors for a request the agent would not run at all — an

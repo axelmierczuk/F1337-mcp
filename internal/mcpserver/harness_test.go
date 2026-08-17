@@ -183,8 +183,11 @@ func (c *fakeClients) Host(name, _ string) (sandboxdv1.HostServiceClient, error)
 	return c.host(name), nil
 }
 
+// Exec answers with the canned client in execfiles_fakes_test.go, so the
+// fleet-wide echo walks can call the exec tool. What it actually does is tested
+// against the real agent service over bufconn; see agentbackend_test.go.
 func (c *fakeClients) Exec(string, string) (sandboxdv1.ExecServiceClient, error) {
-	return nil, status.Error(codes.Unimplemented, "exec is milestone M2 issue #22")
+	return fakeExec{}, nil
 }
 
 func (c *fakeClients) Files(string, string) (sandboxdv1.FileServiceClient, error) {

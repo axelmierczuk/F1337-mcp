@@ -249,6 +249,8 @@ func TestServer_RegistersTheFleetGroup(t *testing.T) {
 		"sandbox_add":    false,
 		"sandbox_remove": false,
 		"sandbox_info":   true,
+
+		"sandbox_exec": true,
 	}, targeted)
 }
 

@@ -317,5 +317,6 @@ func AddFleet[In any, Out any, POut interface {
 func Register(server *mcp.Server, deps Deps) *Registrar {
 	r := NewRegistrar(server, deps)
 	registerFleet(r)
+	registerExec(r)
 	return r
 }
