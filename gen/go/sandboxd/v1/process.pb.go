@@ -567,7 +567,11 @@ type ProcessStatus struct {
 	ExitedAt  *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=exited_at,json=exitedAt,proto3" json:"exited_at,omitempty"`
 	ExitCode  int32                  `protobuf:"varint,9,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
 	Signal    string                 `protobuf:"bytes,10,opt,name=signal,proto3" json:"signal,omitempty"`
-	// Number of times the supervisor has restarted this process.
+	// Number of times the restart *policy* has restarted this process, which is
+	// the count max_restarts bounds. A RestartProcess the caller asked for does
+	// not move it: charging an explicit restart against the policy's budget would
+	// let a developer restarting a dev server by hand exhaust the automatic
+	// recovery it needs when it crashes on its own.
 	RestartCount  uint32        `protobuf:"varint,11,opt,name=restart_count,json=restartCount,proto3" json:"restart_count,omitempty"`
 	RestartPolicy RestartPolicy `protobuf:"varint,12,opt,name=restart_policy,json=restartPolicy,proto3,enum=sandboxd.v1.RestartPolicy" json:"restart_policy,omitempty"`
 	// Most recent output line, so fleet_process_list is useful on its own
