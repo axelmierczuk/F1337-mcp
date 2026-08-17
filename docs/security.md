@@ -206,6 +206,14 @@ with weaker handling than whatever it copied them out of: it gets shipped
 off-box, read by people debugging something unrelated, and kept long after the
 credential in it was supposed to have been rotated.
 
+That rule is about the record, not only about its field list. An error message
+is written into a field, and a caller chooses much of what goes into one — the
+`PATH` a failed lookup searched, an environment entry quoted back at whoever
+malformed it. Those are redacted in the record and left intact in the error the
+caller receives: the caller sent them, and an exec caller can read the agent's
+environment with a command in any case, so telling it costs nothing that
+writing it down would not cost more.
+
 **What it does contain, and the limitation that follows.** Argv is recorded, so
 `mysql -pHUNTER2` writes that password into the file. The argument list is the
 whole point of an exec record and there is no reliable way to tell a password

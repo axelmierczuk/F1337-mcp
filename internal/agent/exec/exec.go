@@ -216,7 +216,12 @@ func (s *Service) Exec(req *sandboxdv1.ExecRequest, stream sandboxdv1.ExecServic
 
 	env, err := mergeEnv(s.baseEnv, req.GetEnv())
 	if err != nil {
-		return s.fail(rec, codes.InvalidArgument, "%s", err)
+		// The entry is quoted to the caller and not to the log: "FOO" meaning
+		// "FOO=bar" and "=bar" meaning "FOO=bar" are both ways for a value to
+		// arrive inside a string this would otherwise write down.
+		return s.failRedacted(rec,
+			"a request environment entry was malformed; the entry itself is not recorded, because this log never carries environment data",
+			codes.InvalidArgument, "%s", err)
 	}
 
 	dir, err := s.workingDir(req.GetWorkingDir())
@@ -246,7 +251,13 @@ func (s *Service) Exec(req *sandboxdv1.ExecRequest, stream sandboxdv1.ExecServic
 		return s.finish(rec, status.Errorf(codes.PermissionDenied, "%s", decision.Reason))
 	}
 	if lookupErr != nil {
-		return s.fail(rec, codes.NotFound, "%s", lookupErr)
+		// The caller's error names the PATH that was searched, which is the
+		// only thing that makes "not found" actionable. The record does not:
+		// that PATH is an environment value, and on a request that set one it
+		// is a value the caller chose.
+		return s.failRedacted(rec,
+			fmt.Sprintf("could not resolve %q to an executable; the PATH searched is an environment value and is not recorded", cmd.Requested),
+			codes.NotFound, "%s", lookupErr)
 	}
 
 	// A slot in the agent-wide process limit. The wait for one is bounded by
@@ -423,13 +434,23 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 		// something else, and the sweep would kill an unrelated process. There
 		// is nothing left to sweep in that case anyway: a leader that never got
 		// its own group had no group for its descendants to be in.
+		//
+		// Both failures are logged at WARN, and neither is decoration: this is
+		// the step that makes "exec takes its process tree with it" true, so a
+		// failure here is a descendant still running on the host after the RPC
+		// that started it has returned. At DEBUG — which is not the level a
+		// daemon runs at — a broken guarantee would be invisible exactly where
+		// it matters. ErrProcessNotFound is the ordinary answer for a group
+		// that is already empty, and is not a failure.
 		if group.Isolated() {
 			if err := sweepGroup(group); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
-				s.log.Debug("sweeping the process group after exec", "error", err)
+				s.log.Warn("could not sweep the process group after exec; a descendant may have outlived the call",
+					"error", err)
 			}
 		}
 		if err := group.Close(); err != nil {
-			s.log.Debug("closing the process group after exec", "error", err)
+			s.log.Warn("could not release the process group after exec; on Windows this is what kills the tree",
+				"error", err)
 		}
 	}()
 
@@ -650,6 +671,29 @@ func (s *Service) fail(rec policy.Record, code codes.Code, format string, args .
 	rec.Outcome = policy.OutcomeError
 	rec.Error = status.Convert(err).Message()
 	return s.finish(rec, err)
+}
+
+// failRedacted is fail for a refusal whose message quotes something the record
+// must not hold.
+//
+// Record's contract is that no environment value ever reaches it, and Record
+// has no field that could carry one — but an error string can, and two of them
+// did: the PATH a failed lookup searched, and a malformed environment entry
+// quoted back at its sender. Both are environment data, and on a request that
+// supplied its own env both are values the caller chose.
+//
+// The asymmetry is deliberate rather than a compromise. Telling the caller
+// costs nothing: it sent the value, and an exec caller can read the agent's
+// environment with a command anyway — this service is unconfined by design.
+// Writing it down does cost something, and it is the whole reason the record
+// has no env field: this file gets shipped off-box, read by people debugging
+// something unrelated, and kept long after the credential in it should have
+// been rotated. Everything an operator needs to act on — the command, the
+// outcome, the rule, the working directory — is already in a field of its own.
+func (s *Service) failRedacted(rec policy.Record, recorded string, code codes.Code, format string, args ...any) error {
+	rec.Outcome = policy.OutcomeError
+	rec.Error = recorded
+	return s.finish(rec, status.Errorf(code, format, args...))
 }
 
 // finish writes the audit record and returns the error this RPC ends with.

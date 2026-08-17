@@ -44,6 +44,13 @@ const (
 // shipped off-box, and it is kept long after the credential it captured was
 // supposed to have been rotated.
 //
+// The rule is about the record and not only about its field list, because an
+// error string is a field too and a caller chooses much of what goes into one.
+// A PATH quoted into "not in PATH (...)" is an environment value however it
+// arrived. A writer holding an error that carries environment data must record
+// a redacted line and hand the caller the unredacted one — see exec's
+// failRedacted, and the test that reverts it.
+//
 // Argv is recorded, and that is the one place a caller can put a secret into
 // this file — "mysql -pHUNTER2" writes it down. That is a real limitation
 // rather than an oversight: the argument list is the whole point of an exec

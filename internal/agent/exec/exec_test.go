@@ -835,6 +835,55 @@ func TestExec_AuditNeverRecordsEnvironmentValues(t *testing.T) {
 	require.NotContains(t, h.logs.String(), secret, "nor does the daemon log carry it")
 }
 
+// The "no environment values" rule has to hold on the failure paths too.
+//
+// Record has no field that could carry one, which is what the test above
+// checks — but an error string can, and it is written into a field. Two ways
+// in, both reachable by any caller, because a caller chooses its own
+// environment: the PATH a failed lookup searched, and a malformed entry quoted
+// back at its sender. Either one puts a value the operator never chose into
+// the file that gets shipped off-box.
+//
+// The caller still gets the whole story: it sent the value, and an exec caller
+// can read the agent's environment with a command anyway.
+func TestExec_AuditNeverRecordsEnvironmentValuesOnTheFailurePaths(t *testing.T) {
+	const secret = "s3cr3t-token-do-not-log-4a9f"
+
+	for name, req := range map[string]*sandboxdv1.ExecRequest{
+		// A PATH the caller chose, echoed by "not in PATH (...)".
+		"the PATH a failed lookup searched": {
+			Argv: []string{"definitely-not-a-real-command"},
+			Env:  []string{"PATH=/tmp/" + secret},
+		},
+		// An entry with an empty name is quoted whole, and "=VALUE" is a value
+		// with nothing else in it.
+		"a malformed entry quoted back": {
+			Argv: selfArgv(),
+			Env:  []string{helperEnvFor("echo"), "=" + secret},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+
+			_, err := h.run(t, req)
+			require.Error(t, err)
+			require.Contains(t, status.Convert(err).Message(), secret,
+				"the caller is told what it sent; only the log is redacted")
+
+			require.NoError(t, h.audit.Close())
+			raw, readErr := os.ReadFile(h.auditPath)
+			require.NoError(t, readErr)
+			require.NotContains(t, string(raw), secret,
+				"an environment value must not reach the audit log through an error string either")
+
+			records := parseRecords(t, h.auditPath)
+			require.Len(t, records, 1, "the refusal is still recorded, just without the value")
+			require.Equal(t, policy.OutcomeError, records[0].Outcome)
+			require.NotEmpty(t, records[0].Error, "and it still says why")
+		})
+	}
+}
+
 func TestExec_ConcurrentCallsProduceWholeRecords(t *testing.T) {
 	h := newHarness(t)
 
@@ -885,6 +934,17 @@ func TestExec_AuditRequiredFailsTheRPCWhenTheRecordCannotBeWritten(t *testing.T)
 	require.Equal(t, codes.Internal, status.Code(err))
 	require.Contains(t, status.Convert(err).Message(), "audit.required")
 	require.Nil(t, stream.result(), "the result is withheld when it could not be recorded")
+
+	// What the caller does still have is the output, and that is the shape of
+	// the failure rather than a wrinkle in it: chunks go out as the command
+	// produces them, which is the point of a streaming RPC, so by the time the
+	// record is written they cannot be recalled. "The call failed" here means
+	// the caller never learns the exit status, not that it saw nothing — and a
+	// consumer has to read it as "this may well have run".
+	require.Equal(t, "hi", stream.output(sandboxdv1.Stream_STREAM_STDOUT),
+		"output already on the wire is not withheld, and the error message is what says so")
+	require.Contains(t, status.Convert(err).Message(), "its result is withheld",
+		"the message distinguishes this from a handler that crashed, which is also Internal")
 }
 
 func TestExec_AuditNotRequiredLogsAndProceeds(t *testing.T) {

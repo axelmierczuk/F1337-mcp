@@ -145,6 +145,33 @@ func TestServer_ShutdownClosesTheAuditLog(t *testing.T) {
 	assert.Contains(t, string(data), "sandboxd.v1.ExecService/Exec")
 }
 
+// Stop is the impatient path, and it still releases the audit log's handle.
+//
+// It skips the shutdown participants on purpose, but the log is an OS handle
+// rather than a participant's state: left open it makes the file undeletable on
+// Windows for the life of the process, including by the caller that gave up on
+// the server.
+func TestServer_StopReleasesTheAuditLog(t *testing.T) {
+	fleet := newTestFleet(t)
+	dir := t.TempDir()
+	cfg := fleet.agentConfig(t)
+	cfg.Audit.Enabled = true
+	cfg.Audit.Path = filepath.Join(dir, "audit.jsonl")
+
+	h := start(t, cfg, []agent.Registration{registration("host", newCountingService())})
+	require.NoError(t, h.server.Deps().Audit.Write(policyRecord()))
+
+	h.server.Stop()
+
+	// Removing the file is the portable spelling of "nothing holds it open":
+	// on Windows an open handle is what makes this fail, and on Unix it
+	// succeeds either way, so the assertion has teeth exactly where the
+	// failure lives. Recreated afterwards so the harness's own shutdown, which
+	// runs later, still has a log to close.
+	require.NoError(t, os.Remove(cfg.Audit.Path))
+	require.NoError(t, h.server.Deps().Audit.Write(policyRecord()), "a later write reopens it")
+}
+
 // A config assembled in memory gets the same caps as one read from disk.
 //
 // Load applies the documented defaults; nothing else did, so a Config built by

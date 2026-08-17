@@ -474,7 +474,20 @@ func (s *Server) shutdown() {
 // Stop closes the listener and drops in-flight RPCs without draining. It
 // exists for tests and for a caller that has already lost patience; the normal
 // path is cancelling the context passed to Serve.
-func (s *Server) Stop() { s.grpc.Stop() }
+//
+// It skips the shutdown participants deliberately — that is what "without
+// draining" means — but it does release the audit log, because that is an OS
+// handle rather than a participant's state. A handle nobody will close is a
+// file that cannot be renamed or removed on Windows for as long as the process
+// lives, which would make the impatient path leave the log undeletable by the
+// very caller that gave up on the server. Closing is idempotent and a later
+// write reopens the file, so this costs a shutdown nothing.
+func (s *Server) Stop() {
+	s.grpc.Stop()
+	if err := s.deps.Audit.Close(); err != nil {
+		s.log.Error("closing the audit log failed", "error", err)
+	}
+}
 
 // recoveryUnaryInterceptor turns a panic in a handler into an Internal error.
 //
