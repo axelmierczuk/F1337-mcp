@@ -2,6 +2,7 @@ package enroll_test
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -140,6 +141,14 @@ func TestEnroll_ConcurrentEnrollmentsValidateTogetherAndOnlyOneSpendsTheToken(t 
 		mu       sync.Mutex
 		issued   []string
 		refusals []codes.Code
+		// Every racer builds its own CSR from its own key, which is what makes
+		// them eight different enrollments of one token rather than eight
+		// copies of one. The winner's leaf has to carry the winner's key: a
+		// certificate assembled from another racer's request would hand it an
+		// identity for a private key it does not hold, and the store would say
+		// the token was spent correctly all the same.
+		winnerCert []byte
+		winnerPub  *ecdsa.PublicKey
 	)
 	var wg sync.WaitGroup
 	wg.Add(racers)
@@ -185,6 +194,10 @@ func TestEnroll_ConcurrentEnrollmentsValidateTogetherAndOnlyOneSpendsTheToken(t 
 				return
 			}
 			issued = append(issued, resp.GetAssignedName())
+			// Parsed on the test's own goroutine below: leafOf is a require
+			// helper, and a FailNow from here would be a FailNow on the wrong
+			// goroutine.
+			winnerCert, winnerPub = resp.GetCertificatePem(), &key.PublicKey
 		}()
 	}
 	wg.Wait()
@@ -205,6 +218,13 @@ func TestEnroll_ConcurrentEnrollmentsValidateTogetherAndOnlyOneSpendsTheToken(t 
 	}
 	assert.Len(t, fleet.records(), 1,
 		"a loser must be refused before it takes a name, or a race leaves fleet members no host will ever answer for")
+
+	// And the one certificate belongs to the racer that won, not to whichever
+	// request happened to be in some other goroutine's hands.
+	if assert.NotNil(t, winnerCert, "no certificate was issued at all") {
+		assert.True(t, winnerPub.Equal(leafOf(t, winnerCert).PublicKey),
+			"the issued leaf must carry the public key of the request that won the swap")
+	}
 
 	// And the token is spent rather than wedged: a later attempt is refused
 	// too, and refused as a replayed token.
@@ -328,14 +348,26 @@ func TestTokenStore_InspectDoesNotSpendTheToken(t *testing.T) {
 	// What Inspect reports has to be what Redeem commits. Enrollment validates
 	// the request against the first and is authorized by the second, so a
 	// difference between them is a request checked against an authorization it
-	// did not receive. Nothing mutates these fields after Mint — this is what
-	// says so out loud, and fails if that stops being true.
+	// did not receive.
+	//
+	// Enrollment holds that record for the whole of the validation, so the
+	// question is not only whether the store rewrites those fields — it is
+	// whether anything holding a record can. Writing through it here is what
+	// asks that, and it has to change nothing. Until the store cloned on the
+	// way out it did not: Labels and Addresses came back as the entry's own map
+	// and slice, which also made comparing the two records a comparison of a
+	// value with itself, and this claim unfalsifiable.
+	first.Labels["role"] = "tampered"
+	first.Addresses[0] = "evil.internal:8722"
+
 	redeemed, err := store.Redeem(token)
 	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"role": "build"}, redeemed.Labels,
+		"writing through a record the store handed out must not rewrite what the token authorizes")
+	assert.Equal(t, []string{"10.0.0.5:8722"}, redeemed.Addresses,
+		"writing through a record the store handed out must not rewrite what the token authorizes")
 	assert.Equal(t, first.ID, redeemed.ID)
 	assert.Equal(t, first.Name, redeemed.Name)
-	assert.Equal(t, first.Labels, redeemed.Labels)
-	assert.Equal(t, first.Addresses, redeemed.Addresses)
 	assert.Equal(t, first.IssuedAt, redeemed.IssuedAt)
 	assert.Equal(t, first.ExpiresAt, redeemed.ExpiresAt)
 
@@ -532,4 +564,193 @@ func (n *mutableNames) remove(name string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	delete(n.existing, name)
+}
+
+// The record a caller is handed is its own, from every entry point.
+//
+// Enrollment's whole argument for validating before it redeems is that the
+// fields it validates against — Name, Labels, Addresses, ExpiresAt — are
+// settled at mint time and cannot change between the read and the swap. Two of
+// them are a map and a slice, so a store that returned the entry's own would
+// make every holder of a record a writer of them: from another goroutine,
+// outside the store's lock, in exactly the window the split opens.
+//
+// No caller in this tree writes to one today, which is why this is about the
+// store's contract rather than a bug being fixed. A contract enrollment's
+// soundness rests on is the store's to keep.
+func TestTokenStore_RecordsItHandsOutShareNothingWithTheStore(t *testing.T) {
+	store := enroll.NewTokenStore()
+	authorized := []string{"10.0.0.5:8722"}
+	labels := map[string]string{"role": "build"}
+
+	token, minted, err := store.Mint(enroll.MintOptions{
+		Name:      "build-box",
+		Labels:    labels,
+		Addresses: authorized,
+	})
+	require.NoError(t, err)
+
+	// The options the caller passed are not the store's copy either, so a mint
+	// followed by the caller reusing its own slice cannot reach the entry.
+	authorized[0] = "evil.internal:8722"
+	labels["role"] = "tampered"
+
+	minted.Labels["role"] = "tampered-through-mint"
+	minted.Addresses[0] = "evil.internal:8722"
+
+	listed, err := store.List()
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	listed[0].Labels["role"] = "tampered-through-list"
+	listed[0].Addresses[0] = "evil.internal:8722"
+
+	seen, err := store.Inspect(token)
+	require.NoError(t, err)
+	seen.Labels["role"] = "tampered-through-inspect"
+	seen.Addresses[0] = "evil.internal:8722"
+
+	// What the token authorizes is what it was minted with, whatever any of
+	// those holders did with the copy it was given.
+	redeemed, err := store.Redeem(token)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"role": "build"}, redeemed.Labels)
+	assert.Equal(t, []string{"10.0.0.5:8722"}, redeemed.Addresses)
+
+	// And Redeem's own record is a copy too, so the last holder cannot rewrite
+	// the entry `fleetctl enroll list` prints afterwards.
+	redeemed.Labels["role"] = "tampered-through-redeem"
+	redeemed.Addresses[0] = "evil.internal:8722"
+	after, err := store.List()
+	require.NoError(t, err)
+	require.Len(t, after, 1)
+	assert.Equal(t, map[string]string{"role": "build"}, after[0].Labels)
+	assert.Equal(t, []string{"10.0.0.5:8722"}, after[0].Addresses)
+}
+
+// hookedNames runs fn the first time the collision check is consulted, which is
+// inside the window the reorder opens: after the request has been validated
+// against a token Inspect said was redeemable, and before the swap that spends
+// it. What fn does is what a concurrent operator, or a failing disk, does in
+// that window.
+type hookedNames struct {
+	once sync.Once
+	fn   func()
+}
+
+func (n *hookedNames) Exists(string) bool {
+	n.once.Do(n.fn)
+	return false
+}
+
+// A token revoked while the request that names it is being validated.
+//
+// Inspect said the token was redeemable, and by the time the swap is attempted
+// it is not. Redeem re-asks under the lock, so it is the swap that refuses,
+// which is the property the whole split rests on: the answer enrollment
+// validated against is advisory, and the only thing that grants the right to
+// proceed re-checks everything.
+func TestEnroll_ATokenRevokedWhileItsRequestIsValidatedIsRefused(t *testing.T) {
+	caObj := newTestCA(t)
+	tokens := enroll.NewTokenStore()
+	fleet := &recordingFleet{}
+
+	token, rec, err := tokens.Mint(enroll.MintOptions{Name: "build-box"})
+	require.NoError(t, err)
+
+	svc := &enroll.Service{Tokens: tokens, CA: caObj, Fleet: fleet, Names: &hookedNames{fn: func() {
+		_, revokeErr := tokens.Revoke(rec.ID)
+		assert.NoError(t, revokeErr, "the operator's revoke landed inside the window")
+	}}}
+	lis := startControlPlane(t, svc, caObj)
+
+	_, err = enrollOnce(t, lis, caObj, &sandboxdv1.EnrollRequest{Token: token, RequestedName: "build-box"})
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err),
+		"a token withdrawn inside the window is refused as a token, not accepted on the strength of a stale read")
+	assert.Empty(t, fleet.recorded,
+		"an enrollment refused at the swap must leave no fleet member behind")
+
+	// Revoked, not used: nothing was spent on its behalf.
+	_, err = tokens.Inspect(token)
+	assert.ErrorIs(t, err, enroll.ErrTokenRevoked)
+}
+
+// The same window, closed by the clock instead of the operator. Redeem takes
+// its own `now`, so a token that expires between the read and the swap is
+// refused by the swap.
+func TestEnroll_ATokenThatExpiresWhileItsRequestIsValidatedIsRefused(t *testing.T) {
+	caObj := newTestCA(t)
+	tokens := enroll.NewTokenStore()
+	fleet := &recordingFleet{}
+
+	// A short TTL and a longer wait, as TestRedeem_Expired does it: waiting
+	// only ever makes an expiry more true, so a loaded machine cannot turn this
+	// into a failure.
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box", TTL: 100 * time.Millisecond})
+	require.NoError(t, err)
+
+	svc := &enroll.Service{Tokens: tokens, CA: caObj, Fleet: fleet, Names: &hookedNames{fn: func() {
+		time.Sleep(300 * time.Millisecond)
+	}}}
+	lis := startControlPlane(t, svc, caObj)
+
+	_, err = enrollOnce(t, lis, caObj, &sandboxdv1.EnrollRequest{Token: token, RequestedName: "build-box"})
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+	assert.Empty(t, fleet.recorded)
+}
+
+// The store breaking at the swap is not the token being refused either, and the
+// distinction has to survive the wrapping reserve does on the way back.
+//
+// TestEnroll_AnUnreadableTokenStoreIsNotBlamedOnTheToken covers the read in
+// front; this covers the write behind it, which is the path the reorder created
+// and the only one where a store failure arrives wrapped in errNotRedeemed.
+func TestEnroll_AStoreThatBreaksAtTheSwapIsNotBlamedOnTheToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.yaml")
+	tokens, err := enroll.OpenTokenStore(path)
+	require.NoError(t, err)
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box"})
+	require.NoError(t, err)
+
+	caObj := newTestCA(t)
+	fleet := &recordingFleet{}
+	svc := &enroll.Service{Tokens: tokens, CA: caObj, Fleet: fleet, Names: &hookedNames{fn: func() {
+		assert.NoError(t, os.WriteFile(path, []byte("version: 1\ntokens:\n  - hash: [unclosed\n"), 0o600))
+	}}}
+	lis := startControlPlane(t, svc, caObj)
+
+	_, err = enrollOnce(t, lis, caObj, &sandboxdv1.EnrollRequest{Token: token, RequestedName: "build-box"})
+	require.Error(t, err)
+	st := status.Convert(err)
+	assert.Equal(t, codes.Internal, st.Code(), "the control plane is broken, not the operator's token")
+	assert.NotContains(t, st.Message(), "rejected")
+	assert.NotContains(t, st.Message(), path)
+	assert.Empty(t, fleet.recorded)
+}
+
+// The residual, pinned rather than described.
+//
+// Once the swap is won the token is spent, whatever happens next. That is the
+// safe direction and it is what makes a certificate at most once per token: the
+// obvious "improvement" — hold the swap until the leaf is signed — is what
+// gives every loser of a race its own fleet record, which is the failure the
+// ordering exists to prevent. If this ever goes green with the token still
+// pending, the swap has moved.
+func TestEnroll_ASigningFailureAfterTheSwapStillSpendsTheToken(t *testing.T) {
+	caObj := newTestCA(t)
+	tokens := enroll.NewTokenStore()
+	svc := &enroll.Service{Tokens: tokens, CA: brokenSigner{bundle: caObj.CertPEM()}}
+	lis := startControlPlane(t, svc, caObj)
+
+	token, _, err := tokens.Mint(enroll.MintOptions{Name: "build-box"})
+	require.NoError(t, err)
+
+	_, err = enrollOnce(t, lis, caObj, &sandboxdv1.EnrollRequest{Token: token, RequestedName: "build-box"})
+	require.Error(t, err)
+	assert.Equal(t, codes.Internal, status.Code(err))
+
+	_, err = tokens.Inspect(token)
+	assert.ErrorIs(t, err, enroll.ErrTokenUsed,
+		"the swap is what grants the right to proceed, so winning it spends the token even when what follows fails")
 }

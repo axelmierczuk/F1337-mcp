@@ -128,9 +128,13 @@ func newServeCommand(out io.Writer) *cobra.Command {
 			go func() {
 				defer close(stopped)
 				<-ctx.Done()
-				// GracefulStop lets an enrollment already in flight finish:
-				// its token is marked used, so cutting the connection would
-				// spend it for nothing.
+				// GracefulStop lets an enrollment already in flight finish.
+				// One that has passed the swap has spent its token and may
+				// already hold a fleet registry entry, and neither can be
+				// taken back: cutting the connection there leaves a host with
+				// a spent token, a name reserved for it, and no certificate.
+				// One that has not reached the swap yet loses nothing by
+				// finishing, since it would only be refused.
 				server.GracefulStop()
 			}()
 			// stop() releases the signal handler and cancels ctx; waiting on

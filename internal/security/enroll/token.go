@@ -151,6 +151,22 @@ type TokenRecord struct {
 // Expired reports whether the token's TTL had elapsed as of now.
 func (r TokenRecord) Expired(now time.Time) bool { return now.After(r.ExpiresAt) }
 
+// clone returns a TokenRecord that shares no memory with r.
+//
+// Labels and Addresses are reference types, so the plain struct copy that
+// returning a record from the store amounts to hands the caller a live view of
+// the store's own entry. Two of the fields enrollment validates a request
+// against live in there — Addresses is one of them — and validating before
+// redeeming is only sound because nothing can change them between the two. That
+// is an invariant of what a token authorizes, so the store is what has to keep
+// it, rather than every caller that ever holds a record remembering not to
+// write through it.
+func (r TokenRecord) clone() TokenRecord {
+	r.Labels = copyLabels(r.Labels)
+	r.Addresses = append([]string(nil), r.Addresses...)
+	return r
+}
+
 // State renders the token's state as of now, in the vocabulary `fleetctl
 // enroll list` prints. It lives here rather than in the CLI so a token's state
 // has one definition and the order of the checks — revoked before used before
@@ -203,6 +219,12 @@ type tokenState struct {
 // which is only sound because the authorization it validated cannot have
 // changed in between — and because the fields that *can* change are exactly the
 // ones Redeem re-checks under the lock.
+//
+// Every record leaves the store as a deep copy, so that invariant is one the
+// store keeps rather than one every caller has to remember not to break: Labels
+// and Addresses are reference types, and handing out the entry's own would make
+// any holder of a record able to rewrite what a token authorizes — from another
+// goroutine, outside this lock, in the window enrollment validates in.
 type TokenStore struct {
 	mu   sync.Mutex
 	path string        // empty for a memory-only store
@@ -265,14 +287,15 @@ func (s *TokenStore) Mint(opts MintOptions) (string, TokenRecord, error) {
 	}
 	sum := sha256.Sum256([]byte(token))
 	entry := &tokenEntry{Hash: hex.EncodeToString(sum[:]), Record: rec}
-	rec.ID = entry.id()
+	out := entry.Record.clone()
+	out.ID = entry.id()
 
 	if err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
 		return append(entries, entry), true, nil
 	}); err != nil {
 		return "", TokenRecord{}, err
 	}
-	return token, rec, nil
+	return token, out, nil
 }
 
 // id returns the operator-facing identifier for this entry.
@@ -323,6 +346,9 @@ func redeemable(entries []*tokenEntry, token string, now time.Time) (*tokenEntry
 // secret, and the corrected retry then failed naming the token rather than the
 // mistake.
 //
+// The record is a copy: writing to its Labels or Addresses changes nothing
+// about what the token authorizes.
+//
 // The answer is advisory and may be stale the instant it is returned: another
 // enrollment may redeem the token, or the operator may revoke it. Redeem is the
 // authority. It re-asks, under the lock, everything asked here — that is what
@@ -340,13 +366,16 @@ func (s *TokenStore) Inspect(token string) (TokenRecord, error) {
 		e, lookupErr := redeemable(entries, token, now)
 		outErr = lookupErr
 		if outErr == nil {
-			out = e.Record
+			out = e.Record.clone()
 			out.ID = e.id()
 		}
-		// Nothing was spent, so nothing changed. Inspect runs on every
+		// Nothing was spent, so fn reports no change. Inspect runs on every
 		// enrollment attempt, including the ones anyone on the network can
-		// start, and a read that rewrote the store would hand them the control
-		// plane's disk and the lock `enroll mint` needs.
+		// start, and a read that asked for a write each time would hand them
+		// the control plane's disk and the lock `enroll mint` needs. (update
+		// still persists a pruning that dropped a long-spent entry, as it does
+		// for Redeem: that is bounded by the entries there are to drop, and one
+		// call drains them.)
 		return entries, false, nil
 	})
 	if err != nil {
@@ -384,7 +413,7 @@ func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
 		if outErr == nil {
 			e.Record.Used = true
 			e.Record.UsedAt = now
-			out = e.Record
+			out = e.Record.clone()
 			out.ID = e.id()
 		}
 		// Only a redemption that actually spent a token changed anything. A
@@ -410,7 +439,7 @@ func (s *TokenStore) List() ([]TokenRecord, error) {
 	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
 		out = make([]TokenRecord, 0, len(entries))
 		for _, e := range entries {
-			rec := e.Record
+			rec := e.Record.clone()
 			rec.ID = e.id()
 			out = append(out, rec)
 		}
@@ -468,7 +497,7 @@ func (s *TokenStore) Revoke(id string) (TokenRecord, error) {
 		}
 		e.Record.Revoked = true
 		e.Record.RevokedAt = now
-		out = e.Record
+		out = e.Record.clone()
 		out.ID = e.id()
 		return entries, true, nil
 	})
