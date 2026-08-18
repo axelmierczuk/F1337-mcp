@@ -560,3 +560,35 @@ func TestAnActionInterruptsTheFetchItInvalidates(t *testing.T) {
 	require.Equal(t, []EffectKind{EffectProcesses}, kinds(effects))
 	require.True(t, m.procState.inFlight, "the replacement fetch is not marked in flight")
 }
+
+// TestTheFirstFrameDoesNotLieAboutTheClock. The relative times a fleet pane
+// shows are measured against the model's clock, and a model that started at the
+// zero time would report every sandbox as last seen "0s ago" — including the
+// ones nothing has heard from in a day, which is the reading an operator opens
+// this to check.
+func TestTheFirstFrameDoesNotLieAboutTheClock(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel(DefaultSchedule, false)
+	require.WithinDuration(t, time.Now(), m.now, time.Minute)
+
+	// Relative to the model's own clock, so the assertion is about the clock
+	// being set rather than about how RelativeTime rounds.
+	m, _ = m.Step(sandboxesMsg{sandboxes: []Sandbox{
+		{Name: "alpha", Health: client.HealthServing, LastSeen: m.now.Add(-2 * time.Hour)},
+	}, at: m.now})
+	require.Contains(t, Render(m, NewTheme(ProfileNone), unicodeGlyphs), "2h ago")
+}
+
+// TestTheFirstFetchIsMarkedInFlight, or the tick a second later asks for the
+// fleet again while the opening read is still running.
+func TestTheFirstFetchIsMarkedInFlight(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel(DefaultSchedule, false)
+	m, effects := m.Init()
+	require.Equal(t, []EffectKind{EffectSandboxes}, kinds(effects))
+
+	_, again := m.tick(m.now.Add(time.Hour))
+	require.Empty(t, kinds(again), "the opening read was asked for twice")
+}

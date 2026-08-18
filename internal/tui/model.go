@@ -202,18 +202,26 @@ func NewModel(schedule Schedule, shellWired bool) Model {
 		// before the first frame on a real terminal, but a program whose first
 		// frame depends on that message renders nothing at all when it does
 		// not arrive — over a pipe, or on a terminal that answers slowly.
-		width:      80,
-		height:     24,
+		width:  80,
+		height: 24,
+		// The clock starts now rather than at the zero time. Relative times are
+		// rendered against it, and a model that started at the zero time would
+		// draw its first second's worth of frames reporting every sandbox as
+		// last seen "0s ago" — including the ones nothing has heard from in a
+		// day, which is the reading an operator opens this to check.
+		now:        time.Now(),
 		schedule:   schedule,
 		logFollow:  true,
 		shellWired: shellWired,
 	}
 }
 
-// Init is the first work the model wants: fetch everything once, immediately,
-// rather than showing an empty frame until the first tick.
-func (m Model) Init() []Effect {
-	return []Effect{{Kind: EffectSandboxes}}
+// Init is the first work the model wants: read the fleet once, immediately,
+// rather than showing an empty frame until the first tick. It marks the fetch
+// in flight for the same reason every other path does — the first tick arrives
+// a second later and would otherwise ask again.
+func (m Model) Init() (Model, []Effect) {
+	return m.markInFlight(EffectSandboxes), []Effect{{Kind: EffectSandboxes}}
 }
 
 // Step advances the model. It is pure: same model, same message, same result.

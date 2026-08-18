@@ -234,7 +234,9 @@ type program struct {
 var _ tea.Model = (*program)(nil)
 
 func (p *program) Init() tea.Cmd {
-	return tea.Batch(append(p.dispatch(p.model.Init()), p.tick())...)
+	next, effects := p.model.Init()
+	p.model = next
+	return tea.Batch(append(p.dispatch(effects), p.tick())...)
 }
 
 func (p *program) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
