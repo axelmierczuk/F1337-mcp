@@ -256,18 +256,15 @@ func inSessionZero() bool { return false }
 // service account cannot traverse. systemd reports 203/EXEC, which names
 // neither the path nor the account.
 //
-// It warns rather than refuses. Unix access is not decided by the mode bits
-// alone — a supplementary group this code does not enumerate can grant what the
-// bits appear to deny — and a wrong refusal costs an operator an install that
-// would have worked.
-func executableAccessProblem(exe, account string) (problem string, refuse bool) {
+// Whether that refuses the install or warns is executableAccessIsFatal's.
+func executableAccessProblem(exe, account string) string {
 	uid, gid, err := lookupServiceIDs(account)
 	if err != nil || uid == 0 {
 		// An account that does not resolve is ensureServiceUser's to report,
 		// and it has a better message for it. The superuser reads everything.
-		return "", false
+		return ""
 	}
-	return unixPathAccessProblem(exe, uid, gid), false
+	return unixPathAccessProblem(exe, uid, gid)
 }
 
 // unixPathAccessProblem returns the first component of exe that uid/gid appears

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -85,62 +84,17 @@ func ensureServiceUser(name string, _ bool) error {
 const serviceAccessByOwnership = false
 
 // chownToServiceUser gives the account the ability to write a directory the
-// daemon owns: its state and its logs.
-//
-// This used to be a no-op, on the reasoning that %ProgramData% inherits an ACL
-// admitting the built-in service identities. That was true of the account the
-// installer used to pick and false of the one it picks now: the directories are
-// created by an elevated install, so their contents are the administrators' and
-// an ordinary operator token cannot write them. The agent's first supervised
-// process, or its own runtime report, would fail on a directory install had
-// just made for it.
+// daemon owns: its state and its logs. The grant itself is serviceACL's, which
+// is where the argv can be asserted from every runner rather than only from an
+// elevated Windows one.
 func chownToServiceUser(dir, name string) error {
-	if dir == "" || name == "" || runsInSessionZero(name) {
-		return nil
-	}
-	// (OI)(CI) so new files and directories inherit it, M for modify, /T so the
-	// grant reaches what an earlier install already put there.
-	return runIcacls(dir, "/grant", name+":(OI)(CI)M", "/T")
+	return serviceACL{}.grantOwnedDir(dir, name)
 }
 
 // grantServiceUserAccess makes the enrollment material readable by the account
-// the daemon will run as.
-//
-// The Unix half of this hands over ownership; here it is an ACE. Same purpose,
-// same failure without it: `enroll` writes agent.yaml and the private key under
-// an elevated token, `install` is what decides somebody else will read them,
-// and nothing else reconciles the two. An operator whose agent starts and then
-// fails every connection on "permission denied" opening its own certificate has
-// no way to know that is what happened.
+// the daemon will run as. See serviceACL.grantEnrollment.
 func grantServiceUserAccess(name, dir string, files []string) error {
-	if name == "" || runsInSessionZero(name) {
-		// The built-in identities are already admitted by what %ProgramData%
-		// inherits, and granting them more is not this command's business.
-		return nil
-	}
-	for _, path := range files {
-		if err := runIcacls(path, "/grant", name+":(R)"); err != nil {
-			return fmt.Errorf("%w\n\nThe daemon reads this file as %s and will not start without it", err, name)
-		}
-	}
-	if dir == "" {
-		return nil
-	}
-	return runIcacls(dir, "/grant", name+":(OI)(CI)(RX)")
-}
-
-// runIcacls applies one ACL change, folding icacls' exit code into an error
-// that carries what it printed.
-func runIcacls(path string, args ...string) error {
-	exe := "icacls.exe"
-	if root := os.Getenv("SystemRoot"); root != "" {
-		exe = filepath.Join(root, "System32", "icacls.exe")
-	}
-	out, err := exec.Command(exe, append([]string{path}, args...)...).CombinedOutput() //nolint:gosec // fixed argv; path and account come from the resolved install parameters
-	if err != nil {
-		return fmt.Errorf("grant access to %s: %w: %s", path, err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return serviceACL{}.grantEnrollment(name, dir, files)
 }
 
 // currentAccount is how the platform names the account this process is running
@@ -179,12 +133,10 @@ func inSessionZero() bool {
 }
 
 // executableAccessProblem reports why the account may not be able to start the
-// agent from exe, and that install should refuse rather than warn.
-//
-// It refuses because on Windows the answer is not a guess: a profile directory
-// admits its owner, SYSTEM and the administrators, and nothing else. See
-// windowsExecutableAccessProblem for what installing anyway costs.
-func executableAccessProblem(exe, account string) (problem string, refuse bool) {
+// agent from exe. Whether that refuses the install or warns is
+// executableAccessIsFatal's; see windowsExecutableAccessProblem for what
+// installing anyway costs.
+func executableAccessProblem(exe, account string) string {
 	usersRoot := ""
 	if profile := os.Getenv("USERPROFILE"); profile != "" {
 		usersRoot = filepath.Dir(profile)
@@ -196,7 +148,7 @@ func executableAccessProblem(exe, account string) (problem string, refuse bool) 
 		}
 		usersRoot = drive + `\Users`
 	}
-	return windowsExecutableAccessProblem(exe, account, usersRoot), true
+	return windowsExecutableAccessProblem(exe, account, usersRoot)
 }
 
 // readPassword reads a password from the console without echoing it.

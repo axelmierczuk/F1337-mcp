@@ -3,6 +3,7 @@ package fleetagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
@@ -129,6 +130,7 @@ type ScheduledTaskForTest interface {
 	Start() error
 	Stop() error
 	Restart() error
+	Status() (service.Status, error)
 }
 
 // NewScheduledTaskForTest builds that lifecycle with the schtasks.exe
@@ -143,6 +145,62 @@ type ScheduledTaskForTest interface {
 func NewScheduledTaskForTest(params UnitParams, run func(args ...string) error) ScheduledTaskForTest {
 	return &scheduledTask{params: params, run: run}
 }
+
+// NewScheduledTaskStatusForTest is the same lifecycle with the state directory
+// Status reads supplied.
+//
+// Status is the answer `service status` prints and the answer `install` decides
+// a replacement on, and both halves of it were unreachable from every runner:
+// existence came from a free function in task_windows.go, so off Windows it was
+// a compile-time false and on Windows it shelled out to a real schtasks.exe,
+// and running-ness came from a state directory nothing could point anywhere.
+func NewScheduledTaskStatusForTest(run func(args ...string) error, stateDir string) ScheduledTaskForTest {
+	return &scheduledTask{run: run, stateDir: func() string { return stateDir }}
+}
+
+// StatusRunningForTest and friends name the states Status answers with, so a
+// test compares against the same values the commands switch on.
+const (
+	StatusRunningForTest = service.StatusRunning
+	StatusStoppedForTest = service.StatusStopped
+	StatusUnknownForTest = service.StatusUnknown
+)
+
+// ErrTaskNotInstalledForTest is what Status returns for a task the scheduler
+// does not have.
+var ErrTaskNotInstalledForTest = service.ErrNotInstalled
+
+// WindowsACLForTest is the set of icacls grants `install` applies on Windows,
+// with the invocation replaced by run.
+//
+// The same seam, and the same reason, as NewScheduledTaskForTest: applying an
+// ACL needs an elevated Windows token, so no runner here can let one happen,
+// and the argv deciding whether the daemon can read its own private key was
+// composed in a _windows.go file and asserted nowhere at all.
+type WindowsACLForTest interface {
+	GrantOwnedDir(dir, account string) error
+	GrantEnrollment(account, dir string, files []string) error
+}
+
+// NewWindowsACLForTest builds that set with icacls.exe replaced by run, which
+// sees exactly the path and arguments icacls would.
+func NewWindowsACLForTest(run func(path string, args ...string) error) WindowsACLForTest {
+	return aclForTest{serviceACL{run: run}}
+}
+
+type aclForTest struct{ acl serviceACL }
+
+func (a aclForTest) GrantOwnedDir(dir, account string) error {
+	return a.acl.grantOwnedDir(dir, account)
+}
+
+func (a aclForTest) GrantEnrollment(account, dir string, files []string) error {
+	return a.acl.grantEnrollment(account, dir, files)
+}
+
+// ExecutableAccessIsFatalForTest exposes the rule that decides whether a binary
+// the service account cannot reach stops the install or only warns about it.
+func ExecutableAccessIsFatalForTest(goos string) bool { return executableAccessIsFatal(goos) }
 
 // InvokingServiceUserForTest exposes the default-account rule macOS has always
 // used and Windows now does, including its one refusal.
@@ -272,6 +330,65 @@ func LiveProcessIdentityForTest() (pid int, startID string) {
 func CollectRuntimeReportForTest() (account, home, visibility, ran string, sessionZero bool) {
 	rep := collectRuntimeReport(context.Background())
 	return rep.Account, rep.Home, string(rep.Profile.Visibility), rep.Profile.Ran, rep.SessionZero
+}
+
+// PinElevatedForTest makes the elevation gate pass, for the commands that only
+// remove or report.
+//
+// It is not a licence to drive `service install`: that one creates directories,
+// grants access and registers with a real service manager, and none of those
+// belong in a test run. `uninstall` touches nothing but the registrations it is
+// given, which is what makes it safe here and is why it was worth reaching —
+// the walk over every registration a host carries is exactly the behaviour an
+// operator with two of them depends on. See the comment on requireElevated.
+func PinElevatedForTest() (restore func()) {
+	previous := requireElevated
+	requireElevated = func(string) error { return nil }
+	return func() { requireElevated = previous }
+}
+
+// PinRecordingRegistrationsForTest makes the `service` subcommands see a host
+// registered under every named mechanism, and records what each one is asked to
+// do.
+//
+// fail names the mechanisms whose control operations refuse. A host carrying
+// two registrations is the one `stop` and `uninstall` exist to put right, and
+// the question these commands have to answer is what they do when the first of
+// the two will not co-operate.
+func PinRecordingRegistrationsForTest(mechanisms []Mechanism, fail map[Mechanism]bool) (calls func() []string, restore func()) {
+	previousList, previousNew := installedMechanisms, controlRegistration
+	recorded := &[]string{}
+	installedMechanisms = func() []Mechanism { return mechanisms }
+	controlRegistration = func(m Mechanism) (registration, error) {
+		return &recordingRegistration{mechanism: m, log: recorded, fails: fail[m]}, nil
+	}
+	return func() []string { return append([]string(nil), *recorded...) },
+		func() { installedMechanisms, controlRegistration = previousList, previousNew }
+}
+
+// recordingRegistration is a registration that says what it was asked to do.
+type recordingRegistration struct {
+	mechanism Mechanism
+	log       *[]string
+	fails     bool
+}
+
+func (r *recordingRegistration) record(verb string) error {
+	*r.log = append(*r.log, string(r.mechanism)+":"+verb)
+	if r.fails {
+		return fmt.Errorf("%s cannot %s here", r.mechanism, verb)
+	}
+	return nil
+}
+
+func (r *recordingRegistration) Install() error   { return r.record("install") }
+func (r *recordingRegistration) Uninstall() error { return r.record("uninstall") }
+func (r *recordingRegistration) Start() error     { return r.record("start") }
+func (r *recordingRegistration) Stop() error      { return r.record("stop") }
+func (r *recordingRegistration) Restart() error   { return r.record("restart") }
+
+func (r *recordingRegistration) Status() (service.Status, error) {
+	return service.StatusRunning, nil
 }
 
 // PinInstalledForTest makes the `service` subcommands see a host with the agent

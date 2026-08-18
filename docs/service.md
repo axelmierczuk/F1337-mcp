@@ -257,6 +257,14 @@ Three answers, and the third is not a failure:
 - **unknown** — nothing is installed per-user, so there is nothing to conclude.
   A freshly imaged machine is not a broken one.
 
+A home directory that is a filesystem root — `/`, `C:\` — is `unknown` too, and
+is not probed at all. Every question the probe asks is "is this under the home
+directory", and a root answers yes to all of them: `HOME=/` makes `$HOME/bin`
+mean `/bin`, so the probe would find a machine directory, find it on `PATH`,
+report `visible`, and run whichever of `node`, `go` or `cargo` happens to be in
+there as its evidence. A container started for a uid with no `passwd` entry gets
+`HOME=/`, so this is the shape a fleet agent lands in on a build box.
+
 There is one confined shape the probe cannot see, because it looks under the
 home directory the daemon was given and the daemon was given the wrong one: a
 service under a named account started with a built-in *service* profile —
@@ -269,6 +277,16 @@ rather than as a machine with nothing installed.
 `status` reads the file back and refuses it unless the process that wrote it is
 still the process running — same pid *and* same start identity, so a reused pid
 cannot answer for a daemon that is gone.
+
+**When it cannot read the file, it says so.** A missing record is an ordinary
+state and means nothing; a record that is there and cannot be read is this
+command being unable to reach the only source of every answer above. On Linux
+that is the common case rather than the exotic one: `install` gives the state
+directory to the service account at `0750`, and `status` is not an elevated
+command, so an operator who is not in that group gets `permission denied` here.
+Reported as "no record", that silently turned the whole verdict off and still
+exited zero. It now prints a `NOTE` naming the file and the reason, and says to
+re-run as the service account or elevated.
 
 ### What a script can branch on
 
@@ -283,6 +301,21 @@ Three states, and the exit code separates two of them:
 `1` is also what the command exits with when it fails for an ordinary reason, so
 a script that has to tell "unusable" from "status itself broke" matches the
 `UNUSABLE` block rather than the exit code alone.
+
+## One host, one agent — and every command acts on both
+
+A host can carry both registrations. That is not hypothetical: it is what
+switching mechanisms produces unless something removes the old one, and two
+registrations means two daemons starting against the same state directory, both
+re-adopting the same supervised processes.
+
+`install` removes the one it replaces and `status` warns when it finds two.
+`start`, `stop`, `restart` and `uninstall` act on **every** registration the
+host carries, and keep going when one of them refuses — a `stop` that stops the
+service and returns before it reaches the task leaves the daemon an operator
+just asked to stop still running, with an error naming the other mechanism as
+the reason. Whatever failed is reported; the command exits non-zero once, at the
+end.
 
 ## Hardening
 
@@ -499,12 +532,25 @@ job objects the supervisor puts each background process in has not been checked
 on a real Windows host.
 
 The documentation states the conservative reading — supervised processes stop
-with the agent — and that is the right thing to print for two reasons. The first
-is that it is the likely behaviour: the definition this command registers sets
-`UseUnifiedSchedulingEngine`, whose task instances are managed through a job
-object, and terminating a job terminates every process in it *and* in every job
-nested inside it. The supervisor's own job objects are nested inside it, because
-nothing here starts a supervised process with `CREATE_BREAKAWAY_FROM_JOB`. The
-second is the cost of being wrong either way: an operator who believes the
-warning and is wrong runs `service start` again, and an operator who believes
-the opposite and is wrong loses every dev server in the fleet.
+with the agent — and that is the right thing to print.
+
+It is the right thing because it is very probably the true thing, and the
+argument does not depend on the supervisor's own job objects at all. **A Windows
+process is a member of its parent's job unless it breaks away**, and nothing
+here breaks away: `internal/platform` starts every supervised process without
+`CREATE_BREAKAWAY_FROM_JOB`, and sets no `JOB_OBJECT_LIMIT_BREAKAWAY_OK` or
+`SILENT_BREAKAWAY_OK` on the jobs it does create. So a process the agent
+supervises is a member of whatever job the *agent* is in, whether or not the
+supervisor also managed to put it in one of its own — and on this definition the
+agent is in the task's job, because `UseUnifiedSchedulingEngine` has UBPM manage
+each task instance through one. Ending the task terminates that job, which
+terminates every process in it and in every job nested inside it. The
+supervisor's nested-assignment failing (see the comment on `terminate` in
+`internal/platform/group_windows.go`, which records that it does fail in the
+field when the agent is already inside a job that forbids nesting) changes
+nothing here: it removes the *inner* job, not the outer membership.
+
+And it is the right thing to print even if that reasoning is wrong, because of
+what being wrong costs. An operator who believes the warning and is wrong runs
+`service start` again. An operator who believes the opposite and is wrong loses
+every dev server in the fleet.

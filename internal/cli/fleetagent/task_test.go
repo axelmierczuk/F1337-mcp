@@ -148,3 +148,63 @@ func TestScheduledTask_RestartReportsAFailedStart(t *testing.T) {
 	assert.Contains(t, err.Error(), "ending it first also failed")
 	assert.Equal(t, []string{"/End", "/Run"}, rec.verbs())
 }
+
+// Status answers existence from schtasks' exit code and running-ness from the
+// report the daemon wrote — and both halves used to be unreachable from every
+// runner. Existence came from a free function in task_windows.go: off Windows a
+// compile-time false, on Windows a real schtasks.exe no CI runner can be given
+// a task to find. So the argv `service status` and `service install` decide
+// "is this host already registered" on was asserted by nothing.
+func TestScheduledTask_StatusAsksSchtasksWhetherTheTaskExists(t *testing.T) {
+	rec := &schtasksRecorder{fail: func([]string) error {
+		return errors.New("the system cannot find the file specified")
+	}}
+
+	status, err := fleetagent.NewScheduledTaskStatusForTest(rec.run, t.TempDir()).Status()
+	require.ErrorIs(t, err, fleetagent.ErrTaskNotInstalledForTest,
+		"a scheduler that does not have the task means not installed, not an error to decode")
+	assert.Equal(t, fleetagent.StatusUnknownForTest, status)
+
+	require.Len(t, rec.calls, 1)
+	assert.Equal(t, []string{"/Query", "/TN", fleetagent.ServiceName, "/XML", "ONE"}, rec.calls[0],
+		"the definition is asked for rather than a formatted listing, because every field schtasks prints is localised and an exit code is not")
+}
+
+// Existence says nothing about whether the daemon is up. A registered task with
+// no live report is stopped; with one, it is running — which is a stronger
+// claim than the scheduler's own opinion, since it names the process.
+func TestScheduledTask_StatusTakesRunningNessFromTheDaemonsOwnReport(t *testing.T) {
+	stateDir := t.TempDir()
+	rec := &schtasksRecorder{}
+
+	status, err := fleetagent.NewScheduledTaskStatusForTest(rec.run, stateDir).Status()
+	require.NoError(t, err)
+	assert.Equal(t, fleetagent.StatusStoppedForTest, status,
+		"the task is registered and nothing wrote a report, so nothing is running")
+
+	pid, startID := fleetagent.LiveProcessIdentityForTest()
+	require.NotEmpty(t, startID, "the platform must be able to identify this process")
+	require.NoError(t, fleetagent.WriteRuntimeReportForTest(stateDir, fleetagent.RuntimeReportForTest{
+		PID: pid, StartID: startID, Account: "axel", Home: "/home/axel",
+		Visibility: fleetagent.ProfileUnknownForTest,
+	}))
+
+	status, err = fleetagent.NewScheduledTaskStatusForTest(rec.run, stateDir).Status()
+	require.NoError(t, err)
+	assert.Equal(t, fleetagent.StatusRunningForTest, status)
+}
+
+// A report left behind by a daemon that is gone must not make a stopped task
+// look running: the file outlives the process, and `service install` decides
+// whether to restart on this answer.
+func TestScheduledTask_StatusRefusesAReportFromAProcessThatIsGone(t *testing.T) {
+	stateDir := t.TempDir()
+	require.NoError(t, fleetagent.WriteRuntimeReportForTest(stateDir, fleetagent.RuntimeReportForTest{
+		PID: os.Getpid(), StartID: "not-the-identity-of-this-process",
+		Account: "axel", Visibility: fleetagent.ProfileUnknownForTest,
+	}))
+
+	status, err := fleetagent.NewScheduledTaskStatusForTest((&schtasksRecorder{}).run, stateDir).Status()
+	require.NoError(t, err)
+	assert.Equal(t, fleetagent.StatusStoppedForTest, status)
+}

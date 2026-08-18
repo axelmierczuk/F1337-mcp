@@ -157,7 +157,7 @@ func (p profileProbe) probe(ctx context.Context) profileResult {
 	if goos == "" {
 		goos = runtime.GOOS
 	}
-	if p.Home == "" {
+	if p.Home == "" || isFilesystemRoot(p.Home) {
 		return profileResult{Visibility: profileUnknown}
 	}
 
@@ -346,6 +346,37 @@ func lookPathIn(name, pathEnv, goos string) (string, error) {
 		}
 	}
 	return "", exec.ErrNotFound
+}
+
+// isFilesystemRoot reports whether home is a volume root rather than somebody's
+// home directory.
+//
+// Every question this probe asks is "is this thing under the home directory",
+// and a root answers yes to all of them. HOME=/ makes $HOME/bin mean /bin — a
+// machine directory that exists on every Unix and is on every PATH — so the
+// probe finds a "per-user" install, finds it reachable, and reports the agent's
+// environment as visible when nothing per-user is involved at all; underDir,
+// the check that is supposed to catch exactly that, is vacuous against a root.
+// The daemon then executes whichever of node, go or cargo happens to be in
+// /bin, once per start, and calls it evidence.
+//
+// It is not hypothetical: a container started for a uid with no passwd entry
+// gets HOME=/, and a service manager that starts the daemon without a home
+// directory hands it whatever the account's entry says. A root is not a home,
+// so there is nothing installed per-user under it to conclude anything from,
+// and "unknown" is the honest answer.
+//
+// A pure function of the string, so the rule is assertable from every runner:
+// a Windows drive root has to be recognised on a Linux one.
+func isFilesystemRoot(home string) bool {
+	trimmed := strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(home), `\`, "/"), "/")
+	if trimmed == "" {
+		// "/", "\", "//" and friends: everything was separator.
+		return home != ""
+	}
+	// "C:" — what "C:\" and "C:/" trim down to.
+	return len(trimmed) == 2 && trimmed[1] == ':' &&
+		(trimmed[0] >= 'a' && trimmed[0] <= 'z' || trimmed[0] >= 'A' && trimmed[0] <= 'Z')
 }
 
 // underDir reports whether path is inside dir.

@@ -8,11 +8,8 @@ func newScheduledTask(params UnitParams) (registration, error) {
 }
 
 // scheduledTaskInstalled reports whether a task is registered under the agent's
-// name.
-//
-// /XML is asked for rather than a formatted listing because the answer wanted
-// here is the exit code, and asking for the definition makes that exit code
-// mean "the task exists" on every locale.
+// name, for the host lookup that has no scheduledTask to ask. The query itself
+// is scheduledTask.installed, so the argv is the one every runner asserts.
 func scheduledTaskInstalled() bool {
-	return runSchtasks("/Query", "/TN", ServiceName, "/XML", "ONE") == nil
+	return (&scheduledTask{}).installed()
 }

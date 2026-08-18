@@ -48,6 +48,9 @@ type scheduledTask struct {
 	// which is what every real install uses. A test supplies its own, and that
 	// is the only way anything on any runner here sees the argv.
 	run func(args ...string) error
+	// stateDir is where Status looks for the report the running daemon wrote.
+	// nil means stateDirForStatus, which is what every real command uses.
+	stateDir func() string
 }
 
 // schtasks invokes the Task Scheduler command-line tool.
@@ -129,11 +132,32 @@ func (t *scheduledTask) Restart() error {
 	return nil
 }
 
+// installed reports whether a task is registered under the agent's name.
+//
+// /XML is asked for rather than a formatted listing because the answer wanted
+// here is the exit code, and asking for the definition makes that exit code
+// mean "the task exists" on every locale.
+//
+// A method rather than the free function it used to be, for the reason the rest
+// of this type is not build-tagged: composed in task_windows.go it was one more
+// argv handed to schtasks.exe that nothing on any runner could see, and it is
+// the argv `status` and `install` decide "is this host already registered" on.
+func (t *scheduledTask) installed() bool {
+	return t.schtasks("/Query", "/TN", ServiceName, "/XML", "ONE") == nil
+}
+
+// Status answers existence from schtasks' exit code and running-ness from the
+// report the daemon itself wrote; see the file comment for why neither comes
+// from what schtasks prints.
 func (t *scheduledTask) Status() (service.Status, error) {
-	if !scheduledTaskInstalled() {
+	if !t.installed() {
 		return service.StatusUnknown, service.ErrNotInstalled
 	}
-	if liveRuntimeReport(stateDirForStatus()) != nil {
+	stateDir := t.stateDir
+	if stateDir == nil {
+		stateDir = stateDirForStatus
+	}
+	if liveRuntimeReport(stateDir()) != nil {
 		return service.StatusRunning, nil
 	}
 	return service.StatusStopped, nil

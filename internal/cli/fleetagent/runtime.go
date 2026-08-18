@@ -3,7 +3,9 @@ package fleetagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -123,7 +125,14 @@ func readRuntimeReport(stateDir string) (*runtimeReport, error) {
 }
 
 // liveRuntimeReport returns the report only when the process that wrote it is
-// still the process running.
+// still the process running, and nil for every other outcome.
+func liveRuntimeReport(stateDir string) *runtimeReport {
+	rep, _ := readLiveRuntimeReport(stateDir)
+	return rep
+}
+
+// readLiveRuntimeReport is liveRuntimeReport plus the reason it has nothing to
+// return, for the one caller that has somewhere to print it.
 //
 // Fail-closed, and for the reason the supervisor's own pid guard is: a stale
 // report is worse than none. The file outlives the daemon — a stopped agent
@@ -134,13 +143,25 @@ func readRuntimeReport(stateDir string) (*runtimeReport, error) {
 // A report with no start identity is refused too. It means the daemon could not
 // read its own process start time, and a record that cannot be tied to a
 // process is exactly the thing this guard exists to keep out of `status`.
-func liveRuntimeReport(stateDir string) *runtimeReport {
+//
+// The error is separated from those two because they are different answers. No
+// file, or a file describing a process that is gone, is an ordinary state and
+// says nothing. A file that is there and cannot be read or parsed is `status`
+// being unable to reach the only source of every answer it gives about a
+// confined agent — and on Linux that is the common case, not the exotic one:
+// `install` gives the state directory to the service account at 0750, so an
+// operator who is not in that group gets EACCES here. Reported as "no report",
+// that silently turned the whole verdict off and still exited zero.
+func readLiveRuntimeReport(stateDir string) (*runtimeReport, error) {
 	rep, err := readRuntimeReport(stateDir)
 	if err != nil {
-		return nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	if !platform.SameProcess(rep.PID, rep.StartID) {
-		return nil
+		return nil, nil
 	}
-	return rep
+	return rep, nil
 }

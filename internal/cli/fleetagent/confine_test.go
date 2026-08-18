@@ -695,4 +695,203 @@ func TestServiceInstall_DryRunSaysWhatTheMechanismCosts(t *testing.T) {
 	assert.Contains(t, text, "session 0",
 		"install has to say what the account it is about to register costs, at the moment it registers it")
 	assert.Contains(t, text, "--mechanism task", "and name what would work instead")
+
+	// The other thing install says about an account before it registers it, and
+	// the one that is not about Windows at all: --user root is allowed, and is
+	// not allowed to be quiet. It is not a property of the daemon — it is a
+	// property of every command any model ever runs through it.
+	out = &bytes.Buffer{}
+	code = fleetagent.Main([]string{"service", "install", "--dry-run", "--user", "root"}, out)
+	text = out.String()
+	require.Equal(t, 0, code, "%s", text)
+	assert.Contains(t, text, "WARNING: installing to run as root")
+	assert.Contains(t, text, "will run as root")
+}
+
+// A filesystem root is not somebody's home directory, and treating it as one
+// turns every question the probe asks into "yes".
+//
+// HOME=/ makes $HOME/bin mean /bin — a machine directory that exists on every
+// Unix and is on every PATH — so the probe finds a "per-user" install, finds it
+// reachable, reports the agent's environment as visible, and executes whichever
+// of node, go or cargo happens to be in there, once per start, as evidence. The
+// underDir check that exists to catch exactly that is vacuous against a root.
+// A container started for a uid with no passwd entry gets HOME=/, which is the
+// shape a fleet agent lands in on a build box.
+func TestProfileProbe_AFilesystemRootIsNotAHomeDirectory(t *testing.T) {
+	// The host's own root, with the host's own PATH: on any Unix that is a root
+	// holding /bin, which is the combination that used to answer "visible".
+	root := string(filepath.Separator)
+	if volume := filepath.VolumeName(t.TempDir()); volume != "" {
+		root = volume + root
+	}
+
+	visibility, ran, unreachable := fleetagent.ProfileProbeForTest(
+		root, os.Getenv("PATH"), runtime.GOOS, nil)
+
+	assert.Equal(t, fleetagent.ProfileUnknownForTest, visibility,
+		"a root is not a home directory, so there is nothing installed per-user under it to conclude anything from")
+	assert.Empty(t, ran, "and nothing under it may be run as proof of anything")
+	assert.Empty(t, unreachable)
+
+	// The rule itself, spelled in both platforms' notation so the Windows half
+	// is checked from a Linux runner too.
+	for _, home := range []string{"/", "//", `\`, `C:\`, "c:/", `D:\`, "  "} {
+		visibility, _, _ := fleetagent.ProfileProbeForTest(home, os.Getenv("PATH"), runtime.GOOS, nil)
+		assert.Equal(t, fleetagent.ProfileUnknownForTest, visibility, "home %q is a root", home)
+	}
+
+	// And an ordinary home directory is still probed. Without this, "always
+	// answer unknown" would pass everything above.
+	home := t.TempDir()
+	binDir := filepath.Join(home, perUserBinDir())
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	visibility, _, _ = fleetagent.ProfileProbeForTest(home, binDir, runtime.GOOS, nil)
+	assert.Equal(t, fleetagent.ProfileVisibleForTest, visibility,
+		"a real home directory with a per-user install on PATH is still visible")
+}
+
+// A host carrying both registrations is the one `stop` and `uninstall` exist to
+// put right, and it is the one where returning at the first failure does the
+// most damage: the operator asked for the agent to stop, one of the two is
+// still running, and the error names the other mechanism as the reason.
+func TestServiceControl_ActsOnEveryRegistrationEvenWhenOneFails(t *testing.T) {
+	pinAgentConfig(t)
+
+	both := []fleetagent.Mechanism{fleetagent.MechanismService, fleetagent.MechanismTask}
+	calls, restore := fleetagent.PinRecordingRegistrationsForTest(both,
+		map[fleetagent.Mechanism]bool{fleetagent.MechanismService: true})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{"service", "stop"}, out)
+
+	require.Equal(t, 1, code, "a stop that could not stop everything is a failure: %s", out.String())
+	assert.Equal(t, []string{"service:stop", "task:stop"}, calls(),
+		"the task has to be stopped even though the service refused; leaving it running is the outcome an operator is least able to detect")
+	assert.Contains(t, out.String(), "stop requested ("+fleetagent.MechanismTask.Describe()+")",
+		"and the one that did stop has to be reported, or the operator cannot tell which half happened")
+}
+
+// The same for every verb, and the successful case: one registration reached
+// per mechanism, in the order the host lookup returned them.
+func TestServiceControl_ActsOnEveryRegistration(t *testing.T) {
+	pinAgentConfig(t)
+
+	for _, verb := range []string{"start", "stop", "restart"} {
+		both := []fleetagent.Mechanism{fleetagent.MechanismService, fleetagent.MechanismTask}
+		calls, restore := fleetagent.PinRecordingRegistrationsForTest(both, nil)
+
+		out := &bytes.Buffer{}
+		code := fleetagent.Main([]string{"service", verb}, out)
+		restore()
+
+		require.Equal(t, 0, code, "verb %s: %s", verb, out.String())
+		assert.Equal(t, []string{"service:" + verb, "task:" + verb}, calls(), "verb %s", verb)
+	}
+}
+
+// `service status` reads every answer it gives about a confined agent out of
+// one file. When it cannot read that file it used to print "running" and exit
+// zero, having never got to ask the question — and on Linux that is the common
+// case, because `install` gives the state directory to the service account at
+// 0750 and `status` is not an elevated command.
+func TestServiceStatus_SaysWhenItCouldNotReadTheDaemonsReport(t *testing.T) {
+	stateDir := pinAgentConfig(t)
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "runtime.json"),
+		[]byte("{ this is not the report\n"), 0o600))
+	defer fleetagent.PinInstalledForTest([]fleetagent.Mechanism{fleetagent.MechanismService}, true)()
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{"service", "status"}, out)
+	text := out.String()
+
+	require.Equal(t, 0, code, "the agent may be perfectly fine; this command just cannot tell: %s", text)
+	assert.Contains(t, text, "could not read the record the daemon writes")
+	assert.Contains(t, text, "runtime.json", "and it has to name the file, or there is nothing to go and look at")
+	assert.Contains(t, text, "cannot tell a confined")
+}
+
+// And a host that simply has no report is not told anything: an agent that has
+// never started is an ordinary state, not a fault of this command.
+func TestServiceStatus_SaysNothingWhenThereIsNoReportAtAll(t *testing.T) {
+	pinAgentConfig(t)
+	defer fleetagent.PinInstalledForTest([]fleetagent.Mechanism{fleetagent.MechanismService}, true)()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main([]string{"service", "status"}, out))
+	assert.NotContains(t, out.String(), "could not read the record")
+}
+
+// The confined shape `status` has to name, in the one report field an operator
+// can act on: which directories are installed and off the agent's PATH.
+func TestServiceStatus_NamesTheToolchainsItCannotReach(t *testing.T) {
+	stateDir := pinAgentConfig(t)
+	plantLiveReport(t, stateDir, fleetagent.RuntimeReportForTest{
+		Account:     `WORKSTATION\axel`,
+		Home:        `C:\Users\axel`,
+		SessionZero: true,
+		Visibility:  fleetagent.ProfileHiddenForTest,
+		Unreachable: []string{`C:\Users\axel\.cargo\bin`},
+	})
+	defer fleetagent.PinInstalledForTest([]fleetagent.Mechanism{fleetagent.MechanismService}, true)()
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{"service", "status"}, out)
+	text := out.String()
+
+	require.Equal(t, 1, code, "%s", text)
+	assert.Contains(t, text, "per-user toolchains: HIDDEN (1 directory installed and not on its PATH)")
+	assert.Contains(t, text, `C:\Users\axel\.cargo\bin`)
+	// The task mechanism has no SCM entry to ask for a pid, so the daemon's own
+	// record is the only source of one. "unavailable" here means status found
+	// the report, drew a verdict from it, and still could not say which process
+	// it was about.
+	assert.NotContains(t, text, "pid:        unavailable")
+}
+
+// `uninstall` on a host carrying both registrations removes both — including
+// when the first one refuses.
+//
+// That host is not hypothetical: it is what switching mechanisms produces, and
+// it is the state `install` and `status` both warn about. Removing one of the
+// two and returning is the outcome an operator is least able to detect, because
+// the command has already said it removed something and the error names the
+// other mechanism.
+func TestServiceUninstall_RemovesEveryRegistrationEvenWhenOneFails(t *testing.T) {
+	defer fleetagent.PinElevatedForTest()()
+
+	both := []fleetagent.Mechanism{fleetagent.MechanismService, fleetagent.MechanismTask}
+	calls, restore := fleetagent.PinRecordingRegistrationsForTest(both,
+		map[fleetagent.Mechanism]bool{fleetagent.MechanismService: true})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{"service", "uninstall"}, out)
+
+	require.Equal(t, 1, code, "a removal that could not remove everything is a failure: %s", out.String())
+	assert.Equal(t, []string{"service:stop", "service:uninstall", "task:stop", "task:uninstall"}, calls(),
+		"the task has to be removed even though the service refused; a definition left behind starts a second daemon at the next boot")
+	assert.Contains(t, out.String(), "service fleet-agent removed ("+fleetagent.MechanismTask.Describe()+")")
+}
+
+// And the whole of it when nothing refuses: both removed, and the material an
+// operator must not lose named as kept.
+func TestServiceUninstall_KeepsTheEnrollmentAndProcessState(t *testing.T) {
+	defer fleetagent.PinElevatedForTest()()
+
+	both := []fleetagent.Mechanism{fleetagent.MechanismService, fleetagent.MechanismTask}
+	calls, restore := fleetagent.PinRecordingRegistrationsForTest(both, nil)
+	defer restore()
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{"service", "uninstall"}, out)
+	text := out.String()
+
+	require.Equal(t, 0, code, "%s", text)
+	assert.Equal(t, []string{"service:stop", "service:uninstall", "task:stop", "task:uninstall"}, calls())
+	assert.Contains(t, text, "left in place:")
+	assert.Contains(t, text, "supervised process state")
+	assert.Contains(t, text, "rejoin without enrolling again",
+		"uninstall keeps the enrollment on purpose, and an operator has to be told so or they will enroll again")
 }

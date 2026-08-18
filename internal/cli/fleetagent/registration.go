@@ -70,9 +70,18 @@ func scmServiceConfig(params UnitParams, goos, password string) *service.Config 
 //
 // Same shape as internal/agent's systemConfigDir, and the same rule: assigned
 // only by a test, and only for the duration of one.
+//
+// requireElevated is here for the same reason and with the same rule. `service
+// uninstall` refuses without root or an elevated token, which is correct and is
+// also why nothing on any runner had ever driven the rest of it: what uninstall
+// does — walk *every* registration the host carries, and keep going when one of
+// them refuses — is the behaviour an operator on a host with two of them most
+// needs, and it was reachable by nothing. The gate itself stays asserted by the
+// unprivileged tests, which is the half a seam here cannot weaken.
 var (
 	controlRegistration = newControlRegistration
 	installedMechanisms = hostInstalledMechanisms
+	requireElevated     = requireElevation
 )
 
 // newControlRegistration addresses an already-installed registration by name,

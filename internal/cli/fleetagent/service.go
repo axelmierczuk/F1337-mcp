@@ -143,7 +143,7 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	// creating directories and an account, and discovering the missing
 	// privilege at the point the definition is written leaves those behind.
 	if !opts.dryRun {
-		if err := requireElevation("install"); err != nil {
+		if err := requireElevated("install"); err != nil {
 			return err
 		}
 	}
@@ -183,9 +183,9 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	// a Desktop, a /root — produces a registration that succeeds and a service
 	// that fails every start for a reason neither the operator nor this program
 	// is present to explain.
-	if problem, refuse := executableAccessProblem(params.Executable, params.User); problem != "" {
+	if problem := executableAccessProblem(params.Executable, params.User); problem != "" {
 		advice := executableAccessAdvice(problem, params.Executable, params.User, runtime.GOOS)
-		if refuse {
+		if executableAccessIsFatal(runtime.GOOS) {
 			return fmt.Errorf("refusing to install a service that cannot start: %s", advice)
 		}
 		p.Printf("WARNING: %s\n", advice)
@@ -458,7 +458,7 @@ func newServiceUninstallCommand(out io.Writer) *cobra.Command {
 }
 
 func runServiceUninstall(out io.Writer) error {
-	if err := requireElevation("uninstall"); err != nil {
+	if err := requireElevated("uninstall"); err != nil {
 		return err
 	}
 	p := cli.NewPrinter(out)
@@ -476,9 +476,12 @@ func runServiceUninstall(out io.Writer) error {
 		return p.Err()
 	}
 
-	// Every mechanism, not the first one found. A host that carries both has
-	// two daemons to remove, and removing one of them is the outcome an
-	// operator is least able to detect.
+	// Every mechanism, not the first one found, and not up to the first
+	// failure. A host that carries both has two daemons to remove; removing one
+	// of them is the outcome an operator is least able to detect, and returning
+	// at the first error leaves the other one registered for a reason that has
+	// nothing to do with it.
+	var failures []error
 	for _, mechanism := range mechanisms {
 		svc, err := controlRegistration(mechanism)
 		if err != nil {
@@ -491,9 +494,13 @@ func runServiceUninstall(out io.Writer) error {
 			p.Printf("note: could not stop the %s before removing it: %v\n", mechanism.Describe(), err)
 		}
 		if err := svc.Uninstall(); err != nil {
-			return fmt.Errorf("uninstall %s: %w", mechanism.Describe(), err)
+			failures = append(failures, fmt.Errorf("uninstall %s: %w", mechanism.Describe(), err))
+			continue
 		}
 		p.Printf("service %s removed (%s)\n", ServiceName, mechanism.Describe())
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
 	}
 
 	p.Println("left in place:")
@@ -520,6 +527,12 @@ func runServiceControl(out io.Writer, verb string) error {
 		return fmt.Errorf("%w; run `fleet-agent service install` first", ErrNotInstalled)
 	}
 	p := cli.NewPrinter(out)
+	// Every registration this host carries, and not up to the first failure.
+	// The host that carries two is the one this command exists to put right,
+	// and a `service stop` that stops the service and returns before it reaches
+	// the task leaves the daemon an operator just asked to stop still running —
+	// with an error naming the other mechanism as the reason.
+	var failures []error
 	for _, mechanism := range mechanisms {
 		svc, err := controlRegistration(mechanism)
 		if err != nil {
@@ -543,9 +556,13 @@ func runServiceControl(out io.Writer, verb string) error {
 			err = svc.Restart()
 		}
 		if err != nil {
-			return fmt.Errorf("%s %s: %w", verb, mechanism.Describe(), err)
+			failures = append(failures, fmt.Errorf("%s %s: %w", verb, mechanism.Describe(), err))
+			continue
 		}
 		p.Printf("service %s: %s requested (%s)\n", ServiceName, verb, mechanism.Describe())
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
 	}
 	return p.Err()
 }
@@ -604,7 +621,8 @@ func runServiceStatus(out io.Writer) error {
 	// started in, and the judgement drawn from it. Everything that decides
 	// whether an agent can do its job is observable only from inside the
 	// daemon; this command runs outside it.
-	report := liveRuntimeReport(stateDirForStatus())
+	stateDir := stateDirForStatus()
+	report, reportErr := readLiveRuntimeReport(stateDir)
 	confinement := confinementFor(report)
 
 	unusable := false
@@ -638,6 +656,18 @@ func runServiceStatus(out io.Writer) error {
 	}
 	if path, err := agent.DefaultConfigPath(); err == nil {
 		p.Printf("config:     %s\n", path)
+	}
+	if reportErr != nil {
+		// Not a failure of the command, and not silence either. Every answer
+		// above about a confined agent comes out of that one file, and an
+		// operator who cannot read it is being told "running" by a command that
+		// never got to ask the question.
+		p.Println("NOTE: could not read the record the daemon writes of what it can reach:")
+		p.Printf("        %v\n", reportErr)
+		p.Println("      Until this command can read it, `status` cannot tell a confined")
+		p.Println("      agent from a working one. Re-run it as the account the agent runs")
+		p.Println("      as, or elevated: `install` gives the state directory to that")
+		p.Println("      account, and `status` is not an elevated command.")
 	}
 
 	if confinement != nil && unusable {

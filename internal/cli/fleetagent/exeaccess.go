@@ -96,6 +96,25 @@ func windowsExecutableAccessProblem(exe, account, usersRoot string) string {
 	return fmt.Sprintf("%s is inside %s's profile, which %s cannot read", exe, owner, account)
 }
 
+// executableAccessIsFatal reports whether a path the service account cannot
+// reach is a refusal or a warning.
+//
+// Windows refuses: the answer there is not a guess. A profile directory admits
+// its owner, SYSTEM and the administrators and nothing else, so a path inside
+// somebody else's profile is one the account will not be able to read, and the
+// service manager reports that as error 5 before any of this program runs.
+//
+// Unix warns: access there is not decided by the mode bits alone — a
+// supplementary group this code does not enumerate can grant what the bits
+// appear to deny — and a wrong refusal costs an operator an install that would
+// have worked.
+//
+// goos is a parameter for the same reason resolveMechanism's is. This decides
+// whether `install` stops or continues, it lived in the two platform files as
+// a bare `true` and a bare `false`, and a rule that only compiles on one host
+// is a rule only that host can check.
+func executableAccessIsFatal(goos string) bool { return goos == "windows" }
+
 // executableAccessRemedy is the fix, written out as the commands that apply it.
 func executableAccessRemedy(exe, goos string) []string {
 	if goos == "windows" {
