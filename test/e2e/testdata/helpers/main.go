@@ -65,6 +65,15 @@ func fail(msg string) {
 // test/e2e's stubHelperStatus.
 const handedOverStatus = 17
 
+// handOffMarker is the environment variable `fleetctl tui` sets on the helper
+// it hands the terminal to, spelled out because it is unexported where it is
+// defined (internal/cli/fleetctl/handoff.go).
+//
+// It is the whole of what stops a second hand-off, and the far side is the only
+// place it can be observed. Two spellings that drift apart read back as an
+// empty value, which is what the scenario asserts against.
+const handOffMarker = "FLEET_TUI_HANDED_OFF"
+
 // handedOver stands in for fleet-tui, and records everything about a hand-off
 // that only the far side can see.
 //
@@ -99,6 +108,11 @@ func handedOver() {
 		"argc":       strconv.Itoa(len(os.Args) - 1),
 		"argv":       strings.TrimSpace(argv.String()),
 		"helper-pid": strconv.Itoa(os.Getpid()),
+		// The marker that says a hand-off has happened, which only the far
+		// side can see. A fleetctl reading it refuses to hand over again, so
+		// this is the one recorded value that is a guard rather than a
+		// promise about the command line.
+		"handed-to": os.Getenv(handOffMarker),
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 			fail("tui: record " + name + ": " + err.Error())

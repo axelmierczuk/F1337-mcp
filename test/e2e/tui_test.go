@@ -139,6 +139,42 @@ func TestTUIWithoutATerminalSaysWhatToUseInstead(t *testing.T) {
 	}
 }
 
+// TestTheMarkerNeverRefusesTheBinaryThatDraws is the other direction of the
+// loop guard, and the one that would be a worse defect than the loop.
+//
+// A hand-off sets FLEET_TUI_HANDED_OFF, and a fleetctl that finds it refuses
+// rather than handing over again. `fleet-tui` reads the same command tree out
+// of the same package, so the question this answers is whether that refusal can
+// ever reach the binary whose whole job is to draw — the operator running it by
+// hand, a marker left in an environment, a second hand-off that was legitimate.
+// It cannot: the check is on the branch taken only when there is no view, and
+// this drives the view binary directly with the marker set to prove it.
+//
+// An identity check that is wrong refuses the real helper, which is worse than
+// having none. This is what makes the marker not that: it is read in exactly
+// one place, and the program that draws never reaches it.
+func TestTheMarkerNeverRefusesTheBinaryThatDraws(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+
+	tui := startTUI(t, f,
+		// The view binary by name, which is the one thing no other scenario
+		// does: everything else reaches it through `fleetctl tui`.
+		envEntry("FLEET_TUI_BIN", bins.tui),
+		// And with the marker a hand-off would have set, at its most awkward:
+		// naming this very binary.
+		envEntry("FLEET_TUI_HANDED_OFF", bins.tui),
+	)
+	tui.waitForScreen(t, "the view to draw despite a hand-off marker in its environment", a.name)
+
+	tui.send("q")
+	tui.awaitExit(t, 30*time.Second)
+	if code := tui.exitStatus(t); code != 0 {
+		t.Fatalf("the view binary exited %d with a hand-off marker set\nscreen:\n%s", code, tui.screen())
+	}
+	tui.requireTerminalRestored(t)
+}
+
 // -------------------------------------------------------------- harness
 
 // tuiSession is `fleetctl tui` running on a pseudo-terminal.
@@ -540,6 +576,19 @@ func TestTheHandOffKeepsTheCommandLineAndTheProcess(t *testing.T) {
 			"can name itself from — and a helper that cannot name itself execs itself again", got, helper)
 	}
 
+	// And the marker that says a hand-off has happened, which is the whole of
+	// what stops a second one. It is not an identity check, so it is the only
+	// part of this guard that cannot be wrong on a host that cannot say what
+	// binary is running — but only if the hand-off actually sets it, and this
+	// is the one place that can be observed: the far side's own environment.
+	// Its value is the file that was chosen, because that is the file the
+	// refusal on the far side has to name.
+	if got := recorded(t, record, "handed-to"); got != helper {
+		t.Errorf("the helper was told the hand-off handed over to %q; it resolved to %q.\n"+
+			"A fleetctl on the far side refuses to hand over again on the strength of this value alone — "+
+			"without it, two wrong helpers exec each other for ever with nothing on screen", got, helper)
+	}
+
 	// One process, and it is the one the operator's shell will signal.
 	shellPID, helperPID := recorded(t, record, "shell-pid"), recorded(t, record, "helper-pid")
 	if shellPID != helperPID {
@@ -917,5 +966,86 @@ func TestAFleetctlCopiedToItsHelpersNameRefusesInsteadOfLooping(t *testing.T) {
 		if !strings.Contains(screen, want) {
 			t.Errorf("a fleetctl copied to its helper's name does not say %q; the terminal holds:\n%s", want, screen)
 		}
+	}
+}
+
+// linkFleetctlAs puts a symlink named name into dir, pointing at target.
+//
+// A third spelling of the same mistake, and the one that makes the scenario
+// below a cycle rather than a chain: a link is one file under two names, so the
+// process that runs through it resolves to a *different* path than the one it
+// was exec'd as, and the lookup it then does is not the lookup the previous
+// process did.
+func linkFleetctlAs(t *testing.T, dir, name, target string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, exeName(name))
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("this host does not allow symlinks: %v", err)
+	}
+	return path
+}
+
+// TestTheTerminalIsHandedOverAtMostOnceHoweverManyWrongHelpersThereAre is the
+// loop that four rounds of identity checks could not close.
+//
+// Every one of them asks the same question — "am I the file I am about to
+// exec?" — and every one of them answers it correctly here. The install is two
+// of the mistakes the refusal itself names, in two directories:
+//
+//   - `cp fleetctl fleet-tui` beside fleetctl. A copy is a different file at a
+//     different path, so nothing in the first process can see it, and it hands
+//     over. That much is round 2's known limit.
+//   - `ln -s .../fleetctl fleet-tui` in a directory on PATH. The copy skips
+//     *itself* correctly, finds this link, and it is neither the same path nor
+//     the same inode — so it hands over too. And the process that link starts
+//     is the original fleetctl again, which finds the copy beside it, which is
+//     neither the same path nor the same inode.
+//
+// So the two exec each other, for ever, at the same pid, with nothing on
+// screen — measured, not reasoned about: before the marker existed this
+// scenario's shell was still waiting when the harness gave up, and `ps` showed
+// one pid alternating between the two files. No identity check is wrong at any
+// step. The loop is a property of the chain and lives in none of its
+// processes, which is why the thing that closes it is carried along the chain
+// rather than worked out inside it: see handOffMarker.
+//
+// The assertion is that `fleetctl tui` comes back at all.
+func TestTheTerminalIsHandedOverAtMostOnceHoweverManyWrongHelpersThereAre(t *testing.T) {
+	requireSupportedHost(t)
+
+	record := t.TempDir()
+	install := t.TempDir()
+	fleetctl := filepath.Join(install, exeName("fleetctl"))
+	installFleetctl(t, install)
+	// Beside fleetctl, so it is the candidate the first process chooses.
+	wrong := copyFleetctlAs(t, install, "fleet-tui")
+	// And on PATH, pointing back at the fleetctl the copy will find beside
+	// itself. PATH holds only this directory, so it is the only other candidate
+	// there is.
+	elsewhere := t.TempDir()
+	linkFleetctlAs(t, elsewhere, "fleet-tui", fleetctl)
+
+	run := runOnATerminal(t, selfHelperScript, nil, envWith(
+		envEntry("FLEET_CTL", fleetctl),
+		envEntry("FLEET_CONFIG_DIR", record),
+		envEntry("PATH", elsewhere),
+		envEntry("HOME", record),
+		envEntry("TMPDIR", os.TempDir()),
+		envEntry("TERM", operatorTerm),
+	))
+	run.awaitScreen(t, "the command to come back at all, rather than hand the terminal back and forth for ever", "DONE")
+
+	screen := run.screen()
+	for _, want := range []string{"this same binary", "go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest", "STATUS[1]"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("two wrong helpers pointing at each other do not say %q; the terminal holds:\n%s", want, screen)
+		}
+	}
+	// And it names the file the operator has to delete, rather than the
+	// directory the loop happened to stop in.
+	if !strings.Contains(screen, wrong) {
+		t.Errorf("the refusal does not name %s, which is the fleetctl installed under the helper's name; the terminal holds:\n%s",
+			wrong, screen)
 	}
 }

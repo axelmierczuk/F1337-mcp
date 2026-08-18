@@ -82,6 +82,17 @@ holds that in place is `TestOnlyTheViewBinaryLinksATerminalUI`, which resolves
 each command's imports and fails if a binary that draws nothing links something
 that owns the terminal.
 
+Because the two binaries are one command tree, a mis-install can put `fleetctl`
+where the helper belongs — a packager's `cp`, `mv` or `ln -s` — and then the
+hand-off is a process exec'ing something that hands over in turn. The hand-off
+therefore carries a marker in the helper's environment, and a `fleetctl` that
+finds one set refuses instead of handing over again: **the terminal is handed
+over at most once**, whatever any binary works out about which file it is. That
+guarantee is deliberately not an identity check — "am I the file I am about to
+exec?" is unanswerable on a host that cannot name its own binary, and a wrong
+answer refuses the *real* helper — so identity is used only to skip a bad
+candidate and to name the file in the refusal.
+
 ## Selection under a stateless protocol
 
 MCP `2026-07-28` removed protocol-level sessions. There is no handshake to hang

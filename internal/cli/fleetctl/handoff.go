@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // Handing `fleetctl tui` to the one binary that links a terminal UI.
@@ -43,12 +44,127 @@ var errNoHelper = errors.New("fleetctl tui needs " + helperName)
 //
 // Windows has no exec, so there the helper is a child and this process waits
 // for it. See handoff_windows.go.
-func handOff(args []string) error {
-	path, err := findHelper()
+//
+// handedOverTo is the file a previous hand-off chose, or "" if there has not
+// been one. See [handOffMarker]: it is the whole of the loop guard, and it is
+// deliberately not an identity check.
+func handOff(handedOverTo string, args []string) error {
+	return handOffVia(handedOverTo, args, findHelper, execHelper)
+}
+
+// handOffVia is [handOff] with the two things it does passed in, because
+// neither can be arranged around a test: findHelper consults this machine's
+// PATH, and execHelper does not return.
+//
+// The seam exists for one assertion in particular — that a second hand-off
+// refuses *before* either of them runs. A guard that refused after resolving a
+// helper would be a guard that still execs.
+func handOffVia(handedOverTo string, args []string, find func() (string, error), run func(string, []string) error) error {
+	if handedOverTo != "" {
+		return alreadyHandedOver(handedOverTo)
+	}
+	path, err := find()
 	if err != nil {
 		return err
 	}
-	return execHelper(path, args)
+	return run(path, args)
+}
+
+// handOffMarker is the environment variable a hand-off sets on the helper, and
+// the whole of what stops `fleetctl tui` handing over more than once.
+//
+// It exists because [isSameBinary] answers a question that cannot be answered
+// reliably. "Am I the file I am about to exec?" has been got wrong four times
+// on this command — /proc absent, argv[0] relative, argv[0] bare, a copy that
+// shares no inode with anything — and each fix was correct and incomplete,
+// because a hardlink, a symlink, a bind mount and an overlay all make one file
+// answer to several names while a copy makes one file answer to none.
+//
+// The property actually needed is much weaker, and it is one bit: *this process
+// must not hand off more than once*. Measured before this marker existed, on an
+// ordinary host with a working os.Executable: a fleetctl beside a `cp` of
+// itself named fleet-tui, with a `ln -s` to fleetctl named fleet-tui on PATH,
+// exec'd back and forth between the two for ever — same pid, nothing on screen,
+// every identity check answering correctly every time. Neither file is the one
+// running when it is chosen, so nothing local to one process can see it; the
+// loop is a property of the chain, and only something carried along the chain
+// can bound it.
+//
+// So the far side is *told*. Not asked, and not compared with: the value is
+// only ever printed, so it cannot redirect an exec, and no answer it gives can
+// be wrong in the direction that matters. A second hand-off refuses on every
+// host, including the ones where nothing can say what is running.
+//
+// It does not replace [isSameBinary], and the two catch different mistakes. The
+// identity check refuses a bad candidate *and goes on to PATH*, so an install
+// with a real helper somewhere still works and the operator is told which file
+// to delete without a process being spent on it. This one is the backstop for
+// what identity cannot see, and it is deliberately strict: a fleetctl that was
+// exec'd as the helper does not look for another one. The install that costs is
+// a `cp` of fleetctl beside fleetctl *and* a real helper further out — which
+// worked by a second hop before and is refused now, naming the file to delete.
+// A broken install answered with the sentence is worth more than a working one
+// that depends on the mechanism that also loops.
+//
+// The environment is not inherited implicitly on this path: [execHelper] passes
+// it to syscall.Exec explicitly, and to exec.Command explicitly on Windows,
+// which is why the marker is put in that slice by [handOffEnv] rather than set
+// on this process with os.Setenv.
+const handOffMarker = "FLEET_TUI_HANDED_OFF"
+
+// takeHandOffMarker reads the marker and removes it from this process's
+// environment.
+//
+// Removed because it is meant for exactly one exec. The far side of a hand-off
+// that draws is a long-lived program that will start others — a shell out of
+// the view, whatever #43 wires in — and none of them are the far side of
+// anything. Left set, the marker would outlive the hand-off it describes and
+// refuse a `fleetctl tui` that has nothing to do with it.
+func takeHandOffMarker() string {
+	marker := os.Getenv(handOffMarker)
+	_ = os.Unsetenv(handOffMarker)
+	return marker
+}
+
+// handOffEnv is the environment the helper is given: this process's own, plus
+// the marker naming the file being handed to.
+//
+// Any marker already there is dropped rather than appended after: duplicate
+// assignments are legal in an environment and it is the *first* that a Go
+// process reads back, so appending alone could hand the far side a value this
+// process did not choose. An exact match is enough for that, on every platform
+// including the one whose variable names are case-insensitive: [takeHandOffMarker]
+// has already removed the marker from this process's environment — with
+// os.Unsetenv, which is case-insensitive where the platform is — before any
+// hand-off is attempted, so what this drops is a marker no supported path can
+// have left behind.
+func handOffEnv(path string) []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if name, _, ok := strings.Cut(entry, "="); ok && name == handOffMarker {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, handOffMarker+"="+path)
+}
+
+// alreadyHandedOver is what a fleetctl on the far side of a hand-off fails
+// with.
+//
+// It names the file, because that file is the mistake: something put a fleetctl
+// where the helper belongs, and this process is the proof — it is a fleetctl,
+// and it was exec'd as the helper. Nothing had to be inferred about which file
+// anything is.
+func alreadyHandedOver(path string) error {
+	return fmt.Errorf(
+		"%w, and the terminal was already handed to %s, which is this same binary. "+
+			"A copy, a rename or a symlink of fleetctl does not draw the view — the view is "+
+			"linked into a different program. Delete it and install the real one: "+
+			"`go install github.com/axelmierczuk/fleet-mcp/cmd/%s@latest`. "+
+			"`fleetctl list` and `fleetctl info` need nothing extra",
+		errNoHelper, path, helperName)
 }
 
 // findHelper locates the helper the way an installed layout puts it: next to
@@ -63,7 +179,9 @@ func handOff(args []string) error {
 // helper. #44 chose one command over two so that there would not be a second
 // place to get a fleet's configuration wrong, and a variable that decides which
 // binary a credential-holding CLI execs would be exactly that, with a worse
-// failure than a misconfiguration.
+// failure than a misconfiguration. [handOffMarker] is not one: it is set *by* a
+// hand-off, it is only ever read to refuse, and nothing it can say makes this
+// function choose a different file.
 //
 // The order is the guarantee, and it is asserted: beside fleetctl is the only
 // one of the two places that came out of the same archive, `make build` or
@@ -262,6 +380,11 @@ func helperArgv(path string, args []string) []string {
 // than a process that never comes back —
 // TestAFleetctlCopiedToItsHelpersNameRefusesInsteadOfLooping drives exactly
 // that, from a shell.
+//
+// That second-hop catch is not what bounds the chain, and must not be mistaken
+// for it: it is still an identity answer, and with two wrong helpers that
+// resolve to each other every answer here is correct while the hand-offs go
+// round for ever. [handOffMarker] is what makes that impossible.
 func isSameBinary(self, path string) bool {
 	if self == "" || path == "" {
 		return false

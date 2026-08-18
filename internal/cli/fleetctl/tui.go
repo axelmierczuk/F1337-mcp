@@ -167,6 +167,15 @@ func newTUICommandWith(out io.Writer, view View, f *tuiFlags) *cobra.Command {
 				return err
 			}
 
+			// Read here and cleared here, whichever branch runs below: it
+			// describes exactly one exec, and the binary that draws goes on to
+			// start other things that are the far side of nothing. Set, it
+			// means this process is already the far side of a hand-off — and a
+			// fleetctl on the far side of a hand-off is a fleet-tui that is
+			// really fleetctl, so handing over again is the loop. See
+			// [handOffMarker].
+			handedOverTo := takeHandOffMarker()
+
 			// Before the registry is opened and before a single agent is
 			// dialled: this binary does not draw, so everything below would be
 			// work done twice. See [handOff] — on Unix it does not return.
@@ -178,7 +187,7 @@ func newTUICommandWith(out io.Writer, view View, f *tuiFlags) *cobra.Command {
 			// else, since every one of those writes to a buffer and is refused
 			// above.
 			if view == nil {
-				err := handOff(os.Args[1:])
+				err := handOff(handedOverTo, os.Args[1:])
 				// Windows has no exec, so there the helper is a child and its
 				// status is this command's. Silenced for the reason
 				// `fleetctl shell` silences a remote shell's: the status is

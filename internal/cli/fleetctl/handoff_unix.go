@@ -4,7 +4,6 @@ package fleetctl
 
 import (
 	"fmt"
-	"os"
 	"syscall"
 )
 
@@ -24,7 +23,12 @@ func execHelper(path string, args []string) error {
 	// process's own command line, passed as argv rather than through a shell —
 	// behind the resolved path, which is what lets the far side recognise
 	// itself on a host that cannot. See [helperArgv].
-	if err := syscall.Exec(path, helperArgv(path, args), os.Environ()); err != nil { //nolint:gosec // see above
+	//
+	// The environment is passed rather than inherited — syscall.Exec takes it —
+	// so the marker [handOffEnv] puts in it is what crosses, and a fleetctl on
+	// the far side refuses to hand over again whatever it can work out about
+	// which file it is. See [handOffMarker].
+	if err := syscall.Exec(path, helperArgv(path, args), handOffEnv(path)); err != nil { //nolint:gosec // see above
 		return fmt.Errorf("run %s: %w", path, err)
 	}
 	// Unreachable: a successful Exec does not return.

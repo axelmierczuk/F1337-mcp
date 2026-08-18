@@ -107,6 +107,8 @@ Everything except one scenario.
 | `TestWithoutTheHelperTuiSaysWhatToInstallAndTheRestIsUnaffected` | An install with `fleetctl` alone: `tui` refuses naming the binary, where it looked and the line that installs it, `list` still works, and redirected output is still answered with the terminal refusal. |
 | `TestAFleetctlInstalledAsItsOwnHelperRefusesInsteadOfLooping` | A fleetctl installed under its helper's name refuses, naming the mistake, instead of exec'ing itself for ever. |
 | `TestAFleetctlCopiedToItsHelpersNameRefusesInsteadOfLooping` | The same mistake made with `cp` rather than a link — two files, nothing to compare in one process — refused after one hand-off rather than looping. |
+| `TestTheTerminalIsHandedOverAtMostOnceHoweverManyWrongHelpersThereAre` | A `cp` beside fleetctl and a `ln -s` on PATH, each of which the other resolves to: the terminal is handed over once and then refused, rather than passed back and forth for ever. |
+| `TestTheMarkerNeverRefusesTheBinaryThatDraws` | `fleet-tui` run directly with a hand-off marker in its environment still draws — the guard that stops a second hand-off can never reach the binary whose job is to draw. |
 | `TestNoCommandInterrogatesTheTerminalAtStartup` | On a pseudo-terminal that answers nothing, `fleetctl version` and `fleetctl list` write no background-colour query and no cursor-position request, and a line typed while they start is still in the input queue afterwards (#73). |
 
 ## What needs a container

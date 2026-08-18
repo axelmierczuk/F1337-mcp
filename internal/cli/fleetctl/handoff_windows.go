@@ -29,6 +29,11 @@ func execHelper(path string, args []string) error {
 	// "what does the helper see as argv[0]" and one place it is stated. See
 	// [helperArgv].
 	cmd.Args = helperArgv(path, args)
+	// Spelled out for the same reason, and carrying the same marker the exec on
+	// every other platform carries: a nil Env would inherit this process's
+	// environment without it, and the far side would have nothing telling it a
+	// hand-off has already happened. See [handOffMarker].
+	cmd.Env = handOffEnv(path)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 
 	signal.Ignore(os.Interrupt)

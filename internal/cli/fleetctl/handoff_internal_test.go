@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -587,4 +588,123 @@ func TestAFileWithoutTheExecutableBitIsNotTheHelper(t *testing.T) {
 
 	_, err := findHelperVia(func() (string, error) { return self, nil }, noPath)
 	require.ErrorIs(t, err, errNoHelper)
+}
+
+// The other half of the loop guard, and the one that does not depend on
+// knowing which file anything is.
+//
+// [isSameBinary] answers "am I the file I am about to exec?", which is
+// genuinely hard: /proc may be absent, argv[0] may be relative or a lie, and a
+// hardlink, a symlink, a bind mount and an overlay all make one file answer to
+// several names while a copy makes one file answer to none. Four rounds of this
+// PR found four different ways to get it wrong. What the marker asserts instead
+// is one bit — this process has already handed over once — which no host can
+// fail to know and no identity check can get wrong. See [handOffMarker].
+
+// TestASecondHandOffIsRefusedWithoutAskingWhatAnythingIs is the guarantee, at
+// the only place it can be made.
+//
+// The refusal has to come *before* the lookup and before the exec. A guard that
+// resolved a helper first and then decided would be a guard that still hands
+// over — the mistake it exists to stop — so both are seams here and reaching
+// either of them is the failure.
+func TestASecondHandOffIsRefusedWithoutAskingWhatAnythingIs(t *testing.T) {
+	t.Parallel()
+
+	handed := filepath.Join(t.TempDir(), exeName(helperName))
+	err := handOffVia(handed, []string{"tui"},
+		func() (string, error) {
+			t.Error("a second hand-off looked for a helper; the answer cannot depend on what it finds")
+			return "", errors.New("unreachable")
+		},
+		func(string, []string) error {
+			t.Error("a second hand-off exec'd something, which is the loop")
+			return nil
+		})
+
+	require.ErrorIs(t, err, errNoHelper)
+	require.Contains(t, err.Error(), handed, "the refusal does not name the file that has to be deleted")
+	require.Contains(t, err.Error(), "this same binary")
+	require.Contains(t, err.Error(), "go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest",
+		"the refusal does not say how to get the real one")
+}
+
+// TestTheFirstHandOffLooksAndThenExecsWhatItFound is the join underneath it:
+// with no marker, the lookup runs and its answer is what is exec'd, with the
+// command line this process was given.
+//
+// Stated because the guard above is a `return` in the middle of that sequence,
+// and a guard that refused *everything* would pass the test above and every
+// other test in this file — findHelperVia's own tests do not go through here.
+func TestTheFirstHandOffLooksAndThenExecsWhatItFound(t *testing.T) {
+	t.Parallel()
+
+	found := filepath.Join(t.TempDir(), exeName(helperName))
+	args := []string{"tui", "--refresh", "3s"}
+
+	var (
+		ranPath string
+		ranArgs []string
+	)
+	require.NoError(t, handOffVia("", args,
+		func() (string, error) { return found, nil },
+		func(path string, a []string) error {
+			ranPath, ranArgs = path, a
+			return nil
+		}))
+	require.Equal(t, found, ranPath, "the hand-off exec'd something other than what the lookup found")
+	require.Equal(t, args, ranArgs, "the hand-off did not pass on the command line it was given")
+
+	// And a lookup that refuses is the refusal, rather than an exec of nothing.
+	refused := errors.New("no helper here")
+	require.ErrorIs(t, handOffVia("", args,
+		func() (string, error) { return "", refused },
+		func(string, []string) error {
+			t.Error("the hand-off exec'd a helper the lookup refused to name")
+			return nil
+		}), refused)
+}
+
+// TestTheHelperIsToldTheHandOffHappened is the environment the far side reads
+// the marker out of.
+//
+// The value is the file being handed to, because that file is what the refusal
+// on the far side has to name — it is the one thing that process cannot work
+// out for itself on a host that cannot say what is running.
+func TestTheHelperIsToldTheHandOffHappened(t *testing.T) {
+	// Not parallel: it sets the marker in this process's own environment.
+	t.Setenv("FLEET_TEST_UNRELATED", "kept")
+	// A stale marker, which is what an operator who exported one by hand — or
+	// a caller that reached here twice — would leave behind.
+	t.Setenv(handOffMarker, "/somewhere/else/fleet-tui")
+
+	env := handOffEnv("/opt/fleet/bin/fleet-tui")
+
+	var markers []string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, handOffMarker+"=") {
+			markers = append(markers, entry)
+		}
+	}
+	require.Equal(t, []string{handOffMarker + "=/opt/fleet/bin/fleet-tui"}, markers,
+		"the helper is handed an environment whose marker is not exactly the file it is being handed. "+
+			"A duplicate is worse than none: the first assignment is the one a process reads back")
+	require.Contains(t, env, "FLEET_TEST_UNRELATED=kept",
+		"the hand-off rebuilt the environment rather than adding to it; the operator's own variables cross unchanged")
+}
+
+// TestTheMarkerIsTakenRatherThanRead.
+//
+// It describes exactly one exec, and the binary that draws goes on to start
+// other things — a shell out of the view, whatever #43 wires in. Left set, it
+// would outlive the hand-off it describes and refuse a `fleetctl tui` that has
+// nothing to do with it.
+func TestTheMarkerIsTakenRatherThanRead(t *testing.T) {
+	// Not parallel: it sets the marker in this process's own environment.
+	t.Setenv(handOffMarker, "/opt/fleet/bin/fleet-tui")
+
+	require.Equal(t, "/opt/fleet/bin/fleet-tui", takeHandOffMarker())
+	require.Empty(t, os.Getenv(handOffMarker),
+		"the marker outlived the hand-off it describes, so everything this process starts inherits it")
+	require.Empty(t, takeHandOffMarker(), "a process that was not handed anything reports a hand-off")
 }
