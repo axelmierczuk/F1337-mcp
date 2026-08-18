@@ -1,0 +1,14 @@
+ fleetctl tui                                                         
+┌ fleet ─────────────────────────────────────────────────────── 1/4 ─┐
+│  NAME                         PLATFORM      HEALTH      LAST SEEN  │
+│● alpha                        linux/amd64   serving     3s ago     │
+│● beta-builder                 darwin/arm64  degraded    40s ago    │
+│● gamma                        windows/amd64 unreachable 2h ago     │
+└────────────────────────────────────────────────────────────────────┘
+┌ processes ───────────────────────────────────────────────── alpha ─┐
+│STATE      NAME                       PID    UPTIME  RST PORTS      │
+│ready      web-dev-server             4211   12m4s   -   8080,8443  │
+│running    queue-worker               4300   3m10s   2   -          │
+│crashed    fuzzer                     -      1h2m    5   -          │
+└────────────────────────────────────────────────────────────────────┘
+ tab pane   r restart   x stop   S signal   ? help   q quit           

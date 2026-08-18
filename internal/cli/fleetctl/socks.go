@@ -100,7 +100,11 @@ func newSocksCommand(out io.Writer) *cobra.Command {
 				return err
 			}
 
-			pool, err := control.pool()
+			// socks reaches the sandbox through pool.Forward and never asks
+			// what the health cache thinks, so the background loop is traffic
+			// nobody reads; see oneShotHealthInterval. `fleetctl tui` is the
+			// one command on the other side of that.
+			pool, err := control.pool(oneShotHealthInterval)
 			if err != nil {
 				return err
 			}

@@ -58,13 +58,37 @@ func (f *controlFlags) register(cmd *cobra.Command) {
 		"how long to wait for each sandbox before reporting it unreachable")
 }
 
+// oneShotHealthInterval is what a command that does not read the health cache
+// asks the pool's background health loop for: as close to never as a duration
+// can say.
+//
+// The pool starts a health loop per channel and Close waits for it, so a
+// default-length background probe against a black-holed host would keep a
+// listing alive well past the line it was printing — for `list` and `info`,
+// longer than the process lives is the whole requirement. `fleetctl socks`
+// runs for hours rather than seconds and wants the same value for the other
+// reason: it reaches a sandbox through pool.Forward and never asks what the
+// cache thinks, so every probe that loop makes is traffic nobody reads.
+//
+// `fleetctl tui` is the one command on the other side of this — the cache is
+// its health source — and it passes what --refresh chose; see newTUICommand.
+const oneShotHealthInterval = time.Hour
+
 // pool builds the gRPC client pool this workstation dials agents with.
 //
-// Both probe timeouts are set from --timeout, the pool's background one
-// included: the pool starts a health loop per channel and Close waits for it,
-// so a default-length background probe against a black-holed host would keep
-// the process alive well past the listing it was printing.
-func (f *controlFlags) pool() (*client.Pool, error) {
+// healthInterval is a parameter rather than a constant because the two callers
+// want opposite things out of the same struct: a one-shot listing needs the
+// background loop never to fire, and `fleetctl tui` needs it to be the only
+// thing probing on a schedule. One function rather than two so that choice is
+// a value at the call site instead of a second copy of the credential loading
+// below, which is what it was — thirty lines that had to stay identical and
+// nothing to notice if they stopped being.
+//
+// The per-call probe timeout is --timeout either way.
+func (f *controlFlags) pool(healthInterval time.Duration) (*client.Pool, error) {
+	if healthInterval <= 0 {
+		healthInterval = oneShotHealthInterval
+	}
 	caDir, err := resolve(f.caDir, defaultCADir)
 	if err != nil {
 		return nil, err
@@ -92,13 +116,11 @@ func (f *controlFlags) pool() (*client.Pool, error) {
 	}
 
 	return client.NewPool(client.Config{
-		CACertPEM:     authority.CertPEM(),
-		CertPEM:       certPEM,
-		KeyPEM:        keyPEM,
-		HealthTimeout: f.probeTimeout(),
-		// One probe per channel is all a one-shot command needs; the interval
-		// only has to be longer than the process lives.
-		HealthInterval: time.Hour,
+		CACertPEM:      authority.CertPEM(),
+		CertPEM:        certPEM,
+		KeyPEM:         keyPEM,
+		HealthTimeout:  f.probeTimeout(),
+		HealthInterval: healthInterval,
 	})
 }
 
@@ -275,7 +297,7 @@ func probeFleet(ctx context.Context, sandboxes []registry.Sandbox, control *cont
 		return unknown("Health is unknown: --no-probe was given, so no sandbox was contacted.")
 	}
 
-	pool, err := control.pool()
+	pool, err := control.pool(oneShotHealthInterval)
 	if err != nil {
 		return unknown("Health is unknown: " + err.Error())
 	}
@@ -498,7 +520,7 @@ func newInfoCommand(out io.Writer) *cobra.Command {
 // fillHostInfo asks the sandbox about itself, leaving the registry's own
 // answers in place when it does not reply.
 func fillHostInfo(ctx context.Context, result *infoResult, sb registry.Sandbox, control *controlFlags, toolchains bool) {
-	pool, err := control.pool()
+	pool, err := control.pool(oneShotHealthInterval)
 	if err != nil {
 		result.Health, result.Detail = client.HealthUnknown, err.Error()
 		return
