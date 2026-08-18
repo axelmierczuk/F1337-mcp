@@ -76,7 +76,8 @@ is printed too.
 Then stop `fleetctl serve`, and check the fleet:
 
 ```sh
-fleetctl list
+fleetctl list          # one listing
+fleetctl tui           # or watch the whole fleet, its processes and their logs
 ```
 
 **4. Point your agent at the MCP server:**

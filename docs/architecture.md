@@ -45,6 +45,16 @@ anything of its own. `fleetctl list` is what an operator reaches for when the
 model reports a sandbox as unreachable, and a CLI with a second idea of fleet
 health would answer that question about itself instead of about the fleet.
 
+`fleetctl tui` (`internal/tui`) is held to the same rule one step further: it is
+a view, not a second implementation. Its four panes are backed by the same
+`internal/client` calls, and the only thing it puts on a schedule per sandbox is
+the pool's own background health cache — the process list, the log follow and
+the host detail are fetched for the focused sandbox alone, because polling every
+pane for every host is what makes a large fleet unwatchable. The model, the
+layout and the rendering are pure functions over values, so the parts a terminal
+cannot be asked about in a test — refresh scheduling, confirmation gating,
+degradation below 80x24 — are asserted on directly.
+
 ## Selection under a stateless protocol
 
 MCP `2026-07-28` removed protocol-level sessions. There is no handshake to hang
