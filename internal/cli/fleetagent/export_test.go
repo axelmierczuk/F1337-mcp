@@ -45,10 +45,6 @@ func GrantServiceUserAccessForTest(name, dir string, files []string) error {
 	return grantServiceUserAccess(name, dir, files)
 }
 
-// ServiceAccessByOwnershipForTest reports whether this platform grants the
-// service account access by ownership.
-const ServiceAccessByOwnershipForTest = serviceAccessByOwnership
-
 // DefaultServiceUserForTest exposes the platform's default service account, so
 // the "never a superuser" property can be asserted without an install.
 func DefaultServiceUserForTest() (string, error) { return defaultServiceUser() }
@@ -417,6 +413,135 @@ func (r *recordingRegistration) Restart() error   { return r.record("restart") }
 
 func (r *recordingRegistration) Status() (service.Status, error) {
 	return service.StatusRunning, nil
+}
+
+// InstallHostForTest describes the host `service install` is about to be run
+// on: what it already carries, what is running on it, and whether the service
+// manager will accept the definition install writes.
+type InstallHostForTest struct {
+	// Installed is what the host already carries.
+	Installed []Mechanism
+	// Running names the mechanisms whose registration reports running.
+	Running map[Mechanism]bool
+	// FailInstall makes the registration install writes refuse to install,
+	// which is the state that decides whether the host is left with anything
+	// registered at all.
+	FailInstall bool
+	// FailBuild makes the definition itself impossible to assemble, which is
+	// what a service manager this library cannot address produces — and which
+	// has to be discovered before anything is removed.
+	FailBuild bool
+	// Legacy makes the host carry a service under the pre-rebrand name.
+	Legacy bool
+}
+
+// PinInstallForTest drives `service install` against that host, recording every
+// lifecycle call the command makes — on the registrations it removes and on the
+// one it writes — and the password it hands the service manager.
+//
+// This is the half of `install` three audit rounds named unreachable. Nothing
+// on any runner may write a real systemd unit, launchd job, Windows service or
+// Scheduled Task, so the seam is at newRegistration: the point where the
+// command stops deciding and starts talking to the host. Everything above it —
+// which registration is removed first, whether the daemon was running before
+// the command started, what a failed write leaves behind, and whether the agent
+// is running again when the command returns — is the real command, entered from
+// the real argv, and it would notice if it stopped doing any of that.
+//
+// The steps a test must not let happen are kept out by what the caller passes,
+// not by this seam: a config whose state and log directories are its own, and
+// an account whose grants are no-ops. See installAccount in install_test.go.
+func PinInstallForTest(host InstallHostForTest) (calls func() []string, password func() string, restore func()) {
+	previous := struct {
+		list     func() []Mechanism
+		control  func(Mechanism) (registration, error)
+		create   func(Mechanism, UnitParams, string) (registration, error)
+		elevated func(string) error
+		legacy   func() bool
+	}{installedMechanisms, controlRegistration, newRegistration, requireElevated, legacyServiceInstalled}
+
+	recorded := &[]string{}
+	handed := new(string)
+	installedMechanisms = func() []Mechanism { return host.Installed }
+	controlRegistration = func(m Mechanism) (registration, error) {
+		return &installRegistration{label: string(m), mechanism: m, host: host, log: recorded}, nil
+	}
+	newRegistration = func(m Mechanism, _ UnitParams, secret string) (registration, error) {
+		*handed = secret
+		if host.FailBuild {
+			return nil, fmt.Errorf("prepare service definition: no %s can be assembled here", m)
+		}
+		return &installRegistration{label: "new", mechanism: m, host: host, log: recorded, failInstall: host.FailInstall}, nil
+	}
+	requireElevated = func(string) error { return nil }
+	legacyServiceInstalled = func() bool { return host.Legacy }
+
+	return func() []string { return append([]string(nil), *recorded...) },
+		func() string { return *handed },
+		func() {
+			installedMechanisms, controlRegistration = previous.list, previous.control
+			newRegistration, requireElevated, legacyServiceInstalled = previous.create, previous.elevated, previous.legacy
+		}
+}
+
+// installRegistration is a registration that says what it was asked to do and
+// answers Status from the host it was built for.
+//
+// Status is not recorded: it is a query, and `install` asks it more than once
+// on purpose — the point of the recording is the sequence of things that change
+// the machine.
+type installRegistration struct {
+	label       string
+	mechanism   Mechanism
+	host        InstallHostForTest
+	log         *[]string
+	failInstall bool
+}
+
+func (r *installRegistration) record(verb string) error {
+	*r.log = append(*r.log, r.label+":"+verb)
+	if verb == "install" && r.failInstall {
+		return fmt.Errorf("this host will not register a %s", r.mechanism)
+	}
+	return nil
+}
+
+func (r *installRegistration) Install() error   { return r.record("install") }
+func (r *installRegistration) Uninstall() error { return r.record("uninstall") }
+func (r *installRegistration) Start() error     { return r.record("start") }
+func (r *installRegistration) Stop() error      { return r.record("stop") }
+func (r *installRegistration) Restart() error   { return r.record("restart") }
+
+func (r *installRegistration) Status() (service.Status, error) {
+	for _, m := range r.host.Installed {
+		if m != r.mechanism {
+			continue
+		}
+		if r.host.Running[m] {
+			return service.StatusRunning, nil
+		}
+		return service.StatusStopped, nil
+	}
+	return service.StatusUnknown, service.ErrNotInstalled
+}
+
+// ForeignConfigDirNoteForTest exposes what install says about a config
+// directory it deliberately left alone, with the platform supplied rather than
+// read.
+//
+// The message used to be composed inline behind a per-platform constant, so the
+// half of it Windows needs was written for nobody: an operator whose --config
+// is outside %ProgramData% got no traverse grant and no note, which is a daemon
+// that fails every start on a config it cannot reach.
+func ForeignConfigDirNoteForTest(dir, account, goos string) []string {
+	return foreignConfigDirNote(dir, account, goos)
+}
+
+// DryRunAccountNotesForTest exposes what a dry run says about an account the
+// host does not have, with the platform and the lookup supplied rather than
+// read.
+func DryRunAccountNotesForTest(account, goos string, create, exists bool) []string {
+	return dryRunAccountNotes(account, goos, create, exists)
 }
 
 // PinInstalledForTest makes the `service` subcommands see a host with the agent

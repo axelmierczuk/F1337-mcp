@@ -17,6 +17,10 @@ not have to rediscover it as whichever account it ends up running as.
 nothing. It needs no elevation and changes no file, and it is the way to see
 which mechanism a host will get, under which account, and whether the binary is
 somewhere that account can read — before running the command that acts on it.
+It also says when the host does not have the account: Linux creates a system
+account and says it will, and everywhere else a missing account is what the
+real `install` refuses on, so a plan that did not mention it was a plan that
+could not be carried out.
 
 ## Windows has two mechanisms, and the difference decides whether it works
 
@@ -189,7 +193,8 @@ The directory only changes hands when it is one `enroll` created (`/etc/fleet`,
 Point `--config` somewhere else and `install` gives away the four files but
 leaves the directory alone, and says so: `--config /etc/agent.yaml` must not
 turn into `chown fleet /etc`. Make that directory traversable by the service
-account yourself.
+account yourself — `install` prints the command, `chown` here and an `icacls`
+grant on Windows.
 
 On Windows nothing is chowned — access there is by ACL — but the same handover
 happens through `icacls`: the enrollment material is granted read to the account
@@ -199,6 +204,11 @@ identities, and admits nothing else: the directories are created by an elevated
 install, so their contents belong to the administrators and an ordinary
 operator token cannot write them without this step. The old default needed
 none of it; the new one does.
+
+A `--config` outside `%ProgramData%\fleet` gets the same treatment as on Unix:
+the four files are granted read individually and the directory holding them is
+left alone. It needs the traverse grant `install` prints, or the daemon starts
+and fails on a config it cannot open.
 
 ## When the agent is running and cannot work
 
@@ -316,7 +326,16 @@ switching mechanisms produces unless something removes the old one, and two
 registrations means two daemons starting against the same state directory, both
 re-adopting the same supervised processes.
 
-`install` removes the one it replaces and `status` warns when it finds two.
+`install` removes the one it replaces and `status` warns when it finds two. It
+also **starts the new registration when the one it removed was running**, so
+following the `--mechanism task` advice `status` prints does not take the agent
+down: switching mechanism is a replacement, and `install` restarts what it
+replaces. A daemon that was stopped before the command stays stopped — `install`
+registers, `service start` starts.
+
+If the write fails after the old registration is gone, the host has no agent
+registered on it at all, and the error says so rather than leaving "install
+failed" to be read as "nothing happened".
 `start`, `stop`, `restart` and `uninstall` act on **every** registration the
 host carries, and keep going when one of them refuses — a `stop` that stops the
 service and returns before it reaches the task leaves the daemon an operator

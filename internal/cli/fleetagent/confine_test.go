@@ -1191,7 +1191,16 @@ func TestServiceUninstall_RemovesEveryRegistrationEvenWhenOneFails(t *testing.T)
 
 // And the whole of it when nothing refuses: both removed, and the material an
 // operator must not lose named as kept.
+//
+// Named, not merely mentioned. "left in place:" followed by two lines is the
+// whole of what makes uninstall safe to run, and both lines were free: dropping
+// the enrollment one, and pointing the state one at a directory this host does
+// not use, each left the suite green. state_dir is configurable, `install`
+// prints the resolved one, and uninstall was printing the built-in default —
+// so an operator with a moved state directory was told the thing uninstall
+// keeps is somewhere it is not.
 func TestServiceUninstall_KeepsTheEnrollmentAndProcessState(t *testing.T) {
+	stateDir := pinAgentConfig(t)
 	defer fleetagent.PinElevatedForTest()()
 
 	both := []fleetagent.Mechanism{fleetagent.MechanismService, fleetagent.MechanismTask}
@@ -1205,7 +1214,11 @@ func TestServiceUninstall_KeepsTheEnrollmentAndProcessState(t *testing.T) {
 	require.Equal(t, 0, code, "%s", text)
 	assert.Equal(t, []string{"service:stop", "service:uninstall", "task:stop", "task:uninstall"}, calls())
 	assert.Contains(t, text, "left in place:")
-	assert.Contains(t, text, "supervised process state")
+	assert.Contains(t, text, stateDir+" (supervised process state)",
+		"the state directory this host actually uses, not the default it does not")
+	assert.Contains(t, text, os.Getenv("FLEET_AGENT_CONFIG"),
+		"and the config, whose certificate and key are the reason re-installing rejoins without enrolling again")
+	assert.Contains(t, text, "certificate, key, and CA bundle")
 	assert.Contains(t, text, "rejoin without enrolling again",
 		"uninstall keeps the enrollment on purpose, and an operator has to be told so or they will enroll again")
 }

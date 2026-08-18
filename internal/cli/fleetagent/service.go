@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -206,6 +207,9 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 		p.Printf("  state:     %s\n", params.StateDir)
 		p.Printf("  logs:      %s\n", params.LogDir)
 		p.Printf("  hardening: %s\n", params.Hardening)
+		for _, line := range dryRunAccountNotes(params.User, runtime.GOOS, opts.createUser, accountExists(params.User)) {
+			p.Println(line)
+		}
 		for _, line := range dryRunNotes(mechanism, runtime.GOOS, params.User) {
 			p.Println(line)
 		}
@@ -257,23 +261,24 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	if err := grantServiceUserAccess(params.User, grantDir, enrollmentMaterial(cfg, params.ConfigPath)); err != nil {
 		return err
 	}
-	if grantDir == "" && serviceAccessByOwnership {
-		// Handing over a directory the operator chose is not this command's
-		// call to make: --config /etc/agent.yaml would make that directory
-		// /etc. The files inside it were given away individually; the
-		// traversal has to be granted by whoever owns the directory.
-		p.Printf("NOTE: %s is not a directory fleet created, so its ownership was left\n", configDir)
-		p.Printf("      alone — the files inside it were handed over, but %s still has to\n", params.User)
-		p.Println("      be able to traverse it. If the daemon cannot read its config, run:")
-		p.Printf("        chown %s %s\n", params.User, configDir)
+	if grantDir == "" {
+		for _, line := range foreignConfigDirNote(configDir, params.User, runtime.GOOS) {
+			p.Println(line)
+		}
 	}
 
-	// Remove the registration this one replaces; see otherMechanisms.
-	if err := removeOtherMechanism(p, mechanism); err != nil {
+	// Assembled before anything is removed. newRegistration only builds a
+	// definition — it writes nothing to the host — and building it after
+	// removeOtherMechanism meant a failure here arrived with the host's only
+	// registration already taken off it, reported as "prepare service
+	// definition" and reading like nothing had happened.
+	svc, err := newRegistration(mechanism, params, password)
+	if err != nil {
 		return err
 	}
 
-	svc, err := newRegistration(mechanism, params, password)
+	// Remove the registration this one replaces; see otherMechanisms.
+	replaced, err := removeOtherMechanism(p, mechanism)
 	if err != nil {
 		return err
 	}
@@ -285,7 +290,13 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	// idempotent and what an operator re-running install actually wants: the
 	// config path or the hardening level may have changed.
 	installed := isInstalled(svc)
-	wasRunning := false
+	// The agent was running before this command if the registration being
+	// replaced was running — and switching mechanism is a replacement. Only
+	// the same-mechanism half of that was counted, so the one flow #74 exists
+	// to produce — `status` printing "re-register it with --mechanism task" and
+	// the operator doing exactly that — stopped a running daemon, registered
+	// the new mechanism, started nothing, and said so nowhere.
+	wasRunning := replaced.running
 	if installed {
 		if status, err := svc.Status(); err == nil && status == service.StatusRunning {
 			wasRunning = true
@@ -297,7 +308,7 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	}
 
 	if err := svc.Install(); err != nil {
-		if installed {
+		if installed || len(replaced.removed) > 0 {
 			// The replacement is not atomic on any of the three service
 			// managers, so a failure here leaves the host with no service at
 			// all. Say that, rather than letting an operator read "install
@@ -332,9 +343,33 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	}
 
 	if wasRunning {
-		if err := svc.Restart(); err != nil {
-			p.Printf("note: the service was running but could not be restarted: %v\n", err)
-		} else {
+		// Restart when there was a definition of this mechanism to restart, and
+		// Start when there was not.
+		//
+		// Not interchangeable: the SCM's Restart and launchd's are
+		// stop-then-start and give up when the stop fails, and stopping a
+		// service that has never run fails — ERROR_SERVICE_NOT_ACTIVE. A
+		// mechanism switch writes the definition moments earlier, so restarting
+		// it would report "could not be started" and leave the agent down,
+		// which is exactly the shape round 1 fixed inside
+		// scheduledTask.Restart, arriving through the two managers that are not
+		// the Task Scheduler.
+		resume, moved := svc.Restart, false
+		if !installed {
+			resume, moved = svc.Start, true
+		}
+		switch err := resume(); {
+		case err != nil:
+			p.Println("note: the agent was running before this command and could not be started")
+			p.Printf("      again under the %s: %v\n", mechanism.Describe(), err)
+			p.Println("      Run `fleet-agent service start` once the cause above is fixed.")
+		case moved:
+			// The mechanism changed underneath a running daemon. What happened
+			// is a move, and an operator who is not told will read the removal
+			// above as the end of it.
+			p.Printf("service started under the %s: it was running under the %s this command removed\n",
+				mechanism.Describe(), replaced.describe())
+		default:
 			p.Println("service restarted with the new definition")
 		}
 	}
@@ -356,6 +391,82 @@ func dryRunNotes(m Mechanism, goos, account string) []string {
 		return nil
 	}
 	return []string{fmt.Sprintf("  install would prompt for %s's password and hand it to the SCM.", account)}
+}
+
+// foreignConfigDirNote is what an operator is told when the directory holding
+// the enrollment material is not one `enroll` created.
+//
+// Handing over a directory the operator chose is not this command's call to
+// make — `--config /etc/agent.yaml` must not turn into `chown fleet /etc` — so
+// the files inside it are given away individually and the traversal is left to
+// whoever owns the directory. That has to be said, because without it the
+// daemon fails every start on a config it cannot reach and nothing names the
+// directory as the reason.
+//
+// It used to be gated on the constant recording that Unix grants access by
+// ownership, which turned the message off on Windows: the same `--config`
+// outside %ProgramData% left the account with no traverse and printed nothing
+// at all — the error-5 shape the executable-access check exists to stop,
+// arriving from the config's direction. What differs by platform is the command
+// that fixes it, not whether there is anything to say. goos is a parameter for
+// the reason resolveMechanism's is, and this is now the only place either
+// wording is composed.
+func foreignConfigDirNote(dir, account, goos string) []string {
+	fix := fmt.Sprintf("chown %s %s", account, dir)
+	if goos == "windows" {
+		fix = fmt.Sprintf("icacls %q /grant %q", dir, account+":(RX)")
+	}
+	return []string{
+		fmt.Sprintf("NOTE: %s is not a directory fleet created, so it was left alone. The", dir),
+		fmt.Sprintf("      files inside it were handed over, but %s still has to be able to", account),
+		"      traverse it. If the daemon cannot read its config, run:",
+		"        " + fix,
+	}
+}
+
+// dryRunAccountNotes is what a dry run says about an account this host does not
+// have.
+//
+// Which account the daemon will run as is one of the three things a dry run
+// exists to answer, and whether the host has that account is checked in
+// ensureServiceUser — one of the two steps a dry run deliberately does not
+// reach. So `install --dry-run --user build` printed a clean plan naming an
+// account that does not exist, and the install it was previewing refused. The
+// answer differs by platform, so this is a function of the platform rather than
+// a branch only one runner ever walks: Linux creates a system account, nothing
+// else creates anything.
+//
+// A built-in Windows service identity is not looked up at all, for the reason
+// ensureServiceUser does not look one up: it has no account database entry and
+// needs none.
+func dryRunAccountNotes(account, goos string, create, exists bool) []string {
+	if account == "" || exists || runsInSessionZero(account) {
+		return nil
+	}
+	if goos == "linux" {
+		if create {
+			return []string{fmt.Sprintf("  install would create the system account %s, which this host does not have.", account)}
+		}
+		return []string{
+			fmt.Sprintf("  WARNING: %s does not exist and --create-user=false, so `service install`", account),
+			"           will refuse. Create it, or pass --user with an existing account.",
+		}
+	}
+	return []string{
+		fmt.Sprintf("  WARNING: %s does not exist on this host, and fleet does not create accounts", account),
+		fmt.Sprintf("           on %s, so `service install` will refuse. Create it, or pass --user", goos),
+		"           with an existing account.",
+	}
+}
+
+// accountExists reports whether name resolves to an account on this host.
+//
+// Not in either platform file: the lookup is os/user's on all three, and the
+// one rule built on it — what a dry run says about an account that is missing —
+// has to be reachable from every runner.
+func accountExists(name string) bool {
+	_, err := user.Lookup(name)
+	return err == nil
 }
 
 // mechanismNotes is what an operator has to know about the mechanism they just
@@ -441,23 +552,55 @@ func otherMechanisms(keeping Mechanism) []Mechanism {
 	return others
 }
 
+// replacedRegistrations is what removeOtherMechanism took off this host, and
+// both halves of it decide something the operator sees.
+//
+// removed being non-empty means a failed install leaves the host with no
+// registration at all — the same outcome the same-mechanism replacement below
+// already warned about and this one did not, so an operator read "install
+// failed" as "nothing happened" while their agent was gone.
+//
+// running means the daemon was up when the command started. install restarts
+// what it replaces; switching mechanism *is* a replacement, and counting only
+// the same-mechanism half is what left the agent stopped.
+type replacedRegistrations struct {
+	removed []Mechanism
+	running bool
+}
+
+// describe names what was removed, the way the output and the docs do.
+func (r replacedRegistrations) describe() string {
+	names := make([]string, 0, len(r.removed))
+	for _, m := range r.removed {
+		names = append(names, m.Describe())
+	}
+	return strings.Join(names, " and the ")
+}
+
 // removeOtherMechanism uninstalls the registration this install is replacing,
 // when the host carries one under the other mechanism.
-func removeOtherMechanism(p *cli.Printer, keeping Mechanism) error {
+func removeOtherMechanism(p *cli.Printer, keeping Mechanism) (replacedRegistrations, error) {
+	var replaced replacedRegistrations
 	for _, m := range otherMechanisms(keeping) {
 		other, err := controlRegistration(m)
 		if err != nil {
-			return err
+			return replaced, err
+		}
+		// Asked before it is stopped, which is the only moment the answer
+		// still exists.
+		if status, err := other.Status(); err == nil && status == service.StatusRunning {
+			replaced.running = true
 		}
 		if err := other.Stop(); err != nil {
 			p.Printf("note: could not stop the existing %s before removing it: %v\n", m.Describe(), err)
 		}
 		if err := other.Uninstall(); err != nil {
-			return fmt.Errorf("remove the existing %s, which would otherwise start a second daemon against the same state directory: %w", m.Describe(), err)
+			return replaced, fmt.Errorf("remove the existing %s, which would otherwise start a second daemon against the same state directory: %w", m.Describe(), err)
 		}
+		replaced.removed = append(replaced.removed, m)
 		p.Printf("removed the existing %s: one host, one agent\n", m.Describe())
 	}
-	return nil
+	return replaced, nil
 }
 
 func newServiceUninstallCommand(out io.Writer) *cobra.Command {
@@ -524,7 +667,13 @@ func runServiceUninstall(out io.Writer) error {
 	if path, err := agent.DefaultConfigPath(); err == nil {
 		p.Printf("  %s and the certificate, key, and CA bundle beside it\n", path)
 	}
-	p.Printf("  %s (supervised process state)\n", agent.DefaultStateDir())
+	// The directory this host actually uses, not the built-in default.
+	// state_dir is configurable and `install` prints the resolved one; naming
+	// the default here told an operator with a moved state directory that the
+	// thing uninstall keeps is somewhere it is not. stateDirForStatus falls
+	// back to the default on a config that will not load, which is the case
+	// this command deliberately still works for.
+	p.Printf("  %s (supervised process state)\n", stateDirForStatus())
 	p.Println("re-run `fleet-agent service install` to rejoin without enrolling again")
 	return p.Err()
 }

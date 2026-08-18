@@ -82,9 +82,6 @@ func TestGrantServiceUserAccess_LeavesAForeignDirectoryAlone(t *testing.T) {
 	assert.EqualValues(t, gid, fileGid, "the file is handed over wherever it lives")
 	_, dirGid := ownerOf(t, dir)
 	assert.EqualValues(t, other, dirGid, "a directory install does not own must not change hands")
-
-	assert.True(t, fleetagent.ServiceAccessByOwnershipForTest,
-		"on Unix the handover is ownership, and install performs it")
 }
 
 // TestLinuxServiceUserKeepsAPreRebrandAccount covers the compatibility rule the

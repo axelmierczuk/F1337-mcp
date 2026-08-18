@@ -26,12 +26,12 @@ type registration interface {
 	Status() (service.Status, error)
 }
 
-// newRegistration builds the registration `install` will write.
+// hostRegistration builds the registration `install` will write.
 //
 // password is the account's password, needed only by the Windows SCM and only
 // for a named account. It is passed through to CreateService and stored by the
 // SCM as a machine-bound LSA secret; nothing here writes it anywhere.
-func newRegistration(m Mechanism, params UnitParams, password string) (registration, error) {
+func hostRegistration(m Mechanism, params UnitParams, password string) (registration, error) {
 	if m == MechanismTask {
 		return newScheduledTask(params)
 	}
@@ -78,10 +78,37 @@ func scmServiceConfig(params UnitParams, goos, password string) *service.Config 
 // them refuses — is the behaviour an operator on a host with two of them most
 // needs, and it was reachable by nothing. The gate itself stays asserted by the
 // unprivileged tests, which is the half a seam here cannot weaken.
+//
+// newRegistration is here for the same reason, and it is what makes the rest of
+// `service install` reachable at all.
+//
+// Everything the command decides in sequence — which registration to remove
+// first, whether the daemon was running before it started, whether a failure
+// left the host with nothing registered, and whether the agent it stopped is
+// running again when the command returns — is production code that only runs
+// once something writes a definition to a real service manager. Three audit
+// rounds named that half unreachable and left it so, and every one of those
+// decisions was therefore free: deleting the removal, the replacement, the
+// restart or the warning each left the whole suite green.
+//
+// The seam is at the same place the two above are: the boundary where this
+// program stops deciding and starts talking to the host. The whole of
+// runServiceInstall stays real, is entered from `fleet-agent service install`,
+// and would notice if it stopped calling any of this. The steps that would
+// change a machine are kept out by what the scenario passes — a config whose
+// state and log directories are its own, and an account whose grants are
+// no-ops — not by this seam.
+//
+// legacyServiceInstalled joins them because a host carrying a pre-rebrand
+// registration is another thing no runner has, and `install` warning about one
+// before it changes anything is the difference between an operator stopping and
+// an operator ending up with two daemons against one state directory.
 var (
-	controlRegistration = newControlRegistration
-	installedMechanisms = hostInstalledMechanisms
-	requireElevated     = requireElevation
+	controlRegistration    = newControlRegistration
+	installedMechanisms    = hostInstalledMechanisms
+	requireElevated        = requireElevation
+	newRegistration        = hostRegistration
+	legacyServiceInstalled = hostLegacyServiceInstalled
 )
 
 // newControlRegistration addresses an already-installed registration by name,

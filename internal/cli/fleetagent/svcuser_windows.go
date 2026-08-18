@@ -79,10 +79,6 @@ func ensureServiceUser(name string, _ bool) error {
 	return nil
 }
 
-// serviceAccessByOwnership records that access on Windows is governed by ACLs
-// rather than by an owner, so nothing an installer does to ownership grants it.
-const serviceAccessByOwnership = false
-
 // chownToServiceUser gives the account the ability to write a directory the
 // daemon owns: its state and its logs. The grant itself is serviceACL's, which
 // is where the argv can be asserted from every runner rather than only from an

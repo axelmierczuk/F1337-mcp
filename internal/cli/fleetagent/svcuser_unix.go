@@ -82,12 +82,6 @@ func defaultServiceUser() (string, error) {
 	return linuxServiceUser(accountExists), nil
 }
 
-// accountExists reports whether name resolves to an account on this host.
-func accountExists(name string) bool {
-	_, err := user.Lookup(name)
-	return err == nil
-}
-
 // linuxServiceUser applies the same rule the config directories follow: a host
 // that already has the pre-rebrand account keeps it.
 //
@@ -156,11 +150,6 @@ func ensureServiceUser(name string, create bool) error {
 	}
 	return fmt.Errorf("create service account %q: %w\n\nCreate it manually and re-run, or pass --user with an existing account", name, lastErr)
 }
-
-// serviceAccessByOwnership records that on Unix, giving the service account
-// access to a file is a matter of ownership — which `install` can do. On
-// Windows it is ACLs, which it does not touch.
-const serviceAccessByOwnership = true
 
 // grantServiceUserAccess makes the enrollment material readable by the account
 // the daemon will run as.
