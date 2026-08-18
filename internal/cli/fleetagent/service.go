@@ -206,8 +206,8 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 		p.Printf("  state:     %s\n", params.StateDir)
 		p.Printf("  logs:      %s\n", params.LogDir)
 		p.Printf("  hardening: %s\n", params.Hardening)
-		if serviceNeedsPassword(mechanism, runtime.GOOS, params.User) {
-			p.Printf("  install would prompt for %s's password and hand it to the SCM.\n", params.User)
+		for _, line := range dryRunNotes(mechanism, runtime.GOOS, params.User) {
+			p.Println(line)
 		}
 		for _, line := range mechanismNotes(mechanism, runtime.GOOS, params.User) {
 			p.Println(line)
@@ -339,6 +339,23 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 		}
 	}
 	return p.Err()
+}
+
+// dryRunNotes is the step the real command would take that nothing in the
+// resolved plan above shows: the password prompt.
+//
+// A function of the rule rather than a branch inside the command, for the
+// reason mechanismNotes is one. Only the Windows SCM asks for a password, so
+// the branch fires on one runner in three and — being composed inline — was
+// checked on none of them: it is the same shape as the `service stop` warning
+// round 1 found composed by a branch nothing reached. What a dry run is *for*
+// is finding out what install will do before it does it, and "it will ask you
+// for a password" is the part an operator most needs in advance.
+func dryRunNotes(m Mechanism, goos, account string) []string {
+	if !serviceNeedsPassword(m, goos, account) {
+		return nil
+	}
+	return []string{fmt.Sprintf("  install would prompt for %s's password and hand it to the SCM.", account)}
 }
 
 // mechanismNotes is what an operator has to know about the mechanism they just

@@ -63,10 +63,7 @@ type runtimeReport struct {
 func collectRuntimeReport(ctx context.Context) *runtimeReport {
 	base := agentexec.BaseEnv()
 	path, _ := agentexec.EnvValue(base, "PATH")
-	home, _ := agentexec.EnvValue(base, "HOME")
-	if home == "" {
-		home, _ = agentexec.EnvValue(base, "USERPROFILE")
-	}
+	home := reportHome(base)
 
 	rep := &runtimeReport{
 		PID:         os.Getpid(),
@@ -84,6 +81,28 @@ func collectRuntimeReport(ctx context.Context) *runtimeReport {
 	}
 	rep.Profile = profileProbe{Home: home, Path: path}.probe(ctx)
 	return rep
+}
+
+// reportHome is the home directory the daemon was started with, read out of the
+// base environment the exec service hands every command.
+//
+// Windows names it USERPROFILE and never sets HOME, so the second lookup is not
+// a nicety: it is the only reason rep.Home is populated at all on the one
+// platform #74 is about. Without it the probe has nothing to look under and
+// answers "unknown" on every Windows host, and the service-profile verdict —
+// which is decided on the home directory and nothing else — can never fire.
+//
+// A pure function of the environment rather than two lines inside
+// collectRuntimeReport, because "which variable names the home directory" is a
+// rule about the platform, and a rule that only one of three runners can
+// distinguish is a rule that runner is the only check on. Here it is checked
+// from all of them.
+func reportHome(base []string) string {
+	if home, _ := agentexec.EnvValue(base, "HOME"); home != "" {
+		return home
+	}
+	home, _ := agentexec.EnvValue(base, "USERPROFILE")
+	return home
 }
 
 // runtimeReportPath is where the report lives for a given state directory.

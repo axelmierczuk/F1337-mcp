@@ -102,6 +102,13 @@ func MechanismNotesForTest(m Mechanism, goos, account string) []string {
 	return mechanismNotes(m, goos, account)
 }
 
+// DryRunNotesForTest exposes what a dry run says about the step the plan itself
+// cannot show — the password prompt — with the platform supplied rather than
+// read.
+func DryRunNotesForTest(m Mechanism, goos, account string) []string {
+	return dryRunNotes(m, goos, account)
+}
+
 // SCMAccountForTest is the account `install` hands the service manager, taken
 // off the configuration it actually builds rather than off the rule underneath
 // it.
@@ -183,8 +190,9 @@ type WindowsACLForTest interface {
 }
 
 // NewWindowsACLForTest builds that set with icacls.exe replaced by run, which
-// sees exactly the path and arguments icacls would.
-func NewWindowsACLForTest(run func(path string, args ...string) error) WindowsACLForTest {
+// is handed the complete argv icacls.exe would have been given — the object
+// first, every option after it, exactly as the real invocation assembles it.
+func NewWindowsACLForTest(run func(argv ...string) error) WindowsACLForTest {
 	return aclForTest{serviceACL{run: run}}
 }
 
@@ -240,6 +248,17 @@ func ProfileProbeForTest(home, pathEnv, goos string, tools []UserToolchainForTes
 	result := profileProbe{Home: home, Path: pathEnv, GOOS: goos, Tools: tools}.probe(context.Background())
 	return string(result.Visibility), result.Ran, result.Unreachable
 }
+
+// UserBinDirsForTest is the list of per-user directories the probe looks for,
+// with the platform supplied rather than read.
+//
+// The list is data, and it is the probe's entire input: a Windows entry that is
+// wrong, or missing, is a workstation reported as "unknown" or as "hidden" with
+// nothing an operator can act on. Driven with runtime.GOOS the Windows half is
+// read on one runner in three, and — because the two lists share every entry
+// the tests happen to plant under — swapping one for the other changed no test
+// at all.
+func UserBinDirsForTest(goos string) []string { return userBinDirs(goos) }
 
 // ProfileProbeBudgetForTest is the probe with an explicit deadline.
 //
@@ -314,6 +333,15 @@ func ConfinementForTest(rep *RuntimeReportForTest) (summary string, detail, reme
 func WriteRuntimeReportForTest(stateDir string, rep RuntimeReportForTest) error {
 	return writeRuntimeReport(stateDir, rep.internal())
 }
+
+// ReportHomeForTest exposes which environment variable the daemon takes its
+// home directory from, with the environment supplied rather than read.
+//
+// Windows sets USERPROFILE and never HOME, so this one lookup is what gives the
+// probe somewhere to look and what the service-profile verdict is decided on.
+// Driven with a real environment it is only ever distinguishable on a Windows
+// runner; driven with a supplied one it is checkable everywhere.
+func ReportHomeForTest(base []string) string { return reportHome(base) }
 
 // LiveProcessIdentityForTest is this process's pid and start identity, which is
 // what makes a planted report describe a daemon that is actually running.

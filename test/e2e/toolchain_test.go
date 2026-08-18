@@ -143,6 +143,17 @@ func TestAgentSeesItsOwnPerUserToolchain(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("%s was reported as having run, but it left no evidence of running: %v", planted, err)
 	}
+
+	// And the daemon says so where an operator will be. The failing half of
+	// this is asserted in the log below; the positive half is the only line
+	// anywhere that tells somebody looking at a healthy agent that its
+	// environment really is the operator's, and it was printed for nobody.
+	if !contains(a.logs(), "a per-user toolchain resolves and runs") {
+		t.Fatalf("the daemon has to record the positive answer in its log too:\n%s", a.logs())
+	}
+	if !contains(a.logs(), planted) {
+		t.Fatalf("and name the program it ran, or the line says nothing an operator can check:\n%s", a.logs())
+	}
 }
 
 // The failure the reported install had, in the shape this suite can reproduce:

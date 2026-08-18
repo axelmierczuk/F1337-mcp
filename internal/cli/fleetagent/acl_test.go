@@ -21,15 +21,22 @@ import (
 // directory or read the certificate `enroll` left behind, and the daemon fails
 // every start on its own files.
 
-// icaclsRecorder captures the path and arguments icacls.exe would have been
-// given.
+// icaclsRecorder captures the complete command line icacls.exe would have been
+// given, verbatim.
+//
+// Verbatim matters: the recorder used to be handed the path and the options
+// separately and put them back together itself, which meant every test here
+// asserted a command line this package had never actually assembled — and
+// icacls takes the object first and rejects it anywhere else. The seam hands
+// over the finished argv now, so a transposition is a failure here rather than
+// an install that grants nothing on a real host.
 type icaclsRecorder struct {
 	calls [][]string
 	fail  error
 }
 
-func (r *icaclsRecorder) run(path string, args ...string) error {
-	r.calls = append(r.calls, append([]string{path}, args...))
+func (r *icaclsRecorder) run(argv ...string) error {
+	r.calls = append(r.calls, append([]string(nil), argv...))
 	return r.fail
 }
 
@@ -45,6 +52,8 @@ func TestWindowsACL_GrantsTheOwnedDirectoriesModify(t *testing.T) {
 		`C:\ProgramData\fleet\state`, "/grant", `WORKSTATION\axel:(OI)(CI)M`, "/T",
 	}, rec.calls[0],
 		"(OI)(CI) so new files inherit it, M because the daemon writes here, /T so the grant reaches what an earlier install already put there")
+	assert.Equal(t, `C:\ProgramData\fleet\state`, rec.calls[0][0],
+		"icacls takes the object first: `icacls /grant acct:(R) path` is a usage error, and this is the only place that ordering is decided")
 }
 
 // The enrollment material: read on each file, read-and-traverse on the

@@ -3,6 +3,7 @@ package fleetagent_test
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -29,13 +30,17 @@ import (
 type schtasksRecorder struct {
 	calls [][]string
 	xml   []byte
-	fail  func(args []string) error
+	// xmlPath is where the definition was while schtasks was reading it, kept
+	// so a test can go back and check nothing was left behind.
+	xmlPath string
+	fail    func(args []string) error
 }
 
 func (r *schtasksRecorder) run(args ...string) error {
 	r.calls = append(r.calls, append([]string(nil), args...))
 	for i, arg := range args {
 		if strings.EqualFold(arg, "/XML") && i+1 < len(args) {
+			r.xmlPath = args[i+1]
 			data, err := os.ReadFile(args[i+1]) //nolint:gosec // a path this package just wrote under os.MkdirTemp
 			if err == nil {
 				r.xml = data
@@ -84,6 +89,14 @@ func TestScheduledTask_InstallHandsSchtasksTheDefinition(t *testing.T) {
 	}
 	assert.Equal(t, p.ScheduledTaskXML(), string(utf16.Decode(units)),
 		"the file has to hold the definition this UnitParams renders, not a stale or empty one")
+
+	// And it is gone once schtasks has read it. Install creates a temp
+	// directory per call; leaving them behind is a directory per `service
+	// install` on a host whose whole purpose is being re-provisioned, holding
+	// the account name the agent will run as.
+	require.NotEmpty(t, rec.xmlPath)
+	assert.NoFileExists(t, rec.xmlPath, "the definition is removed once schtasks has read it")
+	assert.NoDirExists(t, filepath.Dir(rec.xmlPath), "and so is the directory it was written into")
 }
 
 // A UnitParams with nothing to run is refused before a temp file or an

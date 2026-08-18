@@ -69,6 +69,23 @@ func plantUserToolchain(t *testing.T, dir, marker string) (path string, versionA
 	return path, []string{marker}
 }
 
+// plantToolchainNamed is plantUserToolchain with the filename chosen, for the
+// rules that turn on the extension rather than on the name.
+func plantToolchainNamed(t *testing.T, dir, filename, marker string) (path string, versionArgs []string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	path = filepath.Join(dir, filename)
+	if runtime.GOOS == "windows" {
+		// CreateProcess reads the file, not the extension, so a copy of
+		// cmd.exe under any name is a program. Which is the point: what
+		// PATHEXT decides is whether the *name* resolves.
+		copyFileForTest(t, filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), path)
+		return path, []string{"/c", "copy", "nul", marker}
+	}
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexec touch \"$1\"\n"), 0o755))
+	return path, []string{marker}
+}
+
 // plantBrokenToolchain writes a file that resolves like a program and cannot be
 // executed: the exact difference between a name being found and a command
 // running.
@@ -205,10 +222,45 @@ func TestCollectRuntimeReport_DescribesThisProcess(t *testing.T) {
 	}
 }
 
+// Which environment variable the daemon takes its home directory from.
+//
+// Windows sets USERPROFILE and never HOME, and Home is the input to everything
+// this change concludes: the probe looks under it, and the verdict for a named
+// account started without its profile is decided on it and nothing else. Read
+// off the real environment, the fallback is a line only a Windows runner can
+// tell is there — so it is driven with the environment supplied, and checked
+// from all three.
+func TestReportHome_WindowsNamesItUserProfile(t *testing.T) {
+	assert.Equal(t, `C:\Users\axel`,
+		fleetagent.ReportHomeForTest([]string{`USERPROFILE=C:\Users\axel`, `PATH=C:\Windows`}),
+		"the base environment on Windows carries USERPROFILE and no HOME; without this the probe has nothing to look under on the one platform #74 is about")
+
+	assert.Equal(t, "/home/axel",
+		fleetagent.ReportHomeForTest([]string{"HOME=/home/axel", "PATH=/usr/bin"}))
+
+	// HOME wins where both are set, so a Unix daemon is never reported on
+	// against a variable Unix does not use.
+	assert.Equal(t, "/home/axel",
+		fleetagent.ReportHomeForTest([]string{"HOME=/home/axel", `USERPROFILE=C:\Users\axel`}))
+
+	assert.Empty(t, fleetagent.ReportHomeForTest([]string{"PATH=/usr/bin"}),
+		"a host with no discoverable home directory is reported as having none, not as having a synthesised one")
+}
+
 // The judgement `service status` draws from a report, asserted from every
 // runner because the facts behind it can only be collected on one.
 func TestConfinementFor(t *testing.T) {
 	// The reported case: a service under a built-in identity.
+	//
+	// Asserted on what only this branch says, not on what any verdict says.
+	// The realistic home for this account is a service profile, which also
+	// matches the third case below — and every assertion here used to be one
+	// that case satisfies too, so deleting the branch this whole issue is
+	// about left the suite green. Four verdicts share a summary, share the
+	// phrase "session 0", each interpolate the account, and three of them name
+	// `--mechanism task`; the account being a built-in identity is the only
+	// thing this one concludes from, and the two-line remedy is the only thing
+	// only it prints.
 	summary, detail, remedy := fleetagent.ConfinementForTest(&fleetagent.RuntimeReportForTest{
 		Account:     `NT AUTHORITY\NetworkService`,
 		Home:        `C:\Windows\ServiceProfiles\NetworkService`,
@@ -218,7 +270,26 @@ func TestConfinementFor(t *testing.T) {
 	assert.Equal(t, "running, but unusable", summary)
 	assert.Contains(t, strings.Join(detail, "\n"), "session 0")
 	assert.Contains(t, strings.Join(detail, "\n"), `NT AUTHORITY\NetworkService`)
+	assert.Contains(t, strings.Join(detail, "\n"), "built-in service identity has no operator profile",
+		"the account is what this verdict is drawn from; the home directory is the next case's evidence, and it must not be what answers here")
+	assert.NotContains(t, strings.Join(detail, "\n"), "profile was never loaded",
+		"that is the named-account verdict, and reaching it for a built-in identity would name the wrong fault")
 	assert.Contains(t, strings.Join(remedy, "\n"), "--mechanism task")
+	assert.Contains(t, strings.Join(remedy, "\n"), "--user DOMAIN",
+		"a built-in identity has a second way out — a service under a named account — and it is the only verdict that offers one")
+
+	// And the account alone is enough: a built-in identity whose home is an
+	// ordinary-looking directory is still an agent with no operator profile.
+	// Without this, the case above could be reached by the home directory it
+	// happens to have rather than by the rule it is meant to test.
+	summary, detail, _ = fleetagent.ConfinementForTest(&fleetagent.RuntimeReportForTest{
+		Account:     `NT AUTHORITY\LocalService`,
+		Home:        `C:\Users\localservice`,
+		SessionZero: true,
+		Visibility:  fleetagent.ProfileUnknownForTest,
+	})
+	assert.Equal(t, "running, but unusable", summary)
+	assert.Contains(t, strings.Join(detail, "\n"), "built-in service identity has no operator profile")
 
 	// A service under a named account whose profile the SCM did not load: the
 	// account is ordinary, the session is still zero, and the toolchains are
@@ -464,6 +535,35 @@ func TestServiceInstall_DryRunRefusesATaskUnderABuiltInIdentity(t *testing.T) {
 		"--mechanism", "task", "--user", `NT AUTHORITY\NetworkService`,
 	}, out)
 	require.Equal(t, 1, code, "%s", out.String())
+}
+
+// And `install --dry-run` prints it, on the one runner that can reach the
+// branch.
+//
+// The rule is asserted for every platform in mechanism_test.go; this is the
+// other half — that the command consults it — and only a Windows host resolves
+// a mechanism that needs a password at all. The account is this runner's own,
+// because any other one is refused first by the executable-access rule: the
+// test binary lives inside this account's profile.
+func TestServiceInstall_DryRunSaysItWillAskForAPassword(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only the Windows SCM logs an account on, so only a Windows host resolves a mechanism that needs a password")
+	}
+	current, err := user.Current()
+	require.NoError(t, err)
+	pinAgentConfig(t)
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{
+		"service", "install", "--dry-run", "--mechanism", "service", "--user", current.Username,
+	}, out)
+	text := out.String()
+
+	require.Equal(t, 0, code, "%s", text)
+	assert.Contains(t, text, "would prompt for",
+		"an unattended installer that does not know install stops to ask hangs on the prompt")
+	assert.Contains(t, text, "Log on as a service",
+		"and the right the SCM stores the password for but does not grant, without which every start fails with error 1069")
 }
 
 // The Unix half of the same refusal, and the half that proves it is wired into
@@ -751,6 +851,150 @@ func TestProfileProbe_AFilesystemRootIsNotAHomeDirectory(t *testing.T) {
 		"a real home directory with a per-user install on PATH is still visible")
 }
 
+// The root rule is asked of the canonical path, not of the spelling it arrived
+// in.
+//
+// Round 2 caught HOME=/ and wrote the check against the literal string. Every
+// other thing the probe does with Home goes through Clean — filepath.Join
+// resolves "..", filepath.Rel cleans both its arguments — so "/.", "/..", and
+// any path at all that cleans to a root walked straight past the new check and
+// produced the same false "visible", and the same once-per-start execution of
+// whatever happens to be in /bin, that the check was added to stop.
+func TestProfileProbe_ARootSpelledAnyOtherWayIsStillARoot(t *testing.T) {
+	for _, home := range []string{"/.", "/..", "/./", "/usr/..", "/tmp/../", `C:\.`, `C:\..`, `C:\Users\..`} {
+		visibility, ran, _ := fleetagent.ProfileProbeForTest(home, os.Getenv("PATH"), runtime.GOOS, nil)
+		assert.Equal(t, fleetagent.ProfileUnknownForTest, visibility,
+			"%q names a filesystem root once anything cleans it, and a root is not a home directory", home)
+		assert.Empty(t, ran, "and nothing under it may be executed as evidence of anything, home %q", home)
+	}
+
+	// A home directory that merely contains a "." or ".." component and does
+	// not clean to a root is still an ordinary home, or the fix above would
+	// answer "unknown" for every host.
+	home := t.TempDir()
+	binDir := filepath.Join(home, perUserBinDir())
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	visibility, _, _ := fleetagent.ProfileProbeForTest(filepath.Join(home, "x", ".."), binDir, runtime.GOOS, nil)
+	assert.Equal(t, fleetagent.ProfileVisibleForTest, visibility,
+		"cleaning to somewhere under the filesystem is not the same as cleaning to the root of it")
+}
+
+// The directories the probe looks for on Windows, which is the platform it
+// exists for and the one two runners out of three never read the list on.
+//
+// The two lists share `.cargo\bin` and `go\bin`, which is what every test that
+// plants a toolchain uses — so handing the Windows caller the Unix list changed
+// no assertion anywhere, and the entries that are the reason this works on a
+// real workstation were checked by nothing.
+func TestUserBinDirs_TheWindowsListIsTheWindowsOne(t *testing.T) {
+	windows := strings.Join(fleetagent.UserBinDirsForTest("windows"), "\n")
+
+	for _, want := range []string{
+		`AppData\Roaming\npm`,
+		`scoop\shims`,
+		`.pyenv\pyenv-win\shims`,
+		// Always on an interactive user's PATH and never on a service's, which
+		// makes it the entry every Windows account has and the one most likely
+		// to be the difference between "hidden" and "unknown".
+		`AppData\Local\Microsoft\WindowsApps`,
+	} {
+		assert.Contains(t, windows, want, "a Windows toolchain installs here and the probe has to look")
+	}
+	assert.NotContains(t, windows, "/", "Windows entries are backslash-separated; a Unix entry here would name a directory that never exists")
+
+	unix := strings.Join(fleetagent.UserBinDirsForTest("linux"), "\n")
+	assert.Contains(t, unix, ".local/bin")
+	assert.NotContains(t, unix, `\`, "and a Windows entry on Unix is the same mistake the other way round")
+
+	// Nothing machine-wide, on either. A directory that is not per-user being
+	// off PATH would read as a confined agent, which is a false "unusable" on
+	// every host that does not have it.
+	for _, list := range []string{windows, unix} {
+		for _, line := range strings.Split(list, "\n") {
+			assert.False(t, strings.HasPrefix(line, "/") || strings.Contains(line, ":"),
+				"%q is not relative to a home directory", line)
+		}
+	}
+}
+
+// A Windows PATH entry may be quoted, and %PATH% hands the quotes through
+// verbatim.
+//
+// This is the same shape as the case-folding gap round 1 found, in the other
+// normalisation `pathKey` does and on the same nobody-checks-it footing: a
+// quoted entry that does not compare equal reports a healthy workstation as
+// HIDDEN, and `service status` then exits non-zero calling a working agent
+// unusable — the verdict an operator learns to ignore.
+func TestProfileProbe_WindowsPathEntriesMayBeQuoted(t *testing.T) {
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".cargo", "bin")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+
+	pathEnv := strings.Join([]string{`"C:\Program Files\Git\cmd"`, `"` + binDir + `"`}, ";")
+	visibility, _, unreachable := fleetagent.ProfileProbeForTest(home, pathEnv, "windows", nil)
+
+	assert.Equal(t, fleetagent.ProfileVisibleForTest, visibility,
+		"a quoted PATH entry reaches the directory it names; %%PATH%% carries the quotes and the comparison has to drop them")
+	assert.Empty(t, unreachable)
+}
+
+// A bare name resolves through the account's own PATHEXT, not through the
+// probe's built-in list.
+//
+// The built-in list is the Windows default and the fallback for a daemon
+// started without the variable; the branch that reads the real one had never
+// been exercised, because every test plants a `.exe`, which both lists admit.
+func TestProfileProbe_WindowsHonoursTheAccountsPathext(t *testing.T) {
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".cargo", "bin")
+	// .fleet is in no default list anywhere, so only PATHEXT can admit it —
+	// and it is a real program, so "resolved" and "ran" stay two claims.
+	planted, versionArgs := plantToolchainNamed(t, binDir, plantedToolchainName+".fleet",
+		filepath.Join(t.TempDir(), "it-ran"))
+
+	tools := []fleetagent.UserToolchainForTest{{Name: plantedToolchainName, Version: versionArgs}}
+
+	_, ran, _ := fleetagent.ProfileProbeForTest(home, binDir, "windows", tools)
+	assert.Empty(t, ran, "without PATHEXT admitting it, a bare name must not resolve to this file")
+
+	t.Setenv("PATHEXT", ".COM;.EXE;.FLEET")
+	_, ran, _ = fleetagent.ProfileProbeForTest(home, binDir, "windows", tools)
+	assert.Equal(t, planted, ran,
+		"the account's PATHEXT is what decides whether a bare name resolves, and the probe has to ask the same question a spawned command would")
+}
+
+// A file that resolves like a program and cannot be executed does not shadow
+// the one that can.
+//
+// PATH is searched in order and the first match wins, so a name that resolves
+// to a non-executable file earlier on PATH — a shim left behind by an
+// uninstall, an ACL that denies execute — makes the probe give up on that tool
+// entirely and report a working per-user toolchain as never having run. It is
+// the rule os/exec's own lookup applies, and it was applied here and checked
+// nowhere.
+func TestProfileProbe_ANonExecutableFileDoesNotShadowTheRealOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows decides executability by extension, not by a mode bit; PATHEXT covers the same ground and is asserted above")
+	}
+	home := t.TempDir()
+	binDir := filepath.Join(home, perUserBinDir())
+	marker := filepath.Join(t.TempDir(), "it-ran")
+	planted, versionArgs := plantUserToolchain(t, binDir, marker)
+
+	// A directory earlier on PATH holding a same-named file with no execute
+	// bit at all.
+	shadowDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(shadowDir, plantedToolchainName), []byte("#!/bin/sh\nexit 0\n"), 0o644))
+
+	pathEnv := strings.Join([]string{shadowDir, binDir}, string(os.PathListSeparator))
+	tools := []fleetagent.UserToolchainForTest{{Name: plantedToolchainName, Version: versionArgs}}
+	visibility, ran, _ := fleetagent.ProfileProbeForTest(home, pathEnv, runtime.GOOS, tools)
+
+	assert.Equal(t, fleetagent.ProfileVisibleForTest, visibility)
+	assert.Equal(t, planted, ran, "a file that cannot be executed is not what a bare name resolves to")
+	assert.FileExists(t, marker)
+}
+
 // A host carrying both registrations is the one `stop` and `uninstall` exist to
 // put right, and it is the one where returning at the first failure does the
 // most damage: the operator asked for the agent to stop, one of the two is
@@ -789,6 +1033,76 @@ func TestServiceControl_ActsOnEveryRegistration(t *testing.T) {
 		require.Equal(t, 0, code, "verb %s: %s", verb, out.String())
 		assert.Equal(t, []string{"service:" + verb, "task:" + verb}, calls(), "verb %s", verb)
 	}
+}
+
+// runAgentCommand drives the same command tree `fleet-agent` runs, and hands
+// back the error rather than only the exit code.
+//
+// Main writes the error to os.Stderr and returns 1, which is right for a
+// binary and useless for asserting *what* it said. The tree is the one
+// NewRootCommand builds either way, so nothing here is a shortcut past the
+// command: it is the same RunE, reached the same way, with somewhere to read
+// the failure from.
+func runAgentCommand(t *testing.T, out *bytes.Buffer, args ...string) error {
+	t.Helper()
+	root := fleetagent.NewRootCommand(out)
+	root.SetArgs(args)
+	root.SetErr(io.Discard)
+	return root.Execute()
+}
+
+// Two registrations, both refusing. Round 2 made these commands walk past the
+// first failure; what they say at the end had only ever been asserted with one
+// failure in it, and every part of the reporting was therefore free.
+//
+// Reporting the first failure and dropping the second, or reporting neither
+// with the mechanism it came from, both left the whole suite green — and both
+// leave an operator with an error about one mechanism and a daemon still
+// running under the other, which is the exact outcome walking every
+// registration exists to prevent.
+func TestServiceControl_ReportsEveryFailureAndNamesEachMechanism(t *testing.T) {
+	pinAgentConfig(t)
+
+	both := []fleetagent.Mechanism{fleetagent.MechanismService, fleetagent.MechanismTask}
+	calls, restore := fleetagent.PinRecordingRegistrationsForTest(both, map[fleetagent.Mechanism]bool{
+		fleetagent.MechanismService: true,
+		fleetagent.MechanismTask:    true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, "service", "stop")
+
+	require.Error(t, err, "neither registration stopped, so the command failed: %s", out.String())
+	assert.Equal(t, []string{"service:stop", "task:stop"}, calls(),
+		"the second is still attempted; that is what round 2 fixed")
+	assert.Contains(t, err.Error(), fleetagent.MechanismService.Describe(),
+		"each failure has to name the registration it came from, or two of them are indistinguishable")
+	assert.Contains(t, err.Error(), fleetagent.MechanismTask.Describe(),
+		"the second failure must not be dropped: an operator told about one still has a daemon running under the other")
+}
+
+// The same for uninstall, where a definition left behind starts a second daemon
+// at the next boot and nothing says so.
+func TestServiceUninstall_ReportsEveryFailureAndNamesEachMechanism(t *testing.T) {
+	defer fleetagent.PinElevatedForTest()()
+
+	both := []fleetagent.Mechanism{fleetagent.MechanismService, fleetagent.MechanismTask}
+	calls, restore := fleetagent.PinRecordingRegistrationsForTest(both, map[fleetagent.Mechanism]bool{
+		fleetagent.MechanismService: true,
+		fleetagent.MechanismTask:    true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, "service", "uninstall")
+
+	require.Error(t, err, "%s", out.String())
+	assert.Equal(t, []string{"service:stop", "service:uninstall", "task:stop", "task:uninstall"}, calls())
+	assert.Contains(t, err.Error(), fleetagent.MechanismService.Describe())
+	assert.Contains(t, err.Error(), fleetagent.MechanismTask.Describe())
+	assert.NotContains(t, out.String(), "left in place:",
+		"nothing was removed, so the summary of what removal kept would be a lie")
 }
 
 // `service status` reads every answer it gives about a confined agent out of

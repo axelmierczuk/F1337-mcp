@@ -265,6 +265,13 @@ report `visible`, and run whichever of `node`, `go` or `cargo` happens to be in
 there as its evidence. A container started for a uid with no `passwd` entry gets
 `HOME=/`, so this is the shape a fleet agent lands in on a build box.
 
+The question is asked of the *canonical* path, not of the string as it arrived.
+`/.`, `/..` and `/anywhere/..` all name the root once anything cleans them —
+and everything else the probe does with the home directory does clean it, since
+`filepath.Join` resolves `..` and `filepath.Rel` cleans both its arguments — so
+a check against the literal `/` would let every one of those spellings back in
+with the false `visible`, and the execution, intact.
+
 There is one confined shape the probe cannot see, because it looks under the
 home directory the daemon was given and the daemon was given the wrong one: a
 service under a named account started with a built-in *service* profile —

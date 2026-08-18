@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -318,6 +319,51 @@ func TestScheduledTaskXML_SettingsThatMakeItADaemon(t *testing.T) {
 	// Task Scheduler rejects a restart interval under a minute, so the 5s
 	// delay the other two platforms honour is rounded up rather than rejected.
 	assert.Contains(t, doc, "<Interval>PT1M</Interval>")
+
+	// And a definition with no restart delay at all still renders a legal
+	// interval. PT0M is rejected at registration, which turns `service
+	// install` into a failure naming a schema element rather than a service.
+	zero := params()
+	zero.RestartDelay = 0
+	assert.Contains(t, zero.ScheduledTaskXML(), "<Interval>PT1M</Interval>")
+}
+
+// The one setting in this definition that something outside it reasons from.
+//
+// `service stop` and `service install` both tell an operator that ending the
+// task terminates the background processes the agent supervises, and
+// docs/service.md gives the argument for printing that without having verified
+// it on a real host. The argument's load-bearing premise is this element: a
+// Windows process is a member of its parent's job unless it breaks away,
+// internal/platform breaks nothing away, and UseUnifiedSchedulingEngine is what
+// puts the agent in a job of the task's in the first place. Delete it and the
+// warning is still printed and may no longer be true, which is the direction
+// that costs an operator every dev server on the host.
+func TestScheduledTaskXML_UnifiedSchedulingEngineBacksTheStopWarning(t *testing.T) {
+	assert.Contains(t, params().ScheduledTaskXML(),
+		"<UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>",
+		"UBPM manages each task instance through a job; that is why `service stop` can say it takes the supervised processes with it")
+}
+
+// The definition has to be one Task Scheduler will accept, not merely one an
+// XML parser will.
+//
+// <Actions Context="..."> names a principal defined above it, and schtasks
+// rejects a document where it names one that is not there — with "The task XML
+// contains a value which is incorrectly formatted or out of range", which
+// names neither the attribute nor the element. Two string literals in two
+// different functions have to agree for that not to happen, and nothing made
+// them.
+func TestScheduledTaskXML_ActionsContextNamesADefinedPrincipal(t *testing.T) {
+	doc := params().ScheduledTaskXML()
+
+	principal := regexp.MustCompile(`<Principal id="([^"]+)"`).FindStringSubmatch(doc)
+	require.Len(t, principal, 2, "the definition has to define a principal: %s", doc)
+	context := regexp.MustCompile(`<Actions Context="([^"]+)"`).FindStringSubmatch(doc)
+	require.Len(t, context, 2, "and the actions have to name one")
+
+	assert.Equal(t, principal[1], context[1],
+		"an Actions Context naming a principal that is not defined is a definition schtasks refuses to register")
 }
 
 // The daemon is started with the config path baked in here too, and a config

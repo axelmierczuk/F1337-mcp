@@ -30,17 +30,31 @@ import (
 // identity is already admitted and is not granted anything more" is a decision
 // about which accounts this command touches, not a Windows API call.
 type serviceACL struct {
-	// run invokes icacls.exe against path with these arguments. nil means
-	// runIcacls, which is what every real install uses. A test supplies its
-	// own, and that is the only way anything on any runner here sees the argv.
-	run func(path string, args ...string) error
+	// run is handed the complete argv icacls.exe would be given, first element
+	// first. nil means runIcacls, which is what every real install uses. A
+	// test supplies its own, and that is the only way anything on any runner
+	// here sees the argv.
+	//
+	// The whole argv rather than a path plus its flags, which is how this seam
+	// started out and is why the audit round that came after it found it
+	// weaker than task.go's: icacls takes the filename first and rejects it
+	// anywhere else, so "which end the path goes on" is part of the command
+	// being asserted. Split across the seam, that decision lived in runIcacls
+	// — below anything a test drives — and a transposition there was invisible
+	// to every test in the tree while the grant strings above it were checked
+	// to the character.
+	run func(argv ...string) error
 }
 
 func (a serviceACL) icacls(path string, args ...string) error {
+	// icacls takes the object first and every option after it. Assembled above
+	// the seam so that what a test sees is the command line, not a convention
+	// two functions happen to share.
+	argv := append([]string{path}, args...)
 	if a.run != nil {
-		return a.run(path, args...)
+		return a.run(argv...)
 	}
-	return runIcacls(path, args...)
+	return runIcacls(argv...)
 }
 
 // grantOwnedDir gives the account the ability to write a directory the daemon
@@ -102,7 +116,11 @@ func accountNeedsGrant(account string) bool {
 
 // runIcacls applies one ACL change, folding icacls' exit code into an error
 // that carries what it printed.
-func runIcacls(path string, args ...string) error {
+//
+// It takes the argv already assembled, the way runSchtasks does, so that there
+// is nothing here for a test not to see: the only thing this function decides
+// is which icacls.exe to run.
+func runIcacls(argv ...string) error {
 	exe := "icacls.exe"
 	if root := os.Getenv("SystemRoot"); root != "" {
 		// Resolved rather than left to PATH, for the reason runSchtasks does
@@ -110,9 +128,9 @@ func runIcacls(path string, args ...string) error {
 		// small, and a bare name would be one more thing to be missing.
 		exe = filepath.Join(root, "System32", "icacls.exe")
 	}
-	out, err := exec.Command(exe, append([]string{path}, args...)...).CombinedOutput() //nolint:gosec // fixed argv; path and account come from the resolved install parameters
+	out, err := exec.Command(exe, argv...).CombinedOutput() //nolint:gosec // fixed argv; the path and account come from the resolved install parameters
 	if err != nil {
-		return fmt.Errorf("grant access to %s: %w: %s", path, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("grant access to %s: %w: %s", argv[0], err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

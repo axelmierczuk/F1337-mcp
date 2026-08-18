@@ -160,6 +160,14 @@ func TestWindowsExecutableAccessProblem(t *testing.T) {
 	assert.Empty(t, fleetagent.WindowsExecutableAccessProblemForTest(
 		`C:\Users\RUNNER~1\AppData\Local\Temp\fleet-agent.exe`, `RUNNERVM\runneradmin`, usersRoot))
 
+	// And so is an account spelled as a UPN, which is how a domain-joined or
+	// Entra-joined host names one and how an operator will type it. The
+	// profile directory is still just the sAMAccountName, so refusing here
+	// would refuse an operator installing their own binary to run as
+	// themselves — the case the new default is built around.
+	assert.Empty(t, fleetagent.WindowsExecutableAccessProblemForTest(
+		`C:\Users\axel\Desktop\fleet-agent.exe`, "axel@corp.example", usersRoot))
+
 	// Outside anybody's profile there is nothing to say.
 	for _, exe := range []string{
 		`C:\Program Files\fleet\fleet-agent.exe`,
@@ -198,6 +206,34 @@ func TestExecutableAccessAdvice(t *testing.T) {
 // an account that does not exist — and the install fails naming it. The rule
 // was Windows-only code until #79, which meant the one runner that could check
 // it was the one nobody has a domain on.
+// What a dry run says about the one step the resolved plan cannot show.
+//
+// A dry run exists so an operator can find out what `install` will do before it
+// does it, and "it is going to stop and ask you for a password" is the part
+// they most need in advance — an unattended installer that does not know it
+// hangs on a prompt. Only the Windows SCM asks, so the branch fires on one
+// runner in three, and composed inline in the command it was checked on none:
+// the same shape as the `service stop` warning round 1 found.
+func TestDryRunNotes_SayWhenInstallWillAskForAPassword(t *testing.T) {
+	assert.Equal(t,
+		[]string{`  install would prompt for WORKSTATION\build's password and hand it to the SCM.`},
+		fleetagent.DryRunNotesForTest(fleetagent.MechanismService, "windows", `WORKSTATION\build`))
+
+	for _, tc := range []struct {
+		mechanism fleetagent.Mechanism
+		goos      string
+		account   string
+		why       string
+	}{
+		{fleetagent.MechanismTask, "windows", `WORKSTATION\build`, "a task with an interactive logon type borrows a session rather than starting one"},
+		{fleetagent.MechanismService, "windows", `NT AUTHORITY\NetworkService`, "a built-in service identity has no password"},
+		{fleetagent.MechanismService, "linux", "fleet", "systemd does not log an account on"},
+		{fleetagent.MechanismService, "darwin", "axel", "neither does launchd"},
+	} {
+		assert.Empty(t, fleetagent.DryRunNotesForTest(tc.mechanism, tc.goos, tc.account), tc.why)
+	}
+}
+
 func TestSCMAccount_LocalAccountsAreSpelledForTheSCM(t *testing.T) {
 	scmAccount := func(goos, account string) string {
 		p := fleetagent.UnitParams{Executable: "fleet-agent.exe", ConfigPath: "agent.yaml", User: account}

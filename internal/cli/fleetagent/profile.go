@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -366,17 +367,37 @@ func lookPathIn(name, pathEnv, goos string) (string, error) {
 // so there is nothing installed per-user under it to conclude anything from,
 // and "unknown" is the honest answer.
 //
-// A pure function of the string, so the rule is assertable from every runner:
-// a Windows drive root has to be recognised on a Linux one.
+// The question is asked of the canonical path, not of the string as it
+// arrived. Everything else the probe does with Home goes through Clean —
+// filepath.Join("/tmp/..", "bin") is "/bin", and filepath.Rel cleans both its
+// arguments — so a check that only recognises the literal "/" lets the case it
+// exists to catch straight back in through "/.", "/..", or any path at all
+// that cleans to a root. That is not a hypothetical spelling: it is what a
+// `HOME=$somewhere/..` or a passwd entry written by a provisioning script
+// produces, and it restores the false "visible", and the once-per-start
+// execution of whatever is in /bin, exactly as before.
+//
+// path.Clean rather than filepath.Clean, and separators normalised first, so
+// the rule is a pure function of the string and gives the same answer on every
+// runner: filepath.Clean leaves `C:\..` untouched on a Linux one.
 func isFilesystemRoot(home string) bool {
-	trimmed := strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(home), `\`, "/"), "/")
+	trimmed := strings.TrimSpace(home)
 	if trimmed == "" {
-		// "/", "\", "//" and friends: everything was separator.
+		// A run of spaces is not a home directory either. The caller checks
+		// the empty string before this is reached.
 		return home != ""
 	}
-	// "C:" — what "C:\" and "C:/" trim down to.
-	return len(trimmed) == 2 && trimmed[1] == ':' &&
-		(trimmed[0] >= 'a' && trimmed[0] <= 'z' || trimmed[0] >= 'A' && trimmed[0] <= 'Z')
+	cleaned := path.Clean(strings.ReplaceAll(trimmed, `\`, "/"))
+	switch cleaned {
+	case "/", ".", "..":
+		// A root, or a path that walks up out of one: "." and ".." are what
+		// `C:\.` and `C:\..` clean down to, and both name a volume root on
+		// Windows once filepath.Join is done with them.
+		return true
+	}
+	// "C:" — what "C:\" and "C:/" clean down to.
+	return len(cleaned) == 2 && cleaned[1] == ':' &&
+		(cleaned[0] >= 'a' && cleaned[0] <= 'z' || cleaned[0] >= 'A' && cleaned[0] <= 'Z')
 }
 
 // underDir reports whether path is inside dir.
