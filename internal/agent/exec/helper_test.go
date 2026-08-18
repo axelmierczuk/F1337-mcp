@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	osexec "os/exec"
@@ -70,6 +71,29 @@ func helperMain(mode string, args []string) int {
 			if _, err := os.Stdout.WriteString(line); err != nil {
 				return 1
 			}
+		}
+		return 0
+
+	case "blocks":
+		// blocks <bytes>: spew's output, written in 32 KiB syscalls rather
+		// than one per line.
+		//
+		// The content is the same; what differs is how much of it is in the
+		// pipe at once. A line-at-a-time writer lets the agent's copier keep
+		// up, so it reads — and sends — a few hundred bytes at a time, and a
+		// test that needs the caller's flow-control window spent by a *whole*
+		// chunk cannot rely on the last one being big enough to matter. See
+		// TestExec_ARealClientThatStopsReadingParksOnItsResultWithoutTakingCapacity.
+		total, _ := strconv.Atoi(arg(args, "131072"))
+		out := bufio.NewWriterSize(os.Stdout, 32*1024)
+		line := strings.Repeat("x", 63) + "\n"
+		for written := 0; written < total; written += len(line) {
+			if _, err := out.WriteString(line); err != nil {
+				return 1
+			}
+		}
+		if err := out.Flush(); err != nil {
+			return 1
 		}
 		return 0
 

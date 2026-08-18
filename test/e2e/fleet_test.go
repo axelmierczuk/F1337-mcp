@@ -174,6 +174,10 @@ type enrollOptions struct {
 	// configuration in which the path jail is a boundary rather than a
 	// decoration.
 	jailed bool
+	// maxConcurrent rewrites process.max_concurrent, the agent-wide cap every
+	// service that starts a process takes its slots from. Zero leaves the
+	// enrolled default alone.
+	maxConcurrent int
 }
 
 // mintToken mints a single-use enrollment token reserving name and authorizing
@@ -234,6 +238,9 @@ func (f *fleet) enroll(name string, opts enrollOptions) *agent {
 	if opts.jailed {
 		f.disableExec(filepath.Join(dir, "agent.yaml"))
 	}
+	if opts.maxConcurrent > 0 {
+		f.setMaxConcurrent(filepath.Join(dir, "agent.yaml"), opts.maxConcurrent)
+	}
 
 	a := &agent{
 		name: name,
@@ -275,6 +282,36 @@ func (f *fleet) disableExec(path string) {
 	}
 	at := execAt + enabledAt
 	text = text[:at] + strings.Replace(text[at:], "enabled: true", "enabled: false", 1)
+	writeFile(f.t, path, []byte(text))
+}
+
+// setMaxConcurrent rewrites the agent-wide process cap in the config
+// `fleet-agent enroll` wrote.
+//
+// Textual, and loud when the field is missing, for the same reasons
+// disableExec is: the daemon reads this file with its own loader, so a test
+// that round-tripped it through a hand-written struct would be asserting
+// against its own idea of the schema. Config.Save applies defaults before
+// writing, so the enrolled file always carries the field with a value.
+func (f *fleet) setMaxConcurrent(path string, limit int) {
+	f.t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		f.t.Fatalf("read %s: %v", path, err)
+	}
+	text := string(data)
+
+	const key = "max_concurrent: "
+	at := strings.Index(text, key)
+	if at < 0 {
+		f.t.Fatalf("agent.yaml carries no %s field:\n%s", strings.TrimSpace(key), text)
+	}
+	end := strings.Index(text[at:], "\n")
+	if end < 0 {
+		f.t.Fatalf("agent.yaml's %s field has no line ending:\n%s", strings.TrimSpace(key), text)
+	}
+	text = text[:at] + fmt.Sprintf("%s%d", key, limit) + text[at+end:]
 	writeFile(f.t, path, []byte(text))
 }
 
