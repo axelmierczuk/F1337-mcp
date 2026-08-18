@@ -87,7 +87,15 @@ func newServiceInstallCommand(out io.Writer) *cobra.Command {
 			"pyenv, cargo, scoop or npm globals, and none of the credentials in %APPDATA%.\n" +
 			"A logon-triggered Scheduled Task runs in the operator's own session and sees\n" +
 			"all of it, and stops when they log off. The default is the task; --mechanism\n" +
-			"service with --user is the headless answer.",
+			"service with --user is the headless answer.\n\n" +
+			"--mechanism service asks which account it should run as when --user does not\n" +
+			"say, and asks for that account's password without echoing it. The password is\n" +
+			"handed to the SCM and nothing else: it is not written to a file, an environment\n" +
+			"variable, the service definition, or a log. Before registering anything,\n" +
+			"install performs the same logon the SCM performs at every start, so a mistyped\n" +
+			"password or a missing \"Log on as a service\" right is refused at the prompt\n" +
+			"rather than producing a service that fails every start. For an unattended\n" +
+			"install, pass --user and --password-stdin.",
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			level, err := ParseHardening(hardening)
@@ -110,7 +118,7 @@ func newServiceInstallCommand(out io.Writer) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "agent config to bake into the service definition (default: the discovered config)")
-	cmd.Flags().StringVar(&userName, "user", "", "account the daemon runs as (default: "+describeDefaultUser()+")")
+	cmd.Flags().StringVar(&userName, "user", "", "account the daemon runs as (default: "+describeDefaultUser()+"; asked for by --mechanism service)")
 	cmd.Flags().StringVar(&hardening, "hardening", string(HardeningStandard), "service confinement: standard, strict, or none")
 	cmd.Flags().StringVar(&mechanism, "mechanism", string(MechanismAuto), "how to register: auto, service, or task (Windows only)")
 	cmd.Flags().BoolVar(&createUser, "create-user", true, "create the service account when it does not exist")
@@ -155,7 +163,38 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	// not read the migration steps can still stop here having changed nothing.
 	noteLegacyService(p)
 
-	params, cfg, err := buildUnitParams(opts.configPath, opts.userName, opts.hardening)
+	// Which account a Windows service runs as is asked for rather than
+	// resolved; see resolveAccountChoice.
+	//
+	// Handed to buildUnitParams as a closure rather than resolved here, so the
+	// question is put *after* the config has loaded and the binary has been
+	// found. Being asked which account to register under and then told there is
+	// no config to register is a question that should never have been asked,
+	// and the operator this whole prompt exists for is exactly the one likeliest
+	// to hit it.
+	//
+	// A dry run neither asks nor refuses — it changes nothing, so it has
+	// nothing to ask about — and says in the plan that install would. That is
+	// the line executableAccessOutcome already draws: a dry run fails only when
+	// it cannot produce a plan, and reports, in the plan, what install would
+	// refuse to act on.
+	choice := resolveAccountChoice(opts.mechanism, runtime.GOOS, opts.userName, opts.passwordStdin)
+	resolveAccount := func() (string, error) {
+		switch {
+		case choice == accountFromFlag:
+			return opts.userName, nil
+		case opts.dryRun:
+			return defaultServiceUser()
+		case choice == accountUnaskable:
+			return "", errors.New(noAccountToAskRefusal("--password-stdin makes stdin the password, so there is nothing left to ask with"))
+		case choice == accountFromPrompt:
+			return promptServiceAccount(in, out, suggestedServiceAccount())
+		default:
+			return defaultServiceUser()
+		}
+	}
+
+	params, cfg, err := buildUnitParams(opts.configPath, resolveAccount, opts.hardening)
 	if err != nil {
 		return err
 	}
@@ -218,10 +257,11 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 		for _, line := range dryRunAccountNotes(params.User, runtime.GOOS, opts.createUser, accountExists(params.User)) {
 			p.Println(line)
 		}
-		for _, line := range dryRunNotes(mechanism, runtime.GOOS, params.User) {
+		for _, line := range dryRunNotes(mechanism, runtime.GOOS, params.User, choice) {
 			p.Println(line)
 		}
-		for _, line := range mechanismNotes(mechanism, runtime.GOOS, params.User) {
+		// Nothing was checked, so nothing may be reported as checked.
+		for _, line := range mechanismNotes(mechanism, runtime.GOOS, params.User, false) {
 			p.Println(line)
 		}
 		return p.Err()
@@ -229,11 +269,12 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 
 	// Only the Windows SCM asks, and only for a named account: a built-in
 	// service identity has no password and a Scheduled Task with an interactive
-	// logon type does not need one. Read before anything is created, so a
-	// mistyped password does not leave directories and ACLs behind.
-	password := ""
+	// logon type does not need one. Read *and checked* before anything is
+	// created, so a mistyped password is retyped at the prompt rather than
+	// leaving directories, ACLs and a service that fails every start behind.
+	password, logonVerified := "", false
 	if serviceNeedsPassword(mechanism, runtime.GOOS, params.User) {
-		password, err = servicePassword(in, out, params.User, opts.passwordStdin)
+		password, logonVerified, err = serviceCredential(in, out, p, params.User, opts.passwordStdin)
 		if err != nil {
 			return err
 		}
@@ -364,7 +405,7 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	p.Printf("  state:     %s (left in place by uninstall)\n", params.StateDir)
 	p.Printf("  logs:      %s\n", params.LogDir)
 	p.Printf("  hardening: %s\n", params.Hardening)
-	for _, line := range mechanismNotes(mechanism, runtime.GOOS, params.User) {
+	for _, line := range mechanismNotes(mechanism, runtime.GOOS, params.User, logonVerified) {
 		p.Println(line)
 	}
 	switch {
@@ -427,21 +468,40 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	return p.Err()
 }
 
-// dryRunNotes is the step the real command would take that nothing in the
-// resolved plan above shows: the password prompt.
+// dryRunNotes is every step the real command would take that nothing in the
+// resolved plan above shows: the two prompts, and the one combination install
+// refuses to guess at.
 //
 // A function of the rule rather than a branch inside the command, for the
-// reason mechanismNotes is one. Only the Windows SCM asks for a password, so
-// the branch fires on one runner in three and — being composed inline — was
-// checked on none of them: it is the same shape as the `service stop` warning
-// round 1 found composed by a branch nothing reached. What a dry run is *for*
-// is finding out what install will do before it does it, and "it will ask you
-// for a password" is the part an operator most needs in advance.
-func dryRunNotes(m Mechanism, goos, account string) []string {
-	if !serviceNeedsPassword(m, goos, account) {
-		return nil
+// reason mechanismNotes is one. Only the Windows SCM asks, so the branch fires
+// on one runner in three and — being composed inline — was checked on none of
+// them: it is the same shape as the `service stop` warning round 1 found
+// composed by a branch nothing reached. What a dry run is *for* is finding out
+// what install will do before it does it, and "it will stop and ask you two
+// questions" is the part an operator most needs in advance.
+//
+// The account line matters more than the password one. A dry run resolves the
+// account it would have prompted for and prints it as `runs as:`, which is only
+// true if the operator presses return; saying so is the difference between a
+// preview and a wrong answer.
+func dryRunNotes(m Mechanism, goos, account string, choice accountChoice) []string {
+	var notes []string
+	switch choice {
+	case accountFromPrompt:
+		notes = append(notes,
+			"  install would ask which account the Windows service runs as. The account",
+			"     above is the default it would offer; pass --user to choose it up front.")
+	case accountUnaskable:
+		notes = append(notes,
+			"  install would refuse: --password-stdin makes stdin the password, so there is",
+			"     nothing left to ask which account to use. Pass --user with it.")
+	case accountFromFlag, accountFromDefault:
 	}
-	return []string{fmt.Sprintf("  install would prompt for %s's password and hand it to the SCM.", account)}
+	if serviceNeedsPassword(m, goos, account) {
+		notes = append(notes, fmt.Sprintf("  install would prompt for %s's password, check it against the logon the SCM", account),
+			"     performs at every start, and hand it to the SCM.")
+	}
+	return notes
 }
 
 // executableAccessOutcome is what `install` says about a binary the service
@@ -589,7 +649,14 @@ func accountExists(name string) bool {
 // goos is a parameter for the same reason resolveMechanism's is: what an
 // operator is told is decided by the rule, not by which runner is asking, and
 // this is the only place either of the Windows-only notes is composed.
-func mechanismNotes(m Mechanism, goos, account string) []string {
+//
+// logonVerified is the same kind of parameter and answers the same kind of
+// question. `install` now performs the SCM's own logon before it registers
+// anything, so on most Windows installs the "you still need
+// SeServiceLogonRight" note is not merely redundant — it contradicts what the
+// command just proved. It is printed when, and only when, nothing established
+// otherwise.
+func mechanismNotes(m Mechanism, goos, account string, logonVerified bool) []string {
 	if m == MechanismTask {
 		return []string{
 			"  NOTE: a logon-triggered task runs while " + account + " is logged on, and stops",
@@ -609,26 +676,39 @@ func mechanismNotes(m Mechanism, goos, account string) []string {
 			"           you meant, re-install with --mechanism task.",
 		}
 	}
-	if serviceNeedsPassword(m, goos, account) {
-		// The other half of the credentials the SCM needs, and the one nothing
-		// here can supply. CreateService takes the password and stores it; it
-		// does not grant the account the right to be logged on with it, which
-		// the Services MMC does and the API does not. Without it the service
-		// installs cleanly and every start fails with error 1069, "the service
-		// did not start due to a logon failure" — the same shape as the error 5
-		// this command now refuses, from the other direction, and granting it
-		// means LsaAddAccountRights, which is not a thing to hand-roll here.
-		return []string{
-			"  NOTE: " + account + " also needs the \"Log on as a service\" right, which the SCM",
-			"        stores the password for but does not grant. Without it every start",
-			"        fails with error 1069, a logon failure. Grant it with:",
-			"          secedit /export /cfg C:\\Windows\\Temp\\sec.cfg",
-			"          # add " + account + " to SeServiceLogonRight in that file, then",
-			"          secedit /configure /db secedit.sdb /cfg C:\\Windows\\Temp\\sec.cfg /areas USER_RIGHTS",
-			"        or add it under Local Security Policy > User Rights Assignment.",
-		}
+	if serviceNeedsPassword(m, goos, account) && !logonVerified {
+		// The other half of the credentials the SCM needs, and the one
+		// CreateService does not supply. It takes the password and stores it;
+		// it does not grant the account the right to be logged on with it,
+		// which the Services MMC does and the API does not. Without it the
+		// service installs cleanly and every start fails with error 1069, "the
+		// service did not start due to a logon failure" — the same shape as the
+		// error 5 this command refuses, from the other direction.
+		//
+		// #84 turned that from advice into a check: the logon the SCM performs
+		// is performed first, and an account without the right is refused
+		// before anything is registered. This note is what is left over — the
+		// case where the check could not run at all — and it is deliberately
+		// the same text as the refusal, composed once in
+		// serviceLogonRightAdvice.
+		return serviceLogonRightNote(account)
 	}
 	return nil
+}
+
+// suggestedServiceAccount is the account the prompt offers, and pressing return
+// accepts.
+//
+// It is the platform default — with the same refusals, so an elevated shell
+// does not get to suggest SYSTEM — and an empty string when there is no
+// defensible one, which makes the prompt insist on an answer rather than
+// inventing one.
+func suggestedServiceAccount() string {
+	name, err := defaultServiceUser()
+	if err != nil {
+		return ""
+	}
+	return name
 }
 
 // taskStopNote is what an operator is told before a command ends a Scheduled
@@ -1139,7 +1219,7 @@ func minimalServiceConfig() *service.Config {
 // buildUnitParams resolves everything the service definition needs, and loads
 // the config so that install fails on a broken one rather than registering a
 // service that cannot start.
-func buildUnitParams(configPath, userName string, level Hardening) (UnitParams, *agent.Config, error) {
+func buildUnitParams(configPath string, resolveAccount func() (string, error), level Hardening) (UnitParams, *agent.Config, error) {
 	resolved, err := agent.ResolveConfigPath(configPath)
 	if err != nil {
 		return UnitParams{}, nil, err
@@ -1160,11 +1240,11 @@ func buildUnitParams(configPath, userName string, level Hardening) (UnitParams, 
 		exe = target
 	}
 
-	if userName == "" {
-		userName, err = defaultServiceUser()
-		if err != nil {
-			return UnitParams{}, nil, err
-		}
+	// After the config and the executable, and before anything else needs it.
+	// On Windows this is where the operator is asked; see runServiceInstall.
+	userName, err := resolveAccount()
+	if err != nil {
+		return UnitParams{}, nil, err
 	}
 
 	logDir := agent.DefaultLogDir()

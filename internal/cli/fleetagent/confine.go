@@ -26,6 +26,18 @@ type Confinement struct {
 	Remedy []string
 }
 
+// networkServiceAccount is a standing, password-less, non-administrative
+// built-in identity.
+//
+// It used to be the default, and #74 is what that cost: it runs in session 0,
+// which has been isolated from every interactive session since Vista, and it
+// has no operator profile — so an agent installed under it sees no nvm, no
+// rustup, no pyenv, no cargo, no scoop, no npm globals, and none of the
+// credentials in %APPDATA% that git and the package registries read. It stays
+// available for an operator who wants a confined agent and has weighed that.
+// It is no longer what somebody gets by not choosing.
+const networkServiceAccount = `NT AUTHORITY\NetworkService`
+
 // sessionZeroAccounts are the Windows built-in service identities.
 //
 // All three run in session 0 — as does every Windows service — but these three

@@ -301,9 +301,29 @@ func TestExecutableAccessAdvice(t *testing.T) {
 // runner in three, and composed inline in the command it was checked on none:
 // the same shape as the `service stop` warning round 1 found.
 func TestDryRunNotes_SayWhenInstallWillAskForAPassword(t *testing.T) {
-	assert.Equal(t,
-		[]string{`  install would prompt for WORKSTATION\build's password and hand it to the SCM.`},
-		fleetagent.DryRunNotesForTest(fleetagent.MechanismService, "windows", `WORKSTATION\build`))
+	joined := func(m fleetagent.Mechanism, goos, account string, choice fleetagent.AccountChoiceForTest) string {
+		return strings.Join(fleetagent.DryRunNotesForTest(m, goos, account, choice), "\n")
+	}
+
+	named := joined(fleetagent.MechanismService, "windows", `WORKSTATION\build`, fleetagent.AccountFromFlagForTest)
+	assert.Contains(t, named, `would prompt for WORKSTATION\build's password`)
+	assert.Contains(t, named, "check it against the logon the SCM",
+		"install no longer only stores the credential, and a preview that says it only stores it is out of date")
+
+	// The account prompt is the other half, and the one that changes what the
+	// plan above it means: `runs as:` is only the account that gets registered
+	// if the operator presses return.
+	asked := joined(fleetagent.MechanismService, "windows", `WORKSTATION\axel`, fleetagent.AccountFromPromptForTest)
+	assert.Contains(t, asked, "would ask which account")
+	assert.Contains(t, asked, "the default it would offer",
+		"otherwise the plan reads as a decision that has been made")
+	assert.Contains(t, asked, "--user", "and it has to name the way to answer it up front")
+
+	// And the combination install will not guess at, reported in the plan
+	// rather than by failing: a dry run fails only when it cannot produce one.
+	unaskable := joined(fleetagent.MechanismService, "windows", `WORKSTATION\axel`, fleetagent.AccountUnaskableForTest)
+	assert.Contains(t, unaskable, "would refuse")
+	assert.Contains(t, unaskable, "--password-stdin")
 
 	for _, tc := range []struct {
 		mechanism fleetagent.Mechanism
@@ -316,7 +336,7 @@ func TestDryRunNotes_SayWhenInstallWillAskForAPassword(t *testing.T) {
 		{fleetagent.MechanismService, "linux", "fleet", "systemd does not log an account on"},
 		{fleetagent.MechanismService, "darwin", "axel", "neither does launchd"},
 	} {
-		assert.Empty(t, fleetagent.DryRunNotesForTest(tc.mechanism, tc.goos, tc.account), tc.why)
+		assert.Empty(t, fleetagent.DryRunNotesForTest(tc.mechanism, tc.goos, tc.account, fleetagent.AccountFromFlagForTest), tc.why)
 	}
 }
 
@@ -363,7 +383,7 @@ func TestSCMConfig_CarriesThePasswordOnlyWhenThereIsOne(t *testing.T) {
 // runner because the rule deciding it is a rule and not a platform.
 func TestMechanismNotes(t *testing.T) {
 	joined := func(m fleetagent.Mechanism, goos, account string) string {
-		return strings.Join(fleetagent.MechanismNotesForTest(m, goos, account), "\n")
+		return strings.Join(fleetagent.MechanismNotesForTest(m, goos, account, false), "\n")
 	}
 
 	// The task's two costs, both discovered as a surprise otherwise.
@@ -389,7 +409,32 @@ func TestMechanismNotes(t *testing.T) {
 	// And nothing is said where nothing is true: systemd and launchd log an
 	// account on with neither a password nor a privilege.
 	for _, goos := range []string{"linux", "darwin"} {
-		assert.Empty(t, fleetagent.MechanismNotesForTest(fleetagent.MechanismService, goos, "fleet"),
+		assert.Empty(t, fleetagent.MechanismNotesForTest(fleetagent.MechanismService, goos, "fleet", false),
 			"goos %s has nothing to warn about here", goos)
 	}
+}
+
+// Once `install` has performed the SCM's own logon, the note about the right it
+// just used is not merely redundant — it contradicts what the command proved.
+//
+// #79 printed it unconditionally because nothing could check. #84 checks, so
+// the note is what is left over for the case where the check could not run, and
+// which of those a host is in is a rule rather than a platform.
+func TestMechanismNotes_ARightThatWasCheckedIsNotAlsoWarnedAbout(t *testing.T) {
+	const account = `WORKSTATION\build`
+	unverified := strings.Join(fleetagent.MechanismNotesForTest(fleetagent.MechanismService, "windows", account, false), "\n")
+	require.Contains(t, unverified, "Log on as a service",
+		"a host where nothing could check still has to be told")
+
+	verified := fleetagent.MechanismNotesForTest(fleetagent.MechanismService, "windows", account, true)
+	assert.Empty(t, verified,
+		"install logged this account on as a service moments ago; telling the operator it may not be able to is wrong, not cautious")
+
+	// And the parameter must not reach the notes that have nothing to do with a
+	// credential: a task still stops at logout, and a built-in identity still
+	// cannot see a toolchain, whatever a logon check said.
+	task := fleetagent.MechanismNotesForTest(fleetagent.MechanismTask, "windows", account, true)
+	assert.NotEmpty(t, task, "the task's two costs are not conditional on a credential check")
+	confined := fleetagent.MechanismNotesForTest(fleetagent.MechanismService, "windows", `NT AUTHORITY\NetworkService`, true)
+	assert.NotEmpty(t, confined)
 }
