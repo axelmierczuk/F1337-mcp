@@ -100,6 +100,20 @@ func helperMain() {
 		time.Sleep(durationArg(args, 2, 0))
 		os.Exit(code)
 
+	case "exit-when":
+		// exit-when <markerPath> [code] — stays up until the file appears, and
+		// then exits with that code.
+		//
+		// It is "exit" with the linger replaced by the handshake awaitFile
+		// describes: a test that needs a process to still be running while it
+		// looks at it, and then to have exited while it looks again, gets both
+		// as facts it established rather than as two sides of a race against a
+		// duration. A linger long enough to outlast a call on an idle machine
+		// is not long enough on a loaded one, which is #70.
+		awaitFile(argAt(args, 1, ""))
+		code, _ := strconv.Atoi(argAt(args, 2, "0"))
+		os.Exit(code)
+
 	case "echo":
 		// echo <count> <intervalMs> <text>
 		count, _ := strconv.Atoi(argAt(args, 1, "1"))

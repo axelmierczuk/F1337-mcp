@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -73,40 +75,70 @@ func TestExitZeroIsExitedAndNonZeroIsCrashed(t *testing.T) {
 	require.EqualValues(t, 1, failed.status().GetExitCode())
 }
 
+// TestListReflectsTransitions asserts that a list reports the state a process
+// is in now, and that the state filter selects on it in both directions.
+//
+// Every list below is taken while the process is in a state this test put it
+// in and nothing else can move it out of: the helper cannot exit until the
+// marker file is written, and once it is, the exit is waited for rather than
+// assumed. What replaced what: the fixture asked for a 150ms linger and then
+// raced it, so "still RUNNING" was true only if the machine got from
+// StartProcess to ListProcesses inside 150ms. Under the load of a full
+// `go test ./...` it does not — 29 failures in 60 runs of this test under
+// eight-way load, and 9 in 9 runs of the whole package — which is #70, and the
+// release gate runs `go test -count=1 ./...` in exactly that configuration.
 func TestListReflectsTransitions(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t)
 	ctx := context.Background()
 
+	// Written when this test wants the process gone, and not before.
+	stop := filepath.Join(t.TempDir(), "stop")
+
 	start, err := svc.StartProcess(ctx, &sandboxdv1.StartProcessRequest{
-		Argv: helperArgv(t, "exit", "0", "150"),
+		Argv: helperArgv(t, "exit-when", stop, "0"),
 		Name: "transitions",
 		Env:  helperEnviron(),
 	})
 	require.NoError(t, err)
 	id := start.GetStatus().GetProcessId()
 
-	list, err := svc.ListProcesses(ctx, &sandboxdv1.ListProcessesRequest{})
-	require.NoError(t, err)
-	require.Len(t, list.GetProcesses(), 1)
-	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, list.GetProcesses()[0].GetState())
+	listed := func(states ...sandboxdv1.ProcessState) []*sandboxdv1.ProcessStatus {
+		t.Helper()
+		list, err := svc.ListProcesses(ctx, &sandboxdv1.ListProcessesRequest{States: states})
+		require.NoError(t, err)
+		return list.GetProcesses()
+	}
 
 	r, ok := svc.sup.lookup(id)
 	require.True(t, ok)
+
+	// The supervisor's own record of the process the list is about to be asked
+	// for. Asserted separately so that a failure says which half broke: this
+	// one going red means the helper exited on its own and the fixture is
+	// wrong, while this one holding and a list below disagreeing with it means
+	// the list is.
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, r.currentState(),
+		"the helper is waiting on a file this test has not written yet")
+
+	running := listed()
+	require.Len(t, running, 1)
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, running[0].GetState())
+
+	// The filter is a filter: it keeps what matches and drops what does not.
+	require.Len(t, listed(sandboxdv1.ProcessState_PROCESS_STATE_RUNNING), 1)
+	require.Empty(t, listed(sandboxdv1.ProcessState_PROCESS_STATE_EXITED))
+
+	// Now it exits, because this test said so.
+	require.NoError(t, os.WriteFile(stop, []byte("go"), 0o600))
 	waitState(t, r, 10*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
 
-	list, err = svc.ListProcesses(ctx, &sandboxdv1.ListProcessesRequest{
-		States: []sandboxdv1.ProcessState{sandboxdv1.ProcessState_PROCESS_STATE_EXITED},
-	})
-	require.NoError(t, err)
-	require.Len(t, list.GetProcesses(), 1, "the exit should be visible in the very next list")
+	exited := listed(sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
+	require.Len(t, exited, 1, "the exit should be visible in the very next list")
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_EXITED, exited[0].GetState())
 
 	// A state filter that does not match returns nothing, rather than everything.
-	list, err = svc.ListProcesses(ctx, &sandboxdv1.ListProcessesRequest{
-		States: []sandboxdv1.ProcessState{sandboxdv1.ProcessState_PROCESS_STATE_RUNNING},
-	})
-	require.NoError(t, err)
-	require.Empty(t, list.GetProcesses())
+	require.Empty(t, listed(sandboxdv1.ProcessState_PROCESS_STATE_RUNNING))
 }
 
 func TestListFiltersByNamePattern(t *testing.T) {
