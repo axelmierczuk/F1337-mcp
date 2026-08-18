@@ -25,4 +25,14 @@ var (
 	// ErrNoProcess reports that a ProcessGroup method needing a live process
 	// was called before Adopt, or after the group was closed.
 	ErrNoProcess = errors.New("platform: process group has no process attached")
+
+	// ErrGroupClosed reports that a ProcessGroup was used after Close.
+	//
+	// A sentinel rather than a bare error because a caller can reach it
+	// without having made a mistake: a handler that releases its group on the
+	// way out, while a goroutine of its own is still waiting for the leader to
+	// exit, has given the group up rather than failed at anything. Telling
+	// that apart from a signal that could not be delivered is what keeps a
+	// broken-guarantee warning meaning one.
+	ErrGroupClosed = errors.New("platform: process group is closed")
 )

@@ -550,6 +550,92 @@ func TestShellClosingTheClientKillsTheRemoteTree(t *testing.T) {
 	}
 }
 
+// TestShellSweepsAJobThatOutlivedTheSessionThatStartedIt is the same guarantee
+// on the ending the teardown never sees.
+//
+// TestShellClosingTheClientKillsTheRemoteTree drives a session the agent ends,
+// so the group is signalled while its leader is running and the id it names is
+// beyond question. Here nothing killed anything: the session's command exited
+// on its own, Service.reap never ran, and the only thing that reaches what the
+// command left behind is the sweep the wait sends when the leader exits. That
+// is also the ending an operator produces by typing `exit`, which is what makes
+// it worth a scenario of its own.
+//
+// The bystander is the half #96 is about. The sweep names a process group id,
+// which is a pid, and a pid the kernel has taken back can be handed to somebody
+// else's session leader — so a sweep sent a moment too late is a SIGKILL to a
+// stranger's whole process group. There is no way to force that here without
+// control of pid allocation, so this asserts the property that makes it
+// impossible rather than the event: a process the agent never started is still
+// running afterwards, and so is the agent.
+func TestShellSweepsAJobThatOutlivedTheSessionThatStartedIt(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+
+	// Its own session leader, started before the session and expected to be
+	// there after it. Its only job is to hold a process group the sweep must
+	// not touch.
+	bystander := start(t, "bystander", bins.helpers, []string{"sleep"}, procOptions{})
+
+	c := f.openShell(t, [2]int{100, 40}, a.name, "--", bins.helpers, "orphan")
+
+	// The command exits at once, so the client does too; what it printed on the
+	// way is where both identities come from.
+	if code := c.awaitExit(); code != 0 {
+		t.Fatalf("`fleetctl shell` exited %d; the session's command did not exit on its own:\n%s", code, c.printed())
+	}
+	procs := parseTree(t, withoutCR(c.printed()))
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, p := range procs {
+			killPID(p.pid)
+		}
+	})
+	if len(procs) != 2 {
+		t.Fatalf("expected the session's command and the job it left to announce themselves, got %v from:\n%s", procs, c.printed())
+	}
+
+	// Checked before anything is asserted about the group, for the same reason
+	// as the teardown scenario: a command that is not in a session of its own
+	// has no group for the job to be in, and every assertion below would pass
+	// while it sat somewhere this test never looks.
+	leader, job := procs[0], procs[1]
+	if leader.pgid != leader.pid {
+		t.Fatalf("the session's command (pid %d) is in group %d rather than leading its own; "+
+			"the sweep has no group to aim at and the assertions below would be vacuous",
+			leader.pid, leader.pgid)
+	}
+	if job.pgid != leader.pgid {
+		t.Fatalf("the job (pid %d) is in group %d, not the session's group %d: the group swept is not the one it is in",
+			job.pid, job.pgid, leader.pgid)
+	}
+
+	waitFor(t, 60*time.Second, fmt.Sprintf("the job (pid %d) to be gone", job.pid), func() (bool, string) {
+		if !processAlive(job.pid) {
+			return true, ""
+		}
+		return false, fmt.Sprintf("pid %d outlived the session that started it: the sweep did not reach it", job.pid)
+	})
+	waitFor(t, 60*time.Second, "the session's process group to empty", func() (bool, string) {
+		members := processGroupMembers(t, leader.pgid)
+		if len(members) == 0 {
+			return true, ""
+		}
+		return false, fmt.Sprintf("process group %d still holds %v", leader.pgid, members)
+	})
+
+	// The other half: a group the agent has no business signalling was not
+	// signalled. On a developer's machine this is their editor or their build.
+	if !bystander.running() || !processAlive(bystander.pid()) {
+		t.Fatalf("pid %d, which the agent never started, was killed by the sweep", bystander.pid())
+	}
+	if !a.proc.running() {
+		t.Fatalf("the agent died sweeping the session's process group:\n%s", a.logs())
+	}
+}
+
 // TestShellRefusesWhenStdinIsNotATerminal is the check that keeps an
 // interactive command out of a script.
 //

@@ -1,4 +1,4 @@
-package exec
+package platform
 
 import (
 	"errors"
@@ -8,7 +8,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// awaitExit blocks until the process has exited, and leaves it uncollected.
+// awaitExit blocks until the process has exited, and leaves it uncollected. See
+// [AwaitExit] for why the second half is the point.
 //
 // Darwin has no usable waitid(2) from Go: x/sys/unix does not wrap it, and
 // wait4(2) — which is what syscall.Wait4 offers — accepts WNOWAIT and then
@@ -34,23 +35,22 @@ import (
 // running process, which is the same thing the kernel says about a pid that
 // was never ours. The two are told apart by asking whether the pid is still
 // recorded as a child of this process, rather than by arguing from the caller
-// being careful: five defects in this repository so far have come from treating
+// being careful: six defects in this repository so far have come from treating
 // a pid as a durable name for a thing.
 //
 // Ownership, and deliberately not "is it a zombie". The two states differ by
 // about a microsecond and the process table reports the first of them as
 // running, so a check for SZOMB refuses its own leader whenever the kernel is
-// midway through the exit — measured at roughly one run in two with this
-// package under load, which is how it was found. Both states are equally good
-// for the sweep: exit1 records the status and marks the process before anything
-// else can observe it, so a SIGKILL arriving now cannot change what the command
-// exited with, and the process stays a member of its own process group until
-// somebody collects it, which is the only property the group id's safety rests
-// on.
+// midway through the exit — measured at roughly one run in two under load,
+// which is how it was found. Both states are equally good for the sweep: exit1
+// records the status and marks the process before anything else can observe it,
+// so a SIGKILL arriving now cannot change what the command exited with, and the
+// process stays a member of its own process group until somebody collects it,
+// which is the only property the group id's safety rests on.
 func awaitExit(pid int) error {
 	kq, err := unix.Kqueue()
 	if err != nil {
-		return fmt.Errorf("kqueue: %w", err)
+		return fmt.Errorf("platform: kqueue: %w", err)
 	}
 	defer func() { _ = unix.Close(kq) }()
 
@@ -67,7 +67,7 @@ func awaitExit(pid int) error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("watching pid %d for exit: %w", pid, err)
+			return fmt.Errorf("platform: watching pid %d for exit: %w", pid, err)
 		}
 		if n == 0 {
 			continue
@@ -80,7 +80,7 @@ func awaitExit(pid int) error {
 		if errors.Is(regErr, unix.ESRCH) && isOurUncollectedChild(pid) {
 			return nil
 		}
-		return fmt.Errorf("watching pid %d for exit: %w", pid, regErr)
+		return fmt.Errorf("platform: watching pid %d for exit: %w", pid, regErr)
 	}
 }
 
