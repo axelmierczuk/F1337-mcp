@@ -1,6 +1,10 @@
 package tui
 
-import "time"
+import (
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
 
 // What the model wants done, as a value.
 //
@@ -159,3 +163,14 @@ type tickMsg struct{ now time.Time }
 
 // statusMsg puts one line in the footer.
 type statusMsg struct{ text string }
+
+// Status is a message that puts one line in the footer.
+//
+// It exists for [Options.OpenShell], which is the one hook this package hands
+// to a caller outside it. A hook returns a tea.Cmd, and the only thing a
+// tea.Cmd can do is produce a message — so without an exported one, #43 could
+// open a shell and have no way to say that it exited 3, or that the sandbox
+// refused it. Every other message here is a result this package asked for and
+// nothing outside it can construct one; this is the reply channel for the one
+// thing it does not ask for.
+func Status(text string) tea.Msg { return statusMsg{text: text} }

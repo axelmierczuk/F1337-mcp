@@ -115,9 +115,12 @@ type Logs struct {
 // that it is a view and not a second implementation — is checkable by reading
 // one file (source.go) rather than by auditing every pane.
 //
-// Every method takes a context and is expected to honour it: the dispatcher
-// gives each call its own deadline, and a call that ignored it would be the one
-// thing able to stall the view.
+// Every method takes a context and is expected to honour it. The dispatcher
+// passes the run's context, so a shutdown cancels whatever is in flight; the
+// per-sandbox deadline is the implementation's own, because only it knows what
+// one call to one sandbox is worth waiting for. An implementation that applied
+// no deadline would be the one thing able to stall the view — see
+// TestEveryCallToOneSandboxIsBounded, which is what holds this to it.
 type Source interface {
 	// Sandboxes lists the fleet with each sandbox's cached health. It performs
 	// no agent I/O: health comes from the pool's background cache, which is

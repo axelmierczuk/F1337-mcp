@@ -897,8 +897,23 @@ func paneError(err error) string {
 	return probeDetail(err)
 }
 
+// maxDetailBytes bounds what one sandbox may contribute to a pane. Everything
+// that goes through [oneLine] is the far side's own words, and one machine
+// answering a health probe with a stack trace must not be able to fill the
+// screen with it.
+const maxDetailBytes = 200
+
 // oneLine makes an error safe and short enough for a pane.
-func oneLine(msg string) string { return cli.Clip(cli.SafeText(msg), 200) }
+//
+// The cut is marked with the ASCII ellipsis, not "…". This string is bounded
+// here, in the source, where the terminal's character set is not known yet —
+// it is decided in [Run] and reaches only the renderer — so the marker has to
+// be one that is legible in both. It was the last hard-coded "…" in the
+// package, and unlike the two found under LANG=C it was in no fixture: it
+// appears only once a sandbox's reason for not answering runs past the bound.
+func oneLine(msg string) string {
+	return cli.Clip(cli.SafeText(msg), maxDetailBytes, asciiGlyphs.Ellipsis)
+}
 
 func dash(s string) string {
 	if strings.TrimSpace(s) == "" {

@@ -93,13 +93,20 @@ func SafeText(msg string) string {
 }
 
 // Clip bounds a string to limit bytes, cutting on a rune boundary and marking
-// the cut.
+// the cut with mark.
 //
 // Bytes rather than display columns, because this bounds what one machine may
 // contribute to a structured result — a JSON field, a stored row — where the
 // budget is memory. Fitting text to a column of a terminal is a different job,
 // done against the rendered width; see internal/tui.
-func Clip(s string, limit int) string {
+//
+// The marker is the caller's rather than "…" here, because only the caller
+// knows what its output device can render. A JSON field or a table on a UTF-8
+// terminal wants the one character; a frame that may be drawn on a terminal
+// reading a legacy code page wants three dots, and a helper that decided for
+// both would be the one place a full-screen view could not stop a multi-byte
+// character reaching a screen that cannot show it.
+func Clip(s string, limit int, mark string) string {
 	if limit <= 0 {
 		return ""
 	}
@@ -110,7 +117,7 @@ func Clip(s string, limit int) string {
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut] + "…"
+	return s[:cut] + mark
 }
 
 // HumanDuration renders an uptime without the sub-second noise

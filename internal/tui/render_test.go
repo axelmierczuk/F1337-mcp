@@ -502,6 +502,70 @@ func TestWrapAdvancesThroughItsInput(t *testing.T) {
 	require.Contains(t, frame, "unconfined", "the wrap broke a word it had room to keep whole")
 }
 
+// TestAStatusLineNeverHidesAConfirmationPrompt.
+//
+// The footer is one line and three things want it, and the order is a safety
+// property rather than a preference: a status line lasts six seconds, so any
+// action at all leaves a window in which the next `x` would open a prompt the
+// operator cannot see — while `y` still confirms it. Nothing tested the order,
+// and swapping the two cases left this package green.
+func TestAStatusLineNeverHidesAConfirmationPrompt(t *testing.T) {
+	t.Parallel()
+
+	// Stop something, let it report, then propose the next one inside the
+	// window the report is still on screen for.
+	m, _ := press(demoModel(80, 24), "x", "y")
+	m, _ = m.Step(actionMsg{done: "stopped web-dev-server on alpha", attempted: "stop web-dev-server on alpha"})
+	require.NotEmpty(t, m.status, "this test needs a status line to compete with")
+
+	m.procCursor = 1
+	m, _ = press(m, "x")
+	require.Equal(t, modeConfirm, m.mode)
+
+	frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+	require.Contains(t, frame, "[y/N]", "the prompt is not on screen while a status line is")
+	require.Contains(t, frame, `"queue-worker"`, "the prompt does not name the process it will stop")
+	require.NotContains(t, frame, m.status, "the status line is drawn over the prompt")
+
+	// And the signal picker outranks it for the same reason.
+	picking := demoModel(80, 24)
+	picking.status, picking.mode = "stopped web-dev-server on alpha", modeSignal
+	require.Contains(t, Render(picking, NewTheme(ProfileNone), unicodeGlyphs), "SIGTERM")
+}
+
+// TestTheProgramsOwnMarkersStayAsciiHoweverLongASandboxIsWinded.
+//
+// Agent-supplied text is the agent's business: a CJK process name is not this
+// program's to transliterate. Its own chrome is a different matter, and the
+// bound it puts on a sandbox's reason for not answering is chrome — it used to
+// mark the cut with "…", which reached an ASCII frame at every size the moment
+// a reason ran past two hundred bytes. Nothing in the ASCII sweep was long
+// enough to find it.
+func TestTheProgramsOwnMarkersStayAsciiHoweverLongASandboxIsWinded(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("the agent refused this call and explains itself at length ", 8)
+	require.Greater(t, len(long), maxDetailBytes)
+
+	for _, size := range [][2]int{{80, 24}, {120, 40}, {160, 50}} {
+		m := demoModel(size[0], size[1])
+		m.sandboxes[0].Detail = oneLine(long)
+		m.processes = nil
+		m, _ = m.Step(processesMsg{sandbox: "alpha", err: errors.New(long)})
+		m, _ = m.Step(detailMsg{sandbox: "alpha", err: errors.New(long)})
+
+		frame := Render(m, NewTheme(ProfileNone), asciiGlyphs)
+		for _, r := range frame {
+			require.Lessf(t, r, rune(0x80), "%dx%d: %q is not ASCII\n%s", size[0], size[1], r, frame)
+		}
+	}
+
+	// The cut is still marked: an unmarked one reads as the whole reason.
+	require.Contains(t, oneLine(long), asciiGlyphs.Ellipsis)
+	require.LessOrEqual(t, len(oneLine(long)), maxDetailBytes+len(asciiGlyphs.Ellipsis))
+	require.Equal(t, "short enough", oneLine("short enough"))
+}
+
 // TestOneFailureReadsTheSameWayEverywhere.
 //
 // The panes used to print the raw gRPC error while the fleet row printed the

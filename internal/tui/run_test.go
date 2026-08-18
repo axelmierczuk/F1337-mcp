@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,18 +40,22 @@ func TestTheTerminalIsRestoredOnEveryPathOut(t *testing.T) {
 	t.Run("clean exit", func(t *testing.T) {
 		t.Parallel()
 		var restored int
-		err := runGuarded(&fakeRunner{}, func() { restored++ })
+		var panicked bool
+		err := runGuarded(&fakeRunner{}, func(p bool) { restored++; panicked = p })
 		require.NoError(t, err)
 		require.Equal(t, 1, restored)
+		require.False(t, panicked, "a clean exit is not a panic")
 	})
 
 	t.Run("program error", func(t *testing.T) {
 		t.Parallel()
 		var restored int
+		var panicked bool
 		boom := errors.New("the renderer gave up")
-		err := runGuarded(&fakeRunner{err: boom}, func() { restored++ })
+		err := runGuarded(&fakeRunner{err: boom}, func(p bool) { restored++; panicked = p })
 		require.ErrorIs(t, err, boom, "the failure must still reach the caller")
 		require.Equal(t, 1, restored)
+		require.False(t, panicked)
 	})
 
 	t.Run("killed by a cancelled context", func(t *testing.T) {
@@ -58,22 +63,27 @@ func TestTheTerminalIsRestoredOnEveryPathOut(t *testing.T) {
 		// This is the shape SIGTERM arrives in: the context is cancelled, and
 		// bubbletea returns ErrProgramKilled.
 		var restored int
-		err := runGuarded(&fakeRunner{err: tea.ErrProgramKilled}, func() { restored++ })
+		var panicked bool
+		err := runGuarded(&fakeRunner{err: tea.ErrProgramKilled}, func(p bool) { restored++; panicked = p })
 		require.ErrorIs(t, err, tea.ErrProgramKilled)
 		require.Equal(t, 1, restored)
+		require.False(t, panicked, "a cancelled context is not a panic")
 	})
 
 	t.Run("panic", func(t *testing.T) {
 		t.Parallel()
 		var restored int
+		var panicked bool
 		var order []string
 		require.PanicsWithValue(t, "nil map write", func() {
-			_ = runGuarded(&fakeRunner{panic: "nil map write"}, func() {
+			_ = runGuarded(&fakeRunner{panic: "nil map write"}, func(p bool) {
 				restored++
+				panicked = p
 				order = append(order, "restored")
 			})
 		})
 		require.Equal(t, 1, restored)
+		require.True(t, panicked, "the guard must know it is the panic path: it is the only one bubbletea has not already covered")
 		// Restored *before* the panic continues, so the stack trace lands on a
 		// terminal that can display it. And the panic is re-raised rather than
 		// swallowed: a bug that produced a tidy error message would be a bug
@@ -84,7 +94,7 @@ func TestTheTerminalIsRestoredOnEveryPathOut(t *testing.T) {
 	t.Run("restore happens once", func(t *testing.T) {
 		t.Parallel()
 		var restored int
-		require.NoError(t, runGuarded(&fakeRunner{}, func() { restored++ }))
+		require.NoError(t, runGuarded(&fakeRunner{}, func(bool) { restored++ }))
 		require.Equal(t, 1, restored)
 	})
 }
@@ -98,13 +108,43 @@ func TestGuardTerminalIsSafeOnSomethingThatIsNotATerminal(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = f.Close() })
 
-	require.NotPanics(t, func() { guardTerminal(f)() })
-	require.NotPanics(t, func() { guardTerminal(nil)() })
+	for _, panicked := range []bool{false, true} {
+		require.NotPanics(t, func() { guardTerminal(f)(panicked) })
+		require.NotPanics(t, func() { guardTerminal(nil)(panicked) })
+	}
 
 	// And nothing was written to it, because there was nothing to put back.
 	info, err := f.Stat()
 	require.NoError(t, err)
 	require.Zero(t, info.Size())
+}
+
+// TestOnlyThePanicPathSendsTheResetSequence.
+//
+// The mode restore is idempotent and invisible; the escape sequences are only
+// bytes, so a terminal not interpreting them prints them. bubbletea's own
+// shutdown shows the cursor and leaves the alternate screen on every path
+// where Run returns, and it puts the console mode back afterwards — so on
+// Windows, where a console keeps ENABLE_VIRTUAL_TERMINAL_PROCESSING off unless
+// something turns it on, sending them again left "<ESC>[?1049l<ESC>[?25h" on
+// the operator's screen after every clean exit. The panic path is the one
+// bubbletea has not already covered, and the one where they are worth it.
+func TestOnlyThePanicPathSendsTheResetSequence(t *testing.T) {
+	t.Parallel()
+
+	var buf strings.Builder
+	writeReset(&buf)
+	require.Equal(t, resetSequence, buf.String())
+	require.Contains(t, resetSequence, "?1049l", "the sequence does not leave the alternate screen")
+	require.Contains(t, resetSequence, "?25h", "the sequence does not show the cursor")
+
+	// And the lifecycle only reaches it one way.
+	var sent []bool
+	guard := func(panicked bool) { sent = append(sent, panicked) }
+	require.NoError(t, runGuarded(&fakeRunner{}, guard))
+	require.NoError(t, runGuarded(&fakeRunner{err: nil}, guard))
+	require.PanicsWithValue(t, "boom", func() { _ = runGuarded(&fakeRunner{panic: "boom"}, guard) })
+	require.Equal(t, []bool{false, false, true}, sent)
 }
 
 // TestRunRefusesWithoutATerminal. A full-screen program whose output is a pipe
@@ -299,6 +339,119 @@ func TestTheShellSeamIsOneHook(t *testing.T) {
 	unwired := &program{model: demoModel(80, 24), src: &recordingSource{}, schedule: DefaultSchedule}
 	msg := unwired.command(Effect{Kind: EffectOpenShell, Sandbox: "alpha"})()
 	require.Contains(t, msg.(statusMsg).text, "#43")
+}
+
+// TestADispatchedCallCarriesTheRunsContext.
+//
+// A tea.Cmd is a func with no arguments, so the only way a call started by the
+// view can be cancelled by the same SIGTERM that stops it is for the closure to
+// have captured the run's context. Every one of them used context.Background(),
+// which meant a log follow kept reading a stream for the best part of a minute
+// after the program had gone, against a pool the caller was about to close —
+// and made [Source]'s own documented contract false.
+func TestADispatchedCallCarriesTheRunsContext(t *testing.T) {
+	t.Parallel()
+
+	effects := []Effect{
+		{Kind: EffectSandboxes},
+		{Kind: EffectProcesses, Sandbox: "alpha"},
+		{Kind: EffectLogs, Sandbox: "alpha", ProcessID: "p-web"},
+		{Kind: EffectDetail, Sandbox: "alpha"},
+		{Kind: EffectSignal, Sandbox: "alpha", ProcessID: "p-web", Signal: "TERM"},
+		{Kind: EffectRestart, Sandbox: "alpha", ProcessID: "p-web"},
+	}
+	for _, e := range effects {
+		ctx, cancel := context.WithCancel(context.Background())
+		src := &ctxSource{}
+		p := &program{ctx: ctx, model: demoModel(80, 24), src: src, schedule: DefaultSchedule}
+		cancel()
+
+		cmd := p.command(e)
+		require.NotNil(t, cmd)
+		cmd()
+		require.ErrorIsf(t, src.seenErr, context.Canceled,
+			"%s was dispatched under a context the run cannot cancel", e.Kind)
+	}
+
+	// And a program built without one still works, because a test builds them
+	// that way and a nil context passed to a gRPC call panics.
+	p := &program{model: demoModel(80, 24), src: &ctxSource{}, schedule: DefaultSchedule}
+	require.NotNil(t, p.callContext())
+	require.NoError(t, p.callContext().Err())
+}
+
+// ctxSource answers nothing and remembers the context it was called under.
+type ctxSource struct{ seenErr error }
+
+func (c *ctxSource) note(ctx context.Context) { c.seenErr = ctx.Err() }
+
+func (c *ctxSource) Sandboxes(ctx context.Context) ([]Sandbox, error) { c.note(ctx); return nil, nil }
+func (c *ctxSource) Processes(ctx context.Context, _, _ string) ([]Process, error) {
+	c.note(ctx)
+	return nil, nil
+}
+
+func (c *ctxSource) Logs(ctx context.Context, _, _, _ string, _ LogOptions) (Logs, error) {
+	c.note(ctx)
+	return Logs{}, nil
+}
+
+func (c *ctxSource) Detail(ctx context.Context, _, _ string, _ bool) (Detail, error) {
+	c.note(ctx)
+	return Detail{}, nil
+}
+func (c *ctxSource) Signal(ctx context.Context, _, _, _, _ string, _ bool) error {
+	c.note(ctx)
+	return nil
+}
+func (c *ctxSource) Restart(ctx context.Context, _, _, _ string) error { c.note(ctx); return nil }
+
+var _ Source = (*ctxSource)(nil)
+
+// flatten runs a message that may be a batch of commands, the way bubbletea's
+// event loop does.
+func flatten(msg tea.Msg) []tea.Msg {
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return []tea.Msg{msg}
+	}
+	out := make([]tea.Msg, 0, len(batch))
+	for _, cmd := range batch {
+		out = append(out, flatten(cmd())...)
+	}
+	return out
+}
+
+// TestAHookCanReportBack.
+//
+// [Options.OpenShell] is the one thing this package hands to a caller outside
+// it, and a hook returns a tea.Cmd, whose only power is to produce a message.
+// Every message this package understands is unexported, so without [Status] a
+// wired #43 could open a shell and have no way to say that it exited 3 — the
+// seam would carry an action out and nothing back.
+func TestAHookCanReportBack(t *testing.T) {
+	t.Parallel()
+
+	p := &program{
+		model:    demoModel(80, 24),
+		src:      &recordingSource{},
+		schedule: DefaultSchedule,
+		shell: func(string, string) tea.Cmd {
+			return func() tea.Msg { return Status("shell on alpha exited 3") }
+		},
+	}
+	p.model.shellWired = true
+
+	_, cmd := p.Update(key("s"))
+	require.NotNil(t, cmd)
+	// The message the hook produced goes back in the way bubbletea would
+	// deliver it, and the footer says so. Unwrapped rather than assumed to be
+	// the only one: `s` emits one effect today, and a batch is what a second
+	// would arrive as.
+	for _, msg := range flatten(cmd()) {
+		p.model, _ = p.model.Step(msg)
+	}
+	require.Contains(t, p.View(), "shell on alpha exited 3")
 }
 
 // TestTheProgramTicksOnItsOwnSchedule, and stops when it quits: a ticker that

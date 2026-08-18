@@ -25,18 +25,22 @@ import (
 // it back. That is what is here.
 
 // TestTUIDrawsTheFleetAndGivesTheTerminalBack is the whole feature in one
-// scenario: two enrolled sandboxes, one of them dead, a supervised process on
-// the live one, and an operator who quits.
+// scenario: two enrolled sandboxes, a supervised process on one of them, one
+// of them going away while the view is watching, and an operator who quits.
 //
-// The unreachable sandbox is the point of the fleet half. A view that probed
-// sandboxes one after another, or that failed the listing when one did not
-// answer, would show nothing at all here — and that is the failure mode a
-// twenty-machine fleet makes certain, because a fleet that size always has one
-// machine that is asleep.
+// The sandbox that goes away is the point of the fleet half, and it goes away
+// *after* the view has already drawn it as serving. That ordering is the only
+// place the background health loop can be observed: the pool probes once when
+// a channel is first dialed, so a view that never probed again would draw this
+// fleet exactly the same way for the first ten seconds and then be wrong about
+// it forever. It also covers the other half — that a machine which stops
+// answering renders as unhealthy rather than stalling or blanking the view,
+// which is the failure mode a twenty-machine fleet makes certain, because a
+// fleet that size always has one machine that is asleep.
 func TestTUIDrawsTheFleetAndGivesTheTerminalBack(t *testing.T) {
 	f := newFleet(t)
 	live := f.enroll("build-box", enrollOptions{})
-	dead := f.enroll("gone-box", enrollOptions{})
+	fading := f.enroll("gone-box", enrollOptions{})
 
 	s := f.connect(t)
 	s.ok("fleet_select", map[string]any{"name": live.name})
@@ -46,20 +50,26 @@ func TestTUIDrawsTheFleetAndGivesTheTerminalBack(t *testing.T) {
 	})
 	defer stopProcess(t, s, started)
 
-	// And now one of them goes away, with the TUI already about to look at it.
-	dead.proc.kill()
+	// A short refresh so the second probe lands inside this test rather than
+	// inside the operator's attention span. What is under test is that there
+	// is a second probe at all.
+	tui := startTUI(t, f, tuiArgs("--refresh", "2s"))
 
-	tui := startTUI(t, f)
-
-	tui.waitForScreen(t, "the fleet pane to list both sandboxes", live.name, dead.name)
-	tui.waitForScreen(t, "the dead sandbox to be reported unreachable", "unreachable")
-	tui.waitForScreen(t, "the live sandbox to be reported serving", "serving")
+	tui.waitForScreen(t, "the fleet pane to list both sandboxes", live.name, fading.name)
+	tui.waitForScreen(t, "both sandboxes to be reported serving", "2 serving")
 
 	// The processes pane is reading the same agent the MCP server just started
 	// a process on, through the same client. Its output is what proves the pane
 	// is a view of the product rather than of a fixture.
 	tui.waitForScreen(t, "the processes pane to show the supervised process", started.Process.Name)
 	tui.waitForScreen(t, "the logs pane to follow the process's output", "tick ")
+
+	// And now one of them goes away, with the view already watching it.
+	fading.proc.kill()
+	tui.waitForScreen(t, "the sandbox that went away to be re-probed and reported unreachable", "unreachable")
+
+	// The rest of the view is still there: one dead machine does not blank it.
+	tui.waitForScreen(t, "the live sandbox to still be drawn", live.name, started.Process.Name)
 
 	tui.send("q")
 	tui.awaitExit(t, 30*time.Second)
@@ -149,14 +159,22 @@ type tuiSession struct {
 
 // tuiScript is what the shell runs. Deliberately without `set -e`: a non-zero
 // TUI is a result this test wants recorded, not a reason to skip recording it.
+//
+// FLEET_TUI_ARGS is unquoted on purpose: it is a scenario's own flags, split on
+// whitespace by the shell, and there is no scenario that needs one with a space
+// in it.
 const tuiScript = `
 stty -g > "$FLEET_TUI_DIR/before"
-"$FLEET_TUI_BIN" tui &
+"$FLEET_TUI_BIN" tui $FLEET_TUI_ARGS &
 echo $! > "$FLEET_TUI_DIR/pid"
 wait $!
 echo $? > "$FLEET_TUI_DIR/status"
 stty -g > "$FLEET_TUI_DIR/after"
 `
+
+// tuiArgs is extra flags for the `tui` command, passed through startTUI's
+// environment the same way everything else about the run is.
+func tuiArgs(args ...string) string { return envEntry("FLEET_TUI_ARGS", strings.Join(args, " ")) }
 
 func startTUI(t *testing.T, f *fleet, extraEnv ...string) *tuiSession {
 	t.Helper()

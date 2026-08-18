@@ -99,6 +99,7 @@ func Run(ctx context.Context, opts Options) error {
 	env := opts.env()
 	m := NewModel(opts.Schedule, opts.OpenShell != nil)
 	p := &program{
+		ctx:      ctx,
 		model:    m,
 		theme:    NewTheme(DetectProfile(env)),
 		glyphs:   DetectGlyphs(env),
@@ -107,35 +108,7 @@ func Run(ctx context.Context, opts Options) error {
 		schedule: m.schedule,
 	}
 
-	teaOpts := []tea.ProgramOption{
-		tea.WithContext(ctx),
-		tea.WithAltScreen(),
-		tea.WithOutput(out),
-		tea.WithFPS(renderFPS),
-		// One signal path, not two.
-		//
-		// bubbletea installs its own SIGINT/SIGTERM handler, and it deadlocks
-		// against a cancelled context: on a signal its handler goroutine does a
-		// blocking send of QuitMsg onto the program's message channel, while the
-		// same signal has already cancelled ctx and stopped the event loop that
-		// would have received it. Shutdown then waits for that goroutine and
-		// never returns — the terminal is left in raw mode, which is the exact
-		// failure this whole file exists to prevent. It reproduced every time
-		// under test/e2e's TestTUIGivesTheTerminalBackOnSIGTERM.
-		//
-		// So the signal handling is the caller's, through ctx, which is also
-		// what `fleetctl serve` and `fleet-agent serve` already do. ^C still
-		// works: the terminal is in raw mode, so it arrives as a keystroke.
-		tea.WithoutSignalHandler(),
-		// Nothing here uses the mouse, and leaving reporting off means a
-		// terminal that does not support it is not sent sequences it will
-		// print as text.
-	}
-	if opts.In != nil {
-		teaOpts = append(teaOpts, tea.WithInput(opts.In))
-	}
-
-	err := runGuarded(tea.NewProgram(p, teaOpts...), restore)
+	err := runGuarded(tea.NewProgram(p, programOptions(ctx, out, opts.In)...), restore)
 	// A cancelled context is how SIGTERM and SIGINT arrive here, and it is a
 	// clean exit rather than a failure: the operator asked to leave, and
 	// `fleetctl tui` exiting non-zero because it was asked to stop would make
@@ -146,6 +119,46 @@ func Run(ctx context.Context, opts Options) error {
 		return nil //nolint:nilerr // see above: a requested shutdown is not a failure
 	}
 	return err
+}
+
+// programOptions is what bubbletea is configured with.
+//
+// Split out of [Run] because the two decisions here are invisible from outside
+// a running program — a *tea.Program tells nobody its frame rate or who owns
+// its signals — and both are load-bearing: one is the whole of "no busy-wait",
+// and the other is a deadlock. Their test applies these to a program and reads
+// back what they set, so deleting either goes red rather than silently costing
+// a third of a core or hanging a shutdown with the terminal in raw mode.
+func programOptions(ctx context.Context, out io.Writer, in io.Reader) []tea.ProgramOption {
+	opts := []tea.ProgramOption{
+		tea.WithContext(ctx),
+		tea.WithAltScreen(),
+		tea.WithOutput(out),
+		tea.WithFPS(renderFPS),
+		// One signal path, not two.
+		//
+		// bubbletea installs its own SIGINT/SIGTERM handler, and it races a
+		// cancelled context: on a signal its handler goroutine does a blocking
+		// send of QuitMsg onto the program's unbuffered message channel, with
+		// no ctx.Done() case to escape through, while the same signal has
+		// already cancelled ctx and given the event loop a second reason to
+		// return. Whichever of the two the event loop's select picks decides
+		// it: pick the context, and shutdown waits on that goroutine forever,
+		// with the terminal in raw mode. Which way the race falls is a
+		// scheduling accident, which is why it must not be left to run.
+		//
+		// So the signal handling is the caller's, through ctx, which is also
+		// what `fleetctl serve` and `fleet-agent serve` already do. ^C still
+		// works: the terminal is in raw mode, so it arrives as a keystroke.
+		tea.WithoutSignalHandler(),
+		// Nothing here uses the mouse, and leaving reporting off means a
+		// terminal that does not support it is not sent sequences it will
+		// print as text.
+	}
+	if in != nil {
+		opts = append(opts, tea.WithInput(in))
+	}
+	return opts
 }
 
 // runner is the half of *tea.Program the lifecycle needs. Narrowing it is what
@@ -161,20 +174,23 @@ type runner interface {
 // turned one into a tidy error message would hide it. What the guard buys is
 // that the stack trace lands on a terminal that can display it, rather than
 // down the right-hand side of a screen still in raw mode.
-func runGuarded(p runner, restore func()) (err error) {
+//
+// restore is told which way it was reached, because the two are not the same
+// job. See [guardTerminal].
+func runGuarded(p runner, restore func(panicked bool)) (err error) {
 	restored := false
-	putBack := func() {
+	putBack := func(panicked bool) {
 		if !restored {
 			restored = true
-			restore()
+			restore(panicked)
 		}
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			putBack()
+			putBack(true)
 			panic(r)
 		}
-		putBack()
+		putBack(false)
 	}()
 	_, err = p.Run()
 	return err
@@ -183,28 +199,48 @@ func runGuarded(p runner, restore func()) (err error) {
 // guardTerminal captures the terminal's mode now and gives back a function
 // that puts it back.
 //
-// bubbletea does this too, and normally gets there first. This exists for the
-// path where it does not: a panic that escapes its recovery, or a shutdown that
-// does not complete. Restoring twice is harmless — the saved state is the same
-// state, and the sequences below are no-ops on a terminal already in that
-// state — and restoring once too often is a much better failure than not
-// restoring at all.
-func guardTerminal(f *os.File) func() {
+// bubbletea does this too, and on every path where Run returns it gets there
+// first: its shutdown shows the cursor, leaves the alternate screen and only
+// then restores the console mode. So this exists for the one path it cannot
+// cover, a panic that escapes its own recovery — and the argument says which
+// path this is.
+//
+// The mode is restored either way, because term.Restore to the state it is
+// already in is a no-op that costs a syscall. The escape sequences are not,
+// and that is the difference: they are only bytes, so a terminal that is not
+// interpreting them prints them. Windows is where that happens — a console
+// keeps ENABLE_VIRTUAL_TERMINAL_PROCESSING off unless something turns it on,
+// bubbletea turns it on for the run and puts it back on the way out, and
+// writing them after that leaves "<ESC>[?1049l<ESC>[?25h" on the operator's
+// screen on every clean exit. On the panic path they are worth it: nothing
+// else is going to leave the alternate screen, and a stack trace painted over
+// a frame nobody can scroll back past is the failure this file exists to
+// prevent.
+func guardTerminal(f *os.File) func(panicked bool) {
 	if f == nil || !term.IsTerminal(f.Fd()) {
-		return func() {}
+		return func(bool) {}
 	}
 	state, err := term.GetState(f.Fd())
 	if err != nil {
-		return func() {}
+		return func(bool) {}
 	}
-	return func() {
+	return func(panicked bool) {
 		_ = term.Restore(f.Fd(), state)
-		// Leave the alternate screen and show the cursor, in that order. A
-		// terminal that is already on the primary screen ignores the first,
-		// and one whose cursor is already visible ignores the second.
-		_, _ = io.WriteString(f, "\x1b[?1049l\x1b[?25h")
+		if panicked {
+			writeReset(f)
+		}
 	}
 }
+
+// resetSequence leaves the alternate screen and shows the cursor, in that
+// order. A terminal already on the primary screen ignores the first, and one
+// whose cursor is already visible ignores the second.
+const resetSequence = "\x1b[?1049l\x1b[?25h"
+
+// writeReset sends resetSequence. It is a function so that "only the panic
+// path sends it" is something a test can watch happen; see [guardTerminal] for
+// why only that path may.
+func writeReset(w io.Writer) { _, _ = io.WriteString(w, resetSequence) }
 
 // RequireTerminal refuses a run that has no terminal to draw on.
 //
@@ -223,12 +259,34 @@ func RequireTerminal(f *os.File) error {
 
 // program adapts the pure [Model] to bubbletea and dispatches its effects.
 type program struct {
+	// ctx is the run's context, and it is what every [Source] call is made
+	// under. Holding it on the struct rather than taking it per call is
+	// bubbletea's shape, not a choice: a tea.Cmd is a func with no arguments,
+	// so the only way a dispatched call can be cancelled by the same SIGTERM
+	// that stops the program is for the closure to have captured it. The zero
+	// value is treated as context.Background so a test can build a program
+	// without one.
+	ctx      context.Context
 	model    Model
 	theme    Theme
 	glyphs   Glyphs
 	src      Source
 	shell    func(sandbox, address string) tea.Cmd
 	schedule Schedule
+}
+
+// callContext is the context a dispatched effect runs under.
+//
+// Cancelled with the run, so a shutdown does not leave a log follow reading a
+// stream for the best part of a minute against a pool the caller is about to
+// close. The deadline is still the [Source]'s: only it knows what one call to
+// one sandbox is worth waiting for, and a graceful stop is worth thirteen
+// seconds where a process listing is worth three.
+func (p *program) callContext() context.Context {
+	if p.ctx == nil {
+		return context.Background()
+	}
+	return p.ctx
 }
 
 var _ tea.Model = (*program)(nil)
@@ -277,45 +335,45 @@ func (p *program) dispatch(effects []Effect) []tea.Cmd {
 }
 
 func (p *program) command(e Effect) tea.Cmd {
-	src := p.src
+	src, ctx := p.src, p.callContext()
 	switch e.Kind {
 	case EffectQuit:
 		return tea.Quit
 
 	case EffectSandboxes:
 		return func() tea.Msg {
-			sandboxes, err := src.Sandboxes(context.Background())
+			sandboxes, err := src.Sandboxes(ctx)
 			return sandboxesMsg{sandboxes: sandboxes, err: err, at: time.Now()}
 		}
 
 	case EffectProcesses:
 		return func() tea.Msg {
-			procs, err := src.Processes(context.Background(), e.Sandbox, e.Address)
+			procs, err := src.Processes(ctx, e.Sandbox, e.Address)
 			return processesMsg{sandbox: e.Sandbox, processes: procs, err: err}
 		}
 
 	case EffectLogs:
 		return func() tea.Msg {
-			logs, err := src.Logs(context.Background(), e.Sandbox, e.Address, e.ProcessID, e.Logs)
+			logs, err := src.Logs(ctx, e.Sandbox, e.Address, e.ProcessID, e.Logs)
 			return logsMsg{sandbox: e.Sandbox, processID: e.ProcessID, logs: logs, err: err}
 		}
 
 	case EffectDetail:
 		return func() tea.Msg {
-			detail, err := src.Detail(context.Background(), e.Sandbox, e.Address, e.Toolchains)
+			detail, err := src.Detail(ctx, e.Sandbox, e.Address, e.Toolchains)
 			return detailMsg{sandbox: e.Sandbox, detail: detail, toolchains: e.Toolchains, err: err}
 		}
 
 	case EffectSignal:
 		return func() tea.Msg {
-			err := src.Signal(context.Background(), e.Sandbox, e.Address, e.ProcessID, e.Signal, e.Graceful)
+			err := src.Signal(ctx, e.Sandbox, e.Address, e.ProcessID, e.Signal, e.Graceful)
 			done, attempted := signalReport(e)
 			return actionMsg{done: done, attempted: attempted, err: err}
 		}
 
 	case EffectRestart:
 		return func() tea.Msg {
-			err := src.Restart(context.Background(), e.Sandbox, e.Address, e.ProcessID)
+			err := src.Restart(ctx, e.Sandbox, e.Address, e.ProcessID)
 			return actionMsg{
 				done:      fmt.Sprintf("restarted %s on %s", e.ProcessName, e.Sandbox),
 				attempted: fmt.Sprintf("restart %s on %s", e.ProcessName, e.Sandbox),
@@ -326,7 +384,7 @@ func (p *program) command(e Effect) tea.Cmd {
 	case EffectOpenShell:
 		if p.shell == nil {
 			return func() tea.Msg {
-				return statusMsg{text: "opening a shell needs `fleetctl shell` (#43), which this build does not have"}
+				return Status("opening a shell needs `fleetctl shell` (#43), which this build does not have")
 			}
 		}
 		return p.shell(e.Sandbox, e.Address)

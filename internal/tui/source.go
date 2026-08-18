@@ -25,10 +25,31 @@ import (
 // `fleetctl info` and the MCP server's fleet_* tools render with. What is left
 // is projection: a wire message into the struct a pane draws.
 
+// fleetLister and agentClients are everything this package is allowed to reach
+// the fleet through: the registry listing `fleetctl list` reads, and the three
+// pool calls the CLI and the MCP server already make.
+//
+// Interfaces rather than *registry.Registry and *client.Pool for two reasons.
+// They are the whole of what "this is a view, not a second implementation"
+// permits, so the rule is checkable by reading one declaration rather than by
+// auditing every pane. And they are what makes the things below assertable
+// without a fleet: that every call to one sandbox is bounded, that a log
+// follow is bounded at the request rather than only in a helper, and that the
+// stop key sends the flags an operator's stop means.
+type fleetLister interface {
+	List() ([]registry.Sandbox, error)
+}
+
+type agentClients interface {
+	Host(name, address string) (sandboxdv1.HostServiceClient, error)
+	Process(name, address string) (sandboxdv1.ProcessServiceClient, error)
+	Health(name string) (client.HealthStatus, bool)
+}
+
 // fleetSource reads the fleet through the pool and the registry.
 type fleetSource struct {
-	fleet *registry.Registry
-	pool  *client.Pool
+	fleet fleetLister
+	pool  agentClients
 	// timeout bounds one call to one sandbox. Short on purpose: a fleet holds
 	// machines that are asleep, rebuilt or simply gone, and the answer for
 	// those is "unreachable" delivered promptly rather than a pane that stalls
@@ -36,14 +57,22 @@ type fleetSource struct {
 	timeout time.Duration
 }
 
+// defaultCallTimeout bounds one call to one sandbox when the caller named no
+// timeout of its own.
+const defaultCallTimeout = 3 * time.Second
+
 // NewFleetSource returns the [Source] the TUI runs against.
+//
+// It takes the concrete registry and pool rather than the interfaces above:
+// those exist so this file's behaviour can be asserted, not so a caller can
+// substitute a second way of reaching the fleet.
 //
 // The pool is expected to have been built with a health interval the operator
 // chose, because its background health loop is the only thing in this program
 // that probes sandboxes on a schedule. See [Source.Sandboxes].
 func NewFleetSource(fleet *registry.Registry, pool *client.Pool, timeout time.Duration) Source {
 	if timeout <= 0 {
-		timeout = 3 * time.Second
+		timeout = defaultCallTimeout
 	}
 	return &fleetSource{fleet: fleet, pool: pool, timeout: timeout}
 }

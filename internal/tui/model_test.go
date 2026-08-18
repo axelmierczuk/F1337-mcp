@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -505,6 +506,67 @@ func kinds(effects []Effect) []EffectKind {
 		out = append(out, e.Kind)
 	}
 	return out
+}
+
+// TestAKeyWithNoNameIsIgnoredRatherThanFatal.
+//
+// bubbletea's Key.String() returns "" for a key type it has no name for, and
+// the signal picker read the first byte of it. An if-statement's initialiser
+// runs before the condition it sits beside, so the length check next to the
+// index was not guarding it: the whole full-screen program went down with an
+// index-out-of-range where an unbound key should have done nothing.
+func TestAKeyWithNoNameIsIgnoredRatherThanFatal(t *testing.T) {
+	t.Parallel()
+
+	nameless := tea.KeyMsg(tea.Key{Type: tea.KeyRunes}) // String() == ""
+	require.Empty(t, nameless.String())
+
+	for _, md := range []mode{modeNormal, modeConfirm, modeSignal, modeHelp} {
+		m := demoModel(80, 24)
+		m.mode = md
+		require.NotPanicsf(t, func() {
+			next, effects := m.Step(nameless)
+			require.Emptyf(t, mutating(effects), "a nameless key mutated something in mode %d", md)
+			_ = next
+		}, "mode %d", md)
+	}
+
+	// And a key whose first byte is a digit but which is not one — a bracketed
+	// paste arrives as "[1]" — does not pick a signal either.
+	m := demoModel(80, 24)
+	m.mode = modeSignal
+	next, effects := m.Step(tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune("1"), Paste: true}))
+	require.Empty(t, effects)
+	require.Equal(t, modeSignal, next.mode, "a pasted digit picked a signal")
+}
+
+// TestAnAnswerToTheOtherToolchainQuestionIsDropped.
+//
+// Pressing `t` asks again, and the reply already in flight describes a host
+// nobody probed for toolchains. Applying it blanks the pane back to "probing"
+// for as long as the second answer takes.
+func TestAnAnswerToTheOtherToolchainQuestionIsDropped(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.now = fixedNow
+	m, _ = m.Step(key("t"))
+	require.True(t, m.toolchains)
+
+	// The pre-`t` answer lands.
+	stale := demoDetail()
+	stale.Hostname = "answered-before-t"
+	m, _ = m.Step(detailMsg{sandbox: "alpha", detail: stale, toolchains: false})
+	require.NotEqual(t, "answered-before-t", m.detail.Hostname, "an answer to the previous question was applied")
+	require.False(t, m.detailState.inFlight, "the pane cannot ask again")
+
+	// The one that answers the question asked is.
+	fresh := demoDetail()
+	fresh.Hostname = "answered-after-t"
+	fresh.ToolchainsAsked = true
+	m, _ = m.Step(detailMsg{sandbox: "alpha", detail: fresh, toolchains: true})
+	require.Equal(t, "answered-after-t", m.detail.Hostname)
+	require.True(t, m.detail.ToolchainsAsked)
 }
 
 // TestEveryKeyIsInTheHelp. A keymap and a help screen that disagree is how an

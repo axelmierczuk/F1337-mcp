@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/axelmierczuk/fleet-mcp/internal/client"
 	"github.com/axelmierczuk/fleet-mcp/internal/tui"
 )
 
@@ -25,6 +24,20 @@ import (
 // operator is still looking at the screen, and slow enough that a hundred
 // machines is a hundred requests every ten seconds rather than a flood.
 const defaultHealthInterval = 10 * time.Second
+
+// healthIntervalFor is what --refresh means, including what it means when it
+// is not a positive duration.
+//
+// Nought or less is the flag's default rather than "never". A pool asked for
+// no interval gives the answer a one-shot command wants — a background loop
+// that never fires again — and here that is a view whose health stopped after
+// the first probe and does not say so.
+func healthIntervalFor(refresh time.Duration) time.Duration {
+	if refresh <= 0 {
+		return defaultHealthInterval
+	}
+	return refresh
+}
 
 func newTUICommand(out io.Writer) *cobra.Command {
 	var (
@@ -66,7 +79,11 @@ func newTUICommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			pool, err := control.livePool(refresh)
+			// The pool's background health loop is the view's health
+			// source and the only thing in this program that probes on a
+			// schedule, so it gets the interval the operator chose rather
+			// than the one a command that probes once and exits wants.
+			pool, err := control.pool(healthIntervalFor(refresh))
 			if err != nil {
 				return err
 			}
@@ -86,9 +103,11 @@ func newTUICommand(out io.Writer) *cobra.Command {
 				Out:      tty,
 				TTY:      tty,
 				// OpenShell is left nil until #43 lands. See the comment on
-				// tui.Options.OpenShell: with it nil the key reports that this
-				// build has no shell rather than doing nothing, and wiring it
-				// is one line here.
+				// tui.Options.OpenShell: with it nil the key reports that
+				// this build has no shell rather than doing nothing, and
+				// wiring it is this one field — a closure that hands the
+				// terminal to `fleetctl shell` through tea.Exec and reports
+				// what it did with tui.Status.
 			})
 		},
 	}
@@ -97,50 +116,4 @@ func newTUICommand(out io.Writer) *cobra.Command {
 	cmd.Flags().DurationVar(&refresh, "refresh", defaultHealthInterval,
 		"how often each sandbox's health is re-probed in the background")
 	return cmd
-}
-
-// livePool builds a pool whose background health loop is the view's health
-// source.
-//
-// It is deliberately not [controlFlags.pool]. That one sets the health interval
-// to an hour, because a one-shot command probes once and must not be kept alive
-// by a background loop it no longer needs — the exact opposite requirement to
-// this one, where the loop *is* the feature. Everything else about the two is
-// the same, and the credential loading below is the same shared helpers every
-// other command in this package uses.
-func (f *controlFlags) livePool(interval time.Duration) (*client.Pool, error) {
-	if interval <= 0 {
-		interval = defaultHealthInterval
-	}
-	caDir, err := resolve(f.caDir, defaultCADir)
-	if err != nil {
-		return nil, err
-	}
-	authority, err := loadCA(caDir)
-	if err != nil {
-		return nil, err
-	}
-	certPath, err := resolve(f.certPath, defaultControlCertPath)
-	if err != nil {
-		return nil, err
-	}
-	keyPath, err := resolve(f.keyPath, defaultControlKeyPath)
-	if err != nil {
-		return nil, err
-	}
-	certPEM, err := readControlCredential(certPath, "control certificate")
-	if err != nil {
-		return nil, err
-	}
-	keyPEM, err := readControlCredential(keyPath, "control private key")
-	if err != nil {
-		return nil, err
-	}
-	return client.NewPool(client.Config{
-		CACertPEM:      authority.CertPEM(),
-		CertPEM:        certPEM,
-		KeyPEM:         keyPEM,
-		HealthInterval: interval,
-		HealthTimeout:  f.probeTimeout(),
-	})
 }

@@ -399,9 +399,17 @@ func (m Model) signalKey(k string) (Model, []Effect) {
 	}
 	// A digit picks a signal directly, which is faster than arrowing to it and
 	// is the only other thing a keystroke here could sensibly mean.
-	if n := strings.IndexByte("123456", k[0]); len(k) == 1 && n >= 0 && n < len(signals) {
-		m.mode = modeNormal
-		return m.propose(m.signalEffect(signals[n]))
+	//
+	// The length is checked before the byte, not beside it: an if-statement's
+	// initialiser runs whatever the condition then says, so indexing in there
+	// meant every keystroke reaching this line was indexed unguarded — and
+	// bubbletea's Key.String() returns "" for a key it has no name for, which
+	// panicked the whole program rather than being ignored as an unbound key.
+	if len(k) == 1 {
+		if n := strings.IndexByte("123456", k[0]); n >= 0 && n < len(signals) {
+			m.mode = modeNormal
+			return m.propose(m.signalEffect(signals[n]))
+		}
 	}
 	return m, nil
 }
@@ -762,7 +770,13 @@ func (m Model) applyLogs(msg logsMsg) Model {
 }
 
 func (m Model) applyDetail(msg detailMsg) Model {
-	if msg.sandbox != m.focusedName() {
+	// Wrong sandbox, or an answer to the question the operator has since
+	// changed: pressing `t` asks again, and the reply already in flight
+	// describes a host that was not probed for toolchains. Applying it would
+	// blank the pane back to "probing" for a moment. Clearing the flag anyway
+	// is what lets the pane ask again rather than waiting out an answer it
+	// threw away — the same shape the other two panes have.
+	if msg.sandbox != m.focusedName() || msg.toolchains != m.toolchains {
 		m.detailState.inFlight = false
 		return m
 	}
