@@ -43,8 +43,8 @@ func TestTUIIsRegisteredAndSaysWhatItIs(t *testing.T) {
 	assert.Contains(t, out, "full-screen")
 	// The two properties an operator most needs to know before pressing a key
 	// in it, both stated in the help rather than discovered.
-	assert.Contains(t, out, "asks first")
-	assert.Contains(t, out, "?")
+	assert.Contains(t, out, "asks first, naming the sandbox and the")
+	assert.Contains(t, out, "Press ? for the keys")
 
 	// And it is in the root listing, so it can be found without being known.
 	out, code = run(t, dir, "--help")
