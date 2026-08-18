@@ -51,6 +51,25 @@ builds:
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
 
+  # What `fleetctl tui` draws with, and the only binary here that links a
+  # terminal UI. It ships in the same archive as fleetctl rather than its own,
+  # because it is not a second thing to install: fleetctl looks for it beside
+  # itself, and an operator never types its name. Splitting the two across
+  # archives would turn the one command into two downloads, which is the cost
+  # #44 rejected. See internal/cli/fleetctl/handoff.go.
+  - id: fleet-tui
+    main: ./cmd/fleet-tui
+    binary: fleet-tui
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Version={{ .Version }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/axelmierczuk/fleet-mcp/internal/version.Date={{ .CommitDate }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
 archives:
   # The agent ships as its own archive, named predictably, because install.sh
   # constructs the download URL from OS and arch without consulting the API for
@@ -64,7 +83,7 @@ archives:
         formats: [zip]
 
   - id: tools
-    ids: [fleet-mcp, fleetctl]
+    ids: [fleet-mcp, fleetctl, fleet-tui]
     name_template: "fleet-tools_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     format_overrides:

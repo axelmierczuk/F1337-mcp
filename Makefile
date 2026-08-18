@@ -274,7 +274,7 @@ proto-check: proto
 	@git diff --exit-code -- gen/ \
 		|| { echo "gen/ is stale; run 'make proto' and commit the result"; exit 1; }
 
-## build: build all three binaries for the host platform
+## build: build every binary for the host platform
 .PHONY: build
 build:
 	@mkdir -p $(BIN_DIR)
@@ -339,7 +339,7 @@ test-norace:
 
 ## test-integration: run the end-to-end suite against the real binaries
 #
-# Not part of `check`, and not part of `test`: it builds three binaries, starts
+# Not part of `check`, and not part of `test`: it builds every binary, starts
 # a control plane and two agent daemons per scenario, and moves 24 MiB over a
 # real mTLS gRPC stream. Twenty seconds is cheap for what it covers and far too
 # expensive to pay on every `go test ./...`.

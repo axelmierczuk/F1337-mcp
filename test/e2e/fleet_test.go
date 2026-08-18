@@ -86,7 +86,7 @@ func newFleet(t *testing.T) *fleet {
 
 // ctlEnv is the environment every fleetctl and fleet-mcp invocation runs with.
 // FLEET_CONFIG_DIR is what keeps the CA, the token store, the registry and the
-// control leaf in one directory across all three binaries.
+// control leaf in one directory across every binary.
 //
 // TERM is here for `fleetctl shell`, which forwards it to the session: a
 // terminal type is what decides which escape sequences a full-screen program on

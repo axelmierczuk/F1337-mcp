@@ -1,0 +1,36 @@
+//go:build !windows
+
+package fleetctl
+
+import (
+	"fmt"
+	"syscall"
+)
+
+// execHelper replaces this process with the helper.
+//
+// It returns only on failure. Everything the operator's shell knows about this
+// command — the pid it will signal, the process group the terminal sends
+// SIGINT to, the job it will `wait` on — goes on referring to the program that
+// is now drawing, because it is the same process. A child would have broken all
+// three, and the end-to-end scenario notices: it records `stty -g` around a run
+// it kills by pid, which with a wrapper in the way would kill the wrapper and
+// read the terminal state of a view still running.
+func execHelper(path string, args []string) error {
+	// The path is not operator input: findHelper resolves it to a file named
+	// fleet-tui in this binary's own directory, or on PATH, and there is
+	// deliberately no environment variable that can redirect it. args is this
+	// process's own command line, passed as argv rather than through a shell —
+	// behind the resolved path, which is what lets the far side recognise
+	// itself on a host that cannot. See [helperArgv].
+	//
+	// The environment is passed rather than inherited — syscall.Exec takes it —
+	// so the marker [handOffEnv] puts in it is what crosses, and a fleetctl on
+	// the far side refuses to hand over again whatever it can work out about
+	// which file it is. See [handOffMarker].
+	if err := syscall.Exec(path, helperArgv(path, args), handOffEnv(path)); err != nil { //nolint:gosec // see above
+		return fmt.Errorf("run %s: %w", path, err)
+	}
+	// Unreachable: a successful Exec does not return.
+	return nil
+}

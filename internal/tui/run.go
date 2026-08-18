@@ -77,9 +77,6 @@ func (o Options) env() func(string) string {
 	return os.Getenv
 }
 
-// ErrNotATerminal is what a run without a terminal fails with.
-var ErrNotATerminal = errors.New("fleetctl tui needs a terminal")
-
 // Run draws the fleet until the operator quits or ctx is cancelled.
 //
 // The terminal is restored on every path out of here: a normal quit, an error,
@@ -281,19 +278,6 @@ const resetSequence = "\x1b[?1049l\x1b[?25h"
 // path sends it" is something a test can watch happen; see [guardTerminal] for
 // why only that path may.
 func writeReset(w io.Writer) { _, _ = io.WriteString(w, resetSequence) }
-
-// RequireTerminal refuses a run that has no terminal to draw on.
-//
-// A full-screen program whose output is a pipe produces escape sequences and no
-// frames, which reads as a hang. Saying so, and naming the command that does
-// have machine-readable output, is the difference between a bug report and a
-// second try.
-func RequireTerminal(f *os.File) error {
-	if f == nil || !term.IsTerminal(f.Fd()) {
-		return fmt.Errorf("%w: stdout is not one. `fleetctl list --json` is the scriptable view of the same data", ErrNotATerminal)
-	}
-	return nil
-}
 
 // ------------------------------------------------------- bubbletea adapter
 

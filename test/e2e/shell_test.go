@@ -171,11 +171,12 @@ func (c *shellClient) resized(columns, rows int) {
 // against them.
 const (
 	terminalQuery = "\x1b]11;?\x1b\\"
+	cursorQuery   = "\x1b[6n"
 	terminalReply = "\x1b]11;rgb:0000/0000/0000\a\x1b[1;1R"
 )
 
 // terminalQueries strips what the client wrote to ask. See terminalQuery.
-var terminalQueries = strings.NewReplacer(terminalQuery, "", "\x1b[6n", "")
+var terminalQueries = strings.NewReplacer(terminalQuery, "", cursorQuery, "")
 
 // printed is everything the client has rendered so far.
 func (c *shellClient) printed() string { return terminalQueries.Replace(c.output.String()) }

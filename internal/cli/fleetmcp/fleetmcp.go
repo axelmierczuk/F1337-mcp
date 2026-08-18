@@ -109,7 +109,7 @@ func newServeCommand() *cobra.Command {
 
 // resolveConfigDir honours the flag first and FLEET_CONFIG_DIR after it,
 // via registry.ConfigDir, so one directory holds the registry, the CA and the
-// control leaf no matter which of the three binaries opened it.
+// control leaf no matter which binary opened it.
 func resolveConfigDir(flagValue string) (string, error) {
 	if flagValue != "" {
 		return filepath.Clean(flagValue), nil

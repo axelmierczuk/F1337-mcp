@@ -22,7 +22,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/axelmierczuk/fleet-mcp/internal/platform"
@@ -30,7 +32,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: helpers <serve|serve-when|spew|tree|sleep|winsize> ...")
+		fail("usage: helpers <serve|serve-when|spew|tree|sleep|winsize|tui> ...")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -45,6 +47,8 @@ func main() {
 		sleepForever()
 	case "winsize":
 		winsize()
+	case "tui":
+		handedOver()
 	default:
 		fail("unknown command " + os.Args[1])
 	}
@@ -53,6 +57,68 @@ func main() {
 func fail(msg string) {
 	fmt.Fprintln(os.Stderr, "helpers:", msg)
 	os.Exit(2)
+}
+
+// handedOverStatus is what the stand-in helper exits with: an unremarkable
+// number nothing else in the suite produces, so reading it back means it came
+// from here rather than from something failing on the way. Kept in step with
+// test/e2e's stubHelperStatus.
+const handedOverStatus = 17
+
+// handOffMarker is the environment variable `fleetctl tui` sets on the helper
+// it hands the terminal to, spelled out because it is unexported where it is
+// defined (internal/cli/fleetctl/handoff.go).
+//
+// It is the whole of what stops a second hand-off, and the far side is the only
+// place it can be observed. Two spellings that drift apart read back as an
+// empty value, which is what the scenario asserts against.
+const handOffMarker = "FLEET_TUI_HANDED_OFF"
+
+// handedOver stands in for fleet-tui, and records everything about a hand-off
+// that only the far side can see.
+//
+// It answers to "tui" because that is the subcommand `fleetctl tui` forwards,
+// so a copy of this binary installed under the helper's name is reached by the
+// command an operator types, with nothing arranged around it.
+//
+// A compiled program rather than the shell script this used to be, for one
+// reason: a `#!/bin/sh` file cannot observe argv[0]. The kernel drops the
+// caller's argv[0] when it runs a script and puts the script's own path there
+// instead, so the one thing the hand-off's self-guard rests on — that argv[0]
+// names the resolved helper, which on a host without /proc is the only identity
+// the far side has — was invisible to a scenario written with a script. It
+// stayed invisible while the whole suite was green.
+func handedOver() {
+	dir := os.Getenv("FLEET_HANDOFF_DIR")
+	if dir == "" {
+		fail("tui: FLEET_HANDOFF_DIR is not set, so there is nowhere to record the hand-off")
+	}
+
+	// One bracketed argument per line, never joined: an argv taken apart and
+	// put back together as a single argument, or one that lost an empty value,
+	// reads back exactly like the list that was forwarded. The count is
+	// recorded beside it because the bracketing is not quite injective — one
+	// argument holding "]\n[" renders as two holding "]" and "[".
+	var argv strings.Builder
+	for _, a := range os.Args[1:] {
+		fmt.Fprintf(&argv, "[%s]\n", a)
+	}
+	for name, content := range map[string]string{
+		"argv0":      os.Args[0],
+		"argc":       strconv.Itoa(len(os.Args) - 1),
+		"argv":       strings.TrimSpace(argv.String()),
+		"helper-pid": strconv.Itoa(os.Getpid()),
+		// The marker that says a hand-off has happened, which only the far
+		// side can see. A fleetctl reading it refuses to hand over again, so
+		// this is the one recorded value that is a guard rather than a
+		// promise about the command line.
+		"handed-to": os.Getenv(handOffMarker),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			fail("tui: record " + name + ": " + err.Error())
+		}
+	}
+	os.Exit(handedOverStatus)
 }
 
 // serve runs an HTTP server on a loopback port, and announces itself on stdout

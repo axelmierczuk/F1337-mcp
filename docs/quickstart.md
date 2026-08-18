@@ -12,7 +12,11 @@
 ```sh
 go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-mcp@latest
 go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest
 ```
+
+The third is what `fleetctl tui` draws with. Everything else works without it —
+`fleetctl` looks for it next to itself, and says so if it is not there.
 
 ## 2. Create a fleet CA
 
