@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kardianos/service"
 )
@@ -48,9 +49,44 @@ type scheduledTask struct {
 	// which is what every real install uses. A test supplies its own, and that
 	// is the only way anything on any runner here sees the argv.
 	run func(args ...string) error
+	// endBudget bounds Restart's wait for the instance it ended. Zero means
+	// taskEndBudget, which is what every real command uses.
+	endBudget time.Duration
 	// stateDir is where Status looks for the report the running daemon wrote.
-	// nil means stateDirForStatus, which is what every real command uses.
+	// nil means reportDir, which prefers the state directory this task was
+	// built with.
 	stateDir func() string
+}
+
+// reportDir is the state directory Status reads the daemon's own record out of.
+//
+// params.StateDir first, because a registration built by `install` was built
+// from a resolved config and `install` takes --config. stateDirForStatus
+// re-discovers a config instead, and the two are the same directory only when
+// the operator did not move it: `install --config D:\fleet\agent.yaml` on a
+// host that also carries C:\ProgramData\fleet\agent.yaml asked the wrong
+// directory whether the daemon was running, and got "no", because that
+// directory holds another agent's record or none at all.
+//
+// What that cost is the whole of the replacement. `install` decides three
+// things on this answer: whether to warn that removing the task will terminate
+// every process the agent supervises, whether to stop it first, and whether to
+// start the new registration afterwards. A wrong "not running" skips all three
+// — so `/Delete` ends the task anyway, taking the supervised processes with it
+// with nothing said, and the agent is left down. The fifth audit round found
+// the same mistaken directory in `service status`, where it printed `running`
+// with no record to show for it; this is the same gap in the command that acts.
+//
+// An empty StateDir — a config that does not set one — falls back to the
+// discovery every other command uses.
+func (t *scheduledTask) reportDir() string {
+	if t.stateDir != nil {
+		return t.stateDir()
+	}
+	if t.params.StateDir != "" {
+		return t.params.StateDir
+	}
+	return stateDirForStatus()
 }
 
 // schtasks invokes the Task Scheduler command-line tool.
@@ -111,7 +147,8 @@ func (t *scheduledTask) Stop() error {
 	return nil
 }
 
-// Restart ends the task and starts it again.
+// Restart ends the task, waits for what it ended to be gone, and starts it
+// again.
 //
 // The end is best-effort on purpose, which is the difference between this and
 // the obvious `if err := Stop(); err != nil { return err }`. `schtasks /End`
@@ -121,8 +158,25 @@ func (t *scheduledTask) Stop() error {
 // Refusing to start because the stop failed leaves the agent down with a
 // "note:" line as the only sign of it — the whole point of the restart is to
 // be running the new definition, and the start is the half that achieves it.
+//
+// The wait between them is what makes the start mean anything, and it is there
+// because neither verb is what it looks like. `/End` asks the scheduler to
+// terminate the instance and returns; it does not wait for it. `/Run` asks the
+// scheduler to start one, and this definition sets MultipleInstancesPolicy
+// IgnoreNew — deliberately, so a second logon does not start a second daemon —
+// which means a run requested while the previous instance is still on its way
+// out is *dropped*. schtasks prints "SUCCESS: Attempted to run the scheduled
+// task" and exits zero either way, so `service restart` reported success and
+// left the agent down, intermittently, with nothing anywhere to read.
+//
+// It is waited out against the daemon's own record rather than against
+// anything schtasks prints, for the reason Status is: every human-readable
+// field the scheduler prints is localised, and an exit code cannot say "still
+// running". The record is the process saying which process it is, and the
+// instance is over when that process is gone.
 func (t *scheduledTask) Restart() error {
 	stopErr := t.Stop()
+	t.awaitEnded()
 	if err := t.Start(); err != nil {
 		if stopErr != nil {
 			return fmt.Errorf("%w (ending it first also failed: %w)", err, stopErr)
@@ -130,6 +184,35 @@ func (t *scheduledTask) Restart() error {
 		return err
 	}
 	return nil
+}
+
+// taskEndBudget bounds the wait for the instance `/End` was asked to end.
+//
+// Ending a task is a termination, not a drain — Task Scheduler kills the job —
+// so a daemon that is still there after this long is one nothing here is going
+// to outlast, and starting anyway is better than refusing to. It is a ceiling
+// that is not reached on a host where the end worked.
+const taskEndBudget = 5 * time.Second
+
+// taskEndPoll is how often the daemon's record is re-read while waiting.
+const taskEndPoll = 50 * time.Millisecond
+
+// awaitEnded waits, bounded, until no daemon is running out of this task's
+// state directory. It returns immediately when there is nothing to wait for,
+// which is every case except the one it exists for.
+func (t *scheduledTask) awaitEnded() {
+	budget := t.endBudget
+	if budget <= 0 {
+		budget = taskEndBudget
+	}
+	stateDir := t.reportDir()
+	deadline := time.Now().Add(budget)
+	for liveRuntimeReport(stateDir) != nil {
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(taskEndPoll)
+	}
 }
 
 // installed reports whether a task is registered under the agent's name.
@@ -153,11 +236,7 @@ func (t *scheduledTask) Status() (service.Status, error) {
 	if !t.installed() {
 		return service.StatusUnknown, service.ErrNotInstalled
 	}
-	stateDir := t.stateDir
-	if stateDir == nil {
-		stateDir = stateDirForStatus
-	}
-	if liveRuntimeReport(stateDir()) != nil {
+	if liveRuntimeReport(t.reportDir()) != nil {
 		return service.StatusRunning, nil
 	}
 	return service.StatusStopped, nil

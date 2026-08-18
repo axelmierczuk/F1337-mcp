@@ -265,7 +265,21 @@ asked for, and on Windows those are spelled differently: `CreateService` takes
 `NT AUTHORITY\NetworkService` and `LookupAccountSid` gives back the display name
 for the same well-known SID, `NT AUTHORITY\NETWORK SERVICE`. Both are recognised
 as the same built-in identity, in the report and in `--user`. The two disagreeing
-is itself worth seeing, which is why the record keeps the platform's answer. The
+is itself worth seeing, which is why the record keeps the platform's answer.
+
+**And the record keeps the account's SID beside its name, because the name is
+not a stable string.** `LookupAccountSid` returns a *display* name, and Windows
+localises those: the account this whole document is about is spelled with
+different letters on a German or French installation than on an English one.
+There is no list of spellings that can be kept complete and no amount of case-
+or space-folding that reaches them, so a verdict drawn from the name alone
+cannot fire on a host whose display language is not English — it falls through
+to the named-account case, which tells the operator their agent's "profile was
+never loaded", and with `%USERPROFILE%` unset through that one too, into plain
+`running`. `S-1-5-18`, `S-1-5-19` and `S-1-5-20` are those three strings on
+every installation of Windows in every language. Either spelling is enough:
+`account_sid` is empty off Windows, and on a host whose token could not be read,
+and the name decides it there exactly as before. The
 probe looks on disk for the directories a toolchain installs into when it is
 installed for one user — `.cargo\bin`, `AppData\Roaming\npm`, `scoop\shims`,
 `.local/bin` and the rest — and then asks whether the `PATH` the exec service
@@ -371,9 +385,34 @@ with a definition marked for deletion and no replacement. And when the thing
 being stopped is a Scheduled Task, stopping it ends the processes the agent
 supervises, so `install` prints the same warning `stop` does before it happens.
 
+**Which is why the agent comes back through a *start*, not a restart.** The stop
+above is what makes the definition `install` writes a freshly created one that
+has never run, and none of the three managers will restart that. `kardianos`'s
+Windows `Restart` is `ControlService(SERVICE_CONTROL_STOP)` followed by
+`StartService` and returns at the first failure, so the stop fails with
+`ERROR_SERVICE_NOT_ACTIVE` and `StartService` is never reached; launchd's
+unload-then-load has the same shape. `install` asks the registration what it is
+doing after the replacement lands and starts what is not running — which keeps
+systemd right too, since `systemctl disable` plus removing the unit file leaves
+the process up, so the replacement really is still running there and
+`systemctl restart` is what puts it on the new definition.
+
 If the write fails after the old registration is gone, the host has no agent
 registered on it at all, and the error says so rather than leaving "install
-failed" to be read as "nothing happened".
+failed" to be read as "nothing happened". A *removal* that fails says so too,
+and says something different: the daemon was stopped so the definition could be
+replaced, so the agent is down whatever the manager did with the definition.
+`service restart` under the task mechanism waits for the instance it ended
+before asking for a new one. Neither verb is what it looks like: `schtasks /End`
+asks the scheduler to terminate the instance and returns without waiting, and
+the definition sets `MultipleInstancesPolicy` `IgnoreNew` — deliberately, so a
+second logon does not start a second daemon — so a run requested while the
+previous instance is still on its way out is *dropped*, with `schtasks` printing
+"SUCCESS: Attempted to run the scheduled task" and exiting zero either way. The
+wait is against the daemon's own `runtime.json` rather than anything `schtasks`
+prints, for the reason `status` is: every human-readable field the scheduler
+prints is localised, and an exit code cannot say "still running".
+
 `start`, `stop`, `restart` and `uninstall` act on **every** registration the
 host carries, and keep going when one of them refuses — a `stop` that stops the
 service and returns before it reaches the task leaves the daemon an operator
@@ -567,6 +606,19 @@ fleet-agent service status                  # running; per-user toolchains: visi
 Get-ScheduledTask fleet-agent | Format-List TaskName, State
 Get-ScheduledTaskInfo fleet-agent
 
+# `runs as:` must be YOUR account. If this host makes you elevate with a
+# *different* administrator account — UAC's over-the-shoulder prompt, which is
+# what a standard user gets — then `install` defaulted to that administrator,
+# and a logon-triggered task for an account nobody signs in as never starts.
+# Re-run it with `--user <your account>`.
+
+fleet-agent service restart
+fleet-agent service status                  # running again, with a new pid
+#   `restart` ends the task and runs it again. Ending a task is asynchronous and
+#   the definition sets MultipleInstancesPolicy IgnoreNew, so a run asked for
+#   too early is dropped by the scheduler with schtasks still reporting success.
+#   If this ever reports `installed, stopped`, that is what happened.
+
 # The claim, checked from outside the agent: the daemon is in your session,
 # not in session 0.
 Get-Process fleet-agent | Select-Object Id, SessionId    # SessionId must not be 0
@@ -595,9 +647,13 @@ fleet-agent service uninstall
 fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
 fleet-agent service start
 fleet-agent service status                  # MUST print "running, but unusable"; exits 1
-#   and MUST name the account: `runs as: NT AUTHORITY\NETWORK SERVICE`, which is
-#   how LookupAccountSid spells the identity CreateService took without a space.
-#   The verdict is drawn from that name, so the two have to agree.
+#   `runs as:` is whatever LookupAccountSid calls S-1-5-20 on this host: on an
+#   English install `NT AUTHORITY\NETWORK SERVICE`, spelled with a space that
+#   CreateService's own spelling does not have, and on a localised install a
+#   name in that language. The verdict must fire either way — it is drawn from
+#   `account_sid` in the record as well as from the name.
+Get-Content C:\ProgramData\fleet\state\runtime.json | ConvertFrom-Json |
+  Select-Object account, account_sid    # account_sid must be S-1-5-20
 Get-Service fleet-agent                     # Running, StartType Automatic
 sc.exe qfailure fleet-agent                 # restart action, 5s delay
 fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
@@ -605,12 +661,20 @@ fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkServ
 #   starts it again. DeleteService only marks a running service for deletion, so
 #   without the stop this is where the replacement fails and the host is left
 #   with no registration.
+fleet-agent service status                  # MUST be running, not "installed, stopped"
+#   The stop is what makes the definition it writes a freshly created one that
+#   has never run, and a restart there is ControlService(STOP) first: it fails
+#   with ERROR_SERVICE_NOT_ACTIVE and never reaches StartService. So the agent
+#   has to come back through a *start*, and this is the line that says it did.
 fleet-agent service uninstall
 
 # And a service under a named account, which is the headless answer. It needs an
 # account that exists and has the "Log on as a service" right — without the
 # right the install is clean and every start fails with error 1069.
-net user build /add                         # if this host does not have one
+net user build * /add                       # if this host does not have one;
+#   the * prompts for a password, and the account needs one: the SCM will not
+#   log a service on with an empty one, and `install` refuses an empty answer at
+#   its own prompt.
 #   grant SeServiceLogonRight: secedit, or Local Security Policy > User Rights
 #   Assignment > Log on as a service. `install` prints the commands.
 fleet-agent service install --mechanism service --user "$env:COMPUTERNAME\build"

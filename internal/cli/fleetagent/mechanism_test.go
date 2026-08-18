@@ -141,6 +141,41 @@ func TestRunsInSessionZero_TheSpellingThePlatformReports(t *testing.T) {
 	}
 }
 
+// The two rules that ask about the same accounts have to agree about them.
+//
+// runsInSessionZero folds spaces and knows the well-known SIDs; isSuperuser
+// matched four literal strings and neither. So `--user S-1-5-18` — what a
+// report carries when the name lookup fails, and a perfectly good argument to
+// CreateService — was a session-0 identity to one rule and an ordinary account
+// to the other, which is a machine-account install with no warning that every
+// command the agent runs would run as the machine. `NT AUTHORITY\LocalSystem`,
+// which is how Microsoft's own documentation writes the account CreateService
+// takes as the bare word `LocalSystem`, was unknown to both: it resolved to a
+// logon-triggered task for an account that never logs on.
+func TestSuperuserAndSessionZeroAgree(t *testing.T) {
+	for _, account := range []string{
+		"LocalSystem",
+		`NT AUTHORITY\SYSTEM`,
+		`nt authority\system`,
+		`NT AUTHORITY\LocalSystem`,
+		"S-1-5-18",
+		" system ",
+	} {
+		assert.True(t, fleetagent.IsSuperuserForTest(account),
+			"%q is the machine account, and install has to say every command will run as it", account)
+		assert.True(t, fleetagent.RunsInSessionZeroForTest(account),
+			"%q can only be hosted by a service, so the mechanism rule has to know it too", account)
+	}
+	for _, account := range []string{`NT AUTHORITY\NETWORK SERVICE`, "LocalService", "S-1-5-20"} {
+		assert.False(t, fleetagent.IsSuperuserForTest(account),
+			"%q is confined, not all-powerful, and warning about it would be false", account)
+		assert.True(t, fleetagent.RunsInSessionZeroForTest(account))
+	}
+	for _, account := range []string{"axel", `CORP\build`, `WORKSTATION\systemsadmin`} {
+		assert.False(t, fleetagent.IsSuperuserForTest(account), "%q is an ordinary account", account)
+	}
+}
+
 // And the two rules that decide what an operator ends up with, driven with that
 // spelling: a built-in identity can only be a service, and asking for a task
 // under one is refused.
@@ -235,6 +270,8 @@ func TestExecutableAccessAdvice(t *testing.T) {
 		"it is inside axel's profile", `C:\Users\axel\Desktop\fleet-agent.exe`, `NT AUTHORITY\NetworkService`, "windows")
 	assert.Contains(t, advice, "error 5, access denied", "the string an operator will search for")
 	assert.Contains(t, advice, `Copy-Item`)
+	assert.NotContains(t, advice, `\\`,
+		"the remedy is pasted into a Windows shell, and %q would double every backslash in the path it names")
 	assert.Contains(t, advice, `C:\Program Files\fleet`)
 
 	// "linux", not runtime.GOOS. The parameter exists so that both platforms'

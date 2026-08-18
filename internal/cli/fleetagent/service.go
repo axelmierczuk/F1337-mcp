@@ -336,7 +336,7 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 			}
 		}
 		if err := svc.Uninstall(); err != nil {
-			return fmt.Errorf("replace existing service definition: %w", err)
+			return fmt.Errorf("replace existing service definition: %w%s", err, stoppedItNote(wasRunning))
 		}
 		p.Println("existing service definition removed for replacement")
 	}
@@ -377,20 +377,37 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	}
 
 	if wasRunning {
-		// Restart when there was a definition of this mechanism to restart, and
-		// Start when there was not.
+		// Restart only what is still running, and Start what is not.
 		//
-		// Not interchangeable: the SCM's Restart and launchd's are
-		// stop-then-start and give up when the stop fails, and stopping a
-		// service that has never run fails — ERROR_SERVICE_NOT_ACTIVE. A
-		// mechanism switch writes the definition moments earlier, so restarting
-		// it would report "could not be started" and leave the agent down,
-		// which is exactly the shape round 1 fixed inside
-		// scheduledTask.Restart, arriving through the two managers that are not
-		// the Task Scheduler.
+		// Not interchangeable, and the difference is decided by the state of
+		// the host at this line rather than by what it carried when the command
+		// began. The SCM's Restart and launchd's are stop-then-start and give
+		// up when the stop fails, and stopping something that is not running
+		// fails — ERROR_SERVICE_NOT_ACTIVE on Windows.
+		//
+		// Deciding it on `installed` was right while the same-mechanism
+		// replacement left the old daemon running through it. It stopped being
+		// right the moment that path learned to stop the service first, which
+		// it has to on Windows because DeleteService only marks a *running*
+		// service for deletion. So the definition is now written moments
+		// earlier and nothing is running under it — and Restart, on the one
+		// platform the stop was added for, reports "could not be started" and
+		// never calls Start. `service install` over its own running Windows
+		// service would replace the definition correctly and leave the agent
+		// down, which is what an upgrade does and what docs/service.md tells an
+		// operator is safe to re-run.
+		//
+		// Asking is cheap, is the same question `install` already asked to
+		// decide the replacement, and is right on all three managers: systemd
+		// keeps the old process alive across a unit replacement and answers
+		// active, so Linux still restarts.
+		running := false
+		if status, err := svc.Status(); err == nil && status == service.StatusRunning {
+			running = true
+		}
 		resume, moved := svc.Restart, false
-		if !installed {
-			resume, moved = svc.Start, true
+		if !running {
+			resume, moved = svc.Start, !installed
 		}
 		switch err := resume(); {
 		case err != nil:
@@ -488,7 +505,7 @@ func executableAccessOutcome(goos string, dryRun bool) (headline string, refuse 
 func foreignConfigDirNote(dir, account, goos string) []string {
 	fix := fmt.Sprintf("chown %s %s", account, dir)
 	if goos == "windows" {
-		fix = fmt.Sprintf("icacls %q /grant %q", dir, account+":(RX)")
+		fix = fmt.Sprintf("icacls %s /grant %s", winQuote(dir), winQuote(account+":(RX)"))
 	}
 	return []string{
 		fmt.Sprintf("NOTE: %s is not a directory fleet created, so it was left alone. The", dir),
@@ -497,6 +514,24 @@ func foreignConfigDirNote(dir, account, goos string) []string {
 		"        " + fix,
 	}
 }
+
+// winQuote wraps a command-line argument for an operator to paste into a
+// Windows shell.
+//
+// Not %q, which is Go string syntax: it escapes a backslash as two, and every
+// interesting value here has backslashes in it. A doubled path is survivable —
+// Win32 collapses repeated separators — but a doubled *account* is not, because
+// an account name is not a path and nothing collapses anything: `icacls ...
+// /grant "CORP\\build:(RX)"` fails with "No mapping between account names and
+// security IDs was done", which is a remedy that does not work handed to an
+// operator whose daemon cannot read its config. Neither cmd.exe nor PowerShell
+// treats a backslash as an escape inside double quotes, so the quotes alone are
+// what is wanted, and Windows admits neither a quote nor a newline in a path or
+// an account name.
+//
+// The rule was invisible because the only inputs it was ever given were a Unix
+// path and a bare account name, on the platform where neither shape occurs.
+func winQuote(arg string) string { return `"` + arg + `"` }
 
 // dryRunAccountNotes is what a dry run says about an account this host does not
 // have.
@@ -634,6 +669,28 @@ func servicePassword(in io.Reader, out io.Writer, account string, fromStdin bool
 	return password, nil
 }
 
+// stoppedItNote is what has to be said when `install` fails after it has
+// already stopped the daemon it was replacing.
+//
+// Both removals stop first, and on Windows they have to: DeleteService only
+// *marks* a running service for deletion, so the entry survives and the
+// CreateService that follows fails with "already exists". That makes a failure
+// between the stop and the new definition a different event from a failure
+// before it — the agent is down, and it is down because of this command. The
+// error alone reads as "nothing happened", which is round 4's finding about the
+// failed *write* arriving one step earlier, through the stop round 5 added.
+//
+// It says the agent is stopped rather than guessing at what the manager did
+// with the definition, because that is the part an operator can act on and the
+// part that is true whatever DeleteService managed.
+func stoppedItNote(wasRunning bool) string {
+	if !wasRunning {
+		return ""
+	}
+	return fmt.Sprintf("\n\nThe agent was running and was stopped so its definition could be replaced, so %s is not running now. Re-run `service install` once the cause above is fixed, or `service start` to bring back what is still registered",
+		ServiceName)
+}
+
 // otherMechanisms is every registration on this host that is not the one being
 // installed.
 //
@@ -700,7 +757,8 @@ func removeOtherMechanism(p *cli.Printer, keeping Mechanism) (replacedRegistrati
 			p.Printf("note: could not stop the existing %s before removing it: %v\n", m.Describe(), err)
 		}
 		if err := other.Uninstall(); err != nil {
-			return replaced, fmt.Errorf("remove the existing %s, which would otherwise start a second daemon against the same state directory: %w", m.Describe(), err)
+			return replaced, fmt.Errorf("remove the existing %s, which would otherwise start a second daemon against the same state directory: %w%s",
+				m.Describe(), err, stoppedItNote(replaced.running))
 		}
 		replaced.removed = append(replaced.removed, m)
 		p.Printf("removed the existing %s: one host, one agent\n", m.Describe())
@@ -1167,9 +1225,17 @@ func enrollmentDirIsOurs(dir string) bool {
 }
 
 // isSuperuser reports whether name is the platform's all-powerful account.
+//
+// Compared through sessionZeroKey, the same normalisation runsInSessionZero
+// uses, so the two rules cannot disagree about one account. They did: this one
+// matched four literal spellings while the other folded spaces and knew the
+// well-known SIDs, so `--user S-1-5-18` — what a report carries when the name
+// lookup fails — was refused as a session-0 identity by one rule and passed as
+// an ordinary account by this one, printing no warning that every command the
+// agent runs would run as the machine.
 func isSuperuser(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "root", "localsystem", "system", `nt authority\system`:
+	switch sessionZeroKey(name) {
+	case "root", "localsystem", "system", `ntauthority\system`, `ntauthority\localsystem`, "s-1-5-18":
 		return true
 	default:
 		return false

@@ -39,14 +39,20 @@ type Confinement struct {
 // Windows account names fold, an operator may well type "networkservice", and
 // the same identity arrives spelled with a space and without one.
 //
-// The last three are the well-known SIDs themselves, which is what
+// The last three are the well-known SIDs themselves. They are what
 // currentAccount records when LookupAccountSid cannot reach a name — a
-// domain-joined host that cannot see a domain controller. A report saying
-// `S-1-5-20` describes the same confined agent as one saying NetworkService.
+// domain-joined host that cannot see a domain controller — and, since a report
+// carries the SID beside the name, they are also the spelling that survives a
+// host whose display names are not English. See reportedRunsInSessionZero.
 var sessionZeroAccounts = []string{
 	`ntauthority\networkservice`,
 	`ntauthority\localservice`,
 	`ntauthority\system`,
+	// `NT AUTHORITY\LocalSystem` is how Microsoft's own documentation writes
+	// the account CreateService takes as the bare word `LocalSystem`, and an
+	// operator copying it in was getting a logon-triggered task for the
+	// machine account, with no warning that every command would run as it.
+	`ntauthority\localsystem`,
 	"networkservice",
 	"localservice",
 	"localsystem",
@@ -108,6 +114,28 @@ func runsInSessionZero(name string) bool {
 	return false
 }
 
+// reportedRunsInSessionZero is the same question asked of a whole report, which
+// carries two spellings of one account and only one of them holds still.
+//
+// rep.Account is what LookupAccountSid answered, and that is the *display* name
+// of the account on the installation that answered — which Windows localises.
+// The fifth audit round found this verdict unable to fire because the English
+// display name has a space in it that CreateService's spelling does not; a
+// German or French host does not spell it with those letters at all, so no
+// amount of folding reaches it and no list of spellings can be kept complete.
+// A report from such a host fell through to the named-account verdict, which
+// tells the operator their agent's "profile was never loaded" — untrue of the
+// account whose profile that is — and, with %USERPROFILE% unset, through that
+// one too, leaving the whole point of #74 reported as plain `running`.
+//
+// The SID does not move: S-1-5-18, -19 and -20 are those three strings on every
+// installation of Windows in every language, which is why Microsoft's own
+// guidance is to compare SIDs and never names. Either answer is enough, so a
+// host that could not produce a SID is judged exactly as it was before.
+func reportedRunsInSessionZero(rep *runtimeReport) bool {
+	return runsInSessionZero(rep.Account) || runsInSessionZero(rep.AccountSID)
+}
+
 // confinementFor decides whether what the daemon recorded about its own
 // environment describes an agent that cannot work.
 //
@@ -120,7 +148,7 @@ func confinementFor(rep *runtimeReport) *Confinement {
 	}
 
 	switch {
-	case rep.SessionZero && runsInSessionZero(rep.Account):
+	case rep.SessionZero && reportedRunsInSessionZero(rep):
 		return &Confinement{
 			Summary: "running, but unusable",
 			Detail: []string{

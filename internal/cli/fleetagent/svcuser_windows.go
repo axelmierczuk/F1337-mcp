@@ -113,6 +113,29 @@ func currentAccount() string {
 	return account
 }
 
+// currentAccountSID is the security identifier of the account this process is
+// running as, which is the only spelling of it that does not change.
+//
+// currentAccount is a *name*, and LookupAccountSid returns the display name the
+// running installation uses, which is localised: the account #74 is about is
+// spelled one way on an English host, another on a German one, and another
+// again on a French one. There is no list of spellings to keep up to date and
+// no amount of folding that reaches them. The fifth audit round found this same
+// verdict unable to fire because the name had a space in it; one locale over it
+// could not fire at all.
+//
+// So the report carries the SID beside the name and the judgement is drawn from
+// whichever of the two it recognises. S-1-5-18, -19 and -20 are the same three
+// strings on every installation of Windows in every language, which is the
+// reason Microsoft's own guidance is to compare SIDs and never names.
+func currentAccountSID() string {
+	u, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return ""
+	}
+	return u.User.Sid.String()
+}
+
 // inSessionZero reports whether this process is in Windows session 0.
 //
 // Session 0 is the whole of #74. It holds the services and nothing an operator

@@ -161,6 +161,26 @@ func NewScheduledTaskStatusForTest(run func(args ...string) error, stateDir stri
 	return &scheduledTask{run: run, stateDir: func() string { return stateDir }}
 }
 
+// NewScheduledTaskRestartForTest is the same lifecycle with the state directory
+// supplied and Restart's wait for the ended instance bounded to budget.
+//
+// The wait is the half of Restart that makes the start mean anything: `/End`
+// returns before the instance it ended is gone, and this definition's
+// MultipleInstancesPolicy is IgnoreNew, so a `/Run` issued too early is dropped
+// by the scheduler with schtasks still exiting zero. A budget is a parameter
+// because the behaviour under test is "it waits", and a test that waits the
+// shipped five seconds to prove it is a test nobody will keep.
+func NewScheduledTaskRestartForTest(run func(args ...string) error, stateDir string, budget time.Duration) ScheduledTaskForTest {
+	return &scheduledTask{run: run, endBudget: budget, stateDir: func() string { return stateDir }}
+}
+
+// NewScheduledTaskStateDirForTest builds the lifecycle the way `install` does —
+// from UnitParams, with no state directory supplied — so that which directory
+// Status reads is the thing under test.
+func NewScheduledTaskStateDirForTest(params UnitParams, run func(args ...string) error) ScheduledTaskForTest {
+	return &scheduledTask{params: params, run: run}
+}
+
 // StatusRunningForTest and friends name the states Status answers with, so a
 // test compares against the same values the commands switch on.
 const (
@@ -227,6 +247,15 @@ func InvokingServiceUserForTest(current string) (string, error) {
 // RunsInSessionZeroForTest reports whether an account is a built-in Windows
 // service identity, which is to say one with no operator profile.
 func RunsInSessionZeroForTest(account string) bool { return runsInSessionZero(account) }
+
+// IsSuperuserForTest reports whether an account is the platform's all-powerful
+// one, which is what decides whether `install` warns that every command the
+// agent runs will run as it.
+//
+// Exported beside RunsInSessionZeroForTest because the two rules ask about the
+// same accounts and used to normalise them differently, so one recognised a
+// spelling the other let through.
+func IsSuperuserForTest(account string) bool { return isSuperuser(account) }
 
 // WindowsExecutableAccessProblemForTest exposes the check that stops `install`
 // registering a binary the service account cannot read.
@@ -295,6 +324,7 @@ type RuntimeReportForTest struct {
 	PID         int
 	StartID     string
 	Account     string
+	AccountSID  string
 	Home        string
 	SessionZero bool
 	Visibility  string
@@ -310,6 +340,7 @@ func (r RuntimeReportForTest) internal() *runtimeReport {
 		Executable:  "fleet-agent",
 		Version:     "test",
 		Account:     r.Account,
+		AccountSID:  r.AccountSID,
 		Home:        r.Home,
 		SessionZero: r.SessionZero,
 		Profile: profileResult{
@@ -340,6 +371,19 @@ func ConfinementForTest(rep *RuntimeReportForTest) (summary string, detail, reme
 // through the same writer the daemon uses.
 func WriteRuntimeReportForTest(stateDir string, rep RuntimeReportForTest) error {
 	return writeRuntimeReport(stateDir, rep.internal())
+}
+
+// PinAccountIdentityForTest makes the daemon record the account a host would
+// have reported, rather than the one the runner is.
+//
+// The account is the fact the whole of #74's verdict is drawn from, and the
+// spelling a real Windows host reports is one no runner here can produce: a
+// localised display name and a well-known SID. Pinning it is the only way to
+// drive the collection with what a machine would actually give it.
+func PinAccountIdentityForTest(name, sid string) (restore func()) {
+	previous := currentIdentity
+	currentIdentity = func() accountIdentity { return accountIdentity{Name: name, SID: sid} }
+	return func() { currentIdentity = previous }
 }
 
 // ReportHomeForTest exposes which environment variable the daemon takes its
@@ -445,6 +489,15 @@ type InstallHostForTest struct {
 	FailBuild bool
 	// Legacy makes the host carry a service under the pre-rebrand name.
 	Legacy bool
+	// FailUninstall makes the removal refuse, which is what a manager that has
+	// already been asked to stop the daemon leaves behind: an agent that is
+	// down because of this command and a definition that is still there.
+	FailUninstall bool
+	// StopFails makes every stop refuse and leave the daemon running, which is
+	// how a replacement can land with something still up under it: install
+	// stops what it replaces, says so when it cannot, and carries on — a stop
+	// that failed is not a reason to refuse to write the new definition.
+	StopFails bool
 }
 
 // PinInstallForTest drives `service install` against that host, recording every
@@ -476,14 +529,14 @@ func PinInstallForTest(host InstallHostForTest) (calls func() []string, password
 	handed := new(string)
 	installedMechanisms = func() []Mechanism { return host.Installed }
 	controlRegistration = func(m Mechanism) (registration, error) {
-		return &installRegistration{label: string(m), mechanism: m, host: host, log: recorded}, nil
+		return newInstallRegistration(string(m), m, host, recorded, false), nil
 	}
 	newRegistration = func(m Mechanism, _ UnitParams, secret string) (registration, error) {
 		*handed = secret
 		if host.FailBuild {
 			return nil, fmt.Errorf("prepare service definition: no %s can be assembled here", m)
 		}
-		return &installRegistration{label: "new", mechanism: m, host: host, log: recorded, failInstall: host.FailInstall}, nil
+		return newInstallRegistration("new", m, host, recorded, host.FailInstall), nil
 	}
 	requireElevated = func(string) error { return nil }
 	legacyServiceInstalled = func() bool { return host.Legacy }
@@ -497,44 +550,114 @@ func PinInstallForTest(host InstallHostForTest) (calls func() []string, password
 }
 
 // installRegistration is a registration that says what it was asked to do and
-// answers Status from the host it was built for.
+// answers Status from what has been done to it.
 //
 // Status is not recorded: it is a query, and `install` asks it more than once
 // on purpose — the point of the recording is the sequence of things that change
 // the machine.
+//
+// It carries state, and refuses the way the real service managers refuse,
+// because the alternative hid a bug for a whole audit round. A fake whose Stop
+// always succeeds and whose Restart always succeeds asserts only that the
+// command called something; it cannot tell "restart what is running" from
+// "restart what this command stopped two lines ago", and those are the same
+// call with opposite outcomes. kardianos's Windows Restart is
+// ControlService(STOP) followed by StartService and returns at the first
+// failure, and stopping a service that is not running fails with
+// ERROR_SERVICE_NOT_ACTIVE; launchd's is unload-then-load with the same shape.
+// So a definition that has just been written and has never run cannot be
+// restarted, and this fake says so.
 type installRegistration struct {
-	label       string
-	mechanism   Mechanism
-	host        InstallHostForTest
-	log         *[]string
-	failInstall bool
+	label         string
+	mechanism     Mechanism
+	log           *[]string
+	failInstall   bool
+	failUninstall bool
+	stopFails     bool
+	installed     bool
+	running       bool
+}
+
+// newInstallRegistration starts one off in the state the host it addresses is
+// really in.
+func newInstallRegistration(label string, m Mechanism, host InstallHostForTest, log *[]string, failInstall bool) *installRegistration {
+	r := &installRegistration{label: label, mechanism: m, log: log, failInstall: failInstall, failUninstall: host.FailUninstall, stopFails: host.StopFails}
+	for _, installed := range host.Installed {
+		if installed == m {
+			r.installed = true
+			r.running = host.Running[m]
+		}
+	}
+	return r
 }
 
 func (r *installRegistration) record(verb string) error {
 	*r.log = append(*r.log, r.label+":"+verb)
-	if verb == "install" && r.failInstall {
+	return nil
+}
+
+func (r *installRegistration) Install() error {
+	if r.failInstall {
+		_ = r.record("install")
 		return fmt.Errorf("this host will not register a %s", r.mechanism)
+	}
+	// A definition that has just been written is registered, and is running
+	// only where the daemon it replaced was never actually stopped. That is
+	// the state the choice between Start and Restart turns on.
+	r.installed = true
+	return r.record("install")
+}
+
+func (r *installRegistration) Uninstall() error {
+	if r.failUninstall {
+		_ = r.record("uninstall")
+		return fmt.Errorf("%s: the specified service has been marked for deletion", r.mechanism)
+	}
+	r.installed = false
+	return r.record("uninstall")
+}
+
+func (r *installRegistration) Start() error {
+	r.running = true
+	return r.record("start")
+}
+
+func (r *installRegistration) Stop() error {
+	if r.stopFails {
+		_ = r.record("stop")
+		return fmt.Errorf("%s: this host would not stop it", r.mechanism)
+	}
+	if !r.running {
+		_ = r.record("stop")
+		// What ControlService answers for a service that is not running, and
+		// what makes the Restart below give up.
+		return fmt.Errorf("%s: the service has not been started", r.mechanism)
+	}
+	r.running = false
+	return r.record("stop")
+}
+
+// Restart is stop-then-start, and it gives up when the stop fails — which is
+// what kardianos's Windows Restart and launchd's both do, and is the whole
+// reason a definition this command has just written and just stopped cannot be
+// restarted back into life.
+func (r *installRegistration) Restart() error {
+	_ = r.record("restart")
+	if !r.running {
+		return fmt.Errorf("%s: the service has not been started", r.mechanism)
 	}
 	return nil
 }
 
-func (r *installRegistration) Install() error   { return r.record("install") }
-func (r *installRegistration) Uninstall() error { return r.record("uninstall") }
-func (r *installRegistration) Start() error     { return r.record("start") }
-func (r *installRegistration) Stop() error      { return r.record("stop") }
-func (r *installRegistration) Restart() error   { return r.record("restart") }
-
 func (r *installRegistration) Status() (service.Status, error) {
-	for _, m := range r.host.Installed {
-		if m != r.mechanism {
-			continue
-		}
-		if r.host.Running[m] {
-			return service.StatusRunning, nil
-		}
+	switch {
+	case r.running:
+		return service.StatusRunning, nil
+	case r.installed:
 		return service.StatusStopped, nil
+	default:
+		return service.StatusUnknown, service.ErrNotInstalled
 	}
-	return service.StatusUnknown, service.ErrNotInstalled
 }
 
 // ForeignConfigDirNoteForTest exposes what install says about a config
