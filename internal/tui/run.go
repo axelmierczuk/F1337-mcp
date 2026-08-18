@@ -231,24 +231,43 @@ func guardTerminal(f *os.File) func(panicked bool) {
 	if err != nil {
 		return func(bool) {}
 	}
-	return restoreTerminal(func() { _ = term.Restore(f.Fd(), state) }, f)
+	return restoreTerminal(func() error { return term.Restore(f.Fd(), state) }, f)
 }
 
 // restoreTerminal is the decision [guardTerminal] makes once there is a
-// terminal to put back: the mode goes back whichever way this was reached, and
-// the escape sequences on the panic path only.
+// terminal to put back: the mode goes back whichever way this was reached, the
+// escape sequences go out on the panic path only, and a restore that did not
+// work is said out loud.
 //
 // It is its own function because guardTerminal returns a no-op for anything
 // that is not a terminal — which is every unit test, every pipe and every CI
-// runner — so the two lines that decide this were reachable from no test at
-// all. Sending the escapes on every path is the defect the last audit round
-// found and fixed; putting it back left the whole tree green, end-to-end suite
+// runner — so the decisions inside it were reachable from no test at all.
+// Sending the escapes on every path is the defect the last audit round found
+// and fixed; putting it back left the whole tree green, end-to-end suite
 // included.
-func restoreTerminal(restoreMode func(), out io.Writer) func(panicked bool) {
+//
+// The failure is reported rather than discarded because of what it costs. On a
+// clean exit bubbletea has already put the mode back and this call is a no-op,
+// so an error here means the restore that mattered — the panic path, or a
+// bubbletea shutdown that did not finish — did not happen, and the operator is
+// holding a shell that no longer echoes. `reset` is the fix and a program that
+// has exited cannot tell them so. It is the same sentence `fleetctl shell`
+// prints for the same failure; the two commands own raw mode differently, but
+// this part of the job is one job.
+//
+// The order is deliberate: leave the alternate screen first when there is one
+// to leave, or the sentence is written on a screen that is about to be
+// discarded. CRLF rather than LF because a terminal whose mode could not be
+// restored is still in raw mode, where a bare newline moves down a line
+// without returning to column one.
+func restoreTerminal(restoreMode func() error, out io.Writer) func(panicked bool) {
 	return func(panicked bool) {
-		restoreMode()
+		err := restoreMode()
 		if panicked {
 			writeReset(out)
+		}
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "\r\nfleetctl: could not restore the terminal (%v); run `reset` to fix it\r\n", err)
 		}
 	}
 }

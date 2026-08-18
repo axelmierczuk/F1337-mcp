@@ -501,7 +501,7 @@ func TestTheResetSequenceIsWrittenOnlyOnThePanicPath(t *testing.T) {
 
 	var out strings.Builder
 	modes := 0
-	restore := restoreTerminal(func() { modes++ }, &out)
+	restore := restoreTerminal(func() error { modes++; return nil }, &out)
 
 	restore(false)
 	require.Equal(t, 1, modes, "a clean exit must still put the terminal mode back")
@@ -512,4 +512,38 @@ func TestTheResetSequenceIsWrittenOnlyOnThePanicPath(t *testing.T) {
 	require.Equal(t, 2, modes, "the panic path must put the terminal mode back too")
 	require.Equal(t, resetSequence, out.String(),
 		"the panic path is the one bubbletea has not already covered, and the one that needs the escapes")
+}
+
+// TestARestoreThatDidNotWorkIsSaidOutLoud.
+//
+// On a clean exit bubbletea has already put the mode back and this call is a
+// no-op, so a failure here means the restore that mattered did not happen —
+// and what the operator is holding is a shell that no longer echoes. It was
+// discarded with `_ =`. `fleetctl shell` prints the same sentence for the same
+// failure, which is the one part of the two commands' terminal handling that
+// really is the same job.
+func TestARestoreThatDidNotWorkIsSaidOutLoud(t *testing.T) {
+	t.Parallel()
+
+	for _, panicked := range []bool{false, true} {
+		var out strings.Builder
+		restoreTerminal(func() error { return errors.New("inappropriate ioctl for device") }, &out)(panicked)
+
+		require.Contains(t, out.String(), "could not restore the terminal",
+			"a failed restore was swallowed; the operator has no working shell and no idea why")
+		require.Contains(t, out.String(), "run `reset` to fix it",
+			"the report does not say what to type")
+		require.Contains(t, out.String(), "inappropriate ioctl for device",
+			"the report loses the reason")
+		// CRLF, because a terminal whose mode could not be restored is still in
+		// raw mode, where a bare newline does not return to column one.
+		require.Contains(t, out.String(), "\r\n")
+
+		if panicked {
+			// And the sentence lands on the primary screen rather than on the
+			// alternate one that is about to be discarded.
+			require.Less(t, strings.Index(out.String(), resetSequence), strings.Index(out.String(), "could not restore"),
+				"the report was written before the alternate screen was left, so nobody sees it")
+		}
+	}
 }
