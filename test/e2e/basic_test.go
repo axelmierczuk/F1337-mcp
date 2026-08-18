@@ -167,10 +167,10 @@ func TestToolSurfaceOverStdio(t *testing.T) {
 	s := f.connect(t)
 
 	names := s.tools()
-	if len(names) != 19 {
-		t.Fatalf("expected nineteen tools over the wire, got %d: %v", len(names), names)
+	if len(names) != 20 {
+		t.Fatalf("expected twenty tools over the wire, got %d: %v", len(names), names)
 	}
-	for _, want := range []string{"fleet_list", "fleet_select", "fleet_exec", "fleet_read", "fleet_forward"} {
+	for _, want := range []string{"fleet_list", "fleet_select", "fleet_exec", "fleet_read", "fleet_forward", "fleet_socks"} {
 		if !containsString(names, want) {
 			t.Fatalf("%s is missing from tools/list: %v", want, names)
 		}

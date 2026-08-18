@@ -71,7 +71,7 @@ func (x HealthResponse_Status) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use HealthResponse_Status.Descriptor instead.
 func (HealthResponse_Status) EnumDescriptor() ([]byte, []int) {
-	return file_sandboxd_v1_host_proto_rawDescGZIP(), []int{3, 0}
+	return file_sandboxd_v1_host_proto_rawDescGZIP(), []int{4, 0}
 }
 
 type GetHostInfoRequest struct {
@@ -135,8 +135,10 @@ type GetHostInfoResponse struct {
 	// Subject common name from the client certificate the agent authenticated,
 	// echoed back so the caller can confirm which identity it is using.
 	AuthenticatedPrincipal string `protobuf:"bytes,7,opt,name=authenticated_principal,json=authenticatedPrincipal,proto3" json:"authenticated_principal,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// What this agent will connect to on a caller's behalf.
+	ForwardPolicy *ForwardPolicy `protobuf:"bytes,8,opt,name=forward_policy,json=forwardPolicy,proto3" json:"forward_policy,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetHostInfoResponse) Reset() {
@@ -218,6 +220,114 @@ func (x *GetHostInfoResponse) GetAuthenticatedPrincipal() string {
 	return ""
 }
 
+func (x *GetHostInfoResponse) GetForwardPolicy() *ForwardPolicy {
+	if x != nil {
+		return x.ForwardPolicy
+	}
+	return nil
+}
+
+// ForwardPolicy is the agent's own account of its pivot configuration.
+//
+// It is reported for the same reason allowed_roots is: a caller has to be able
+// to find out what a host permits before it depends on it, and "the agent
+// refuses SOCKS" is far more useful arriving when a proxy is being started
+// than on the first connection through one. It describes configuration and is
+// never itself a boundary — the agent enforces this policy per connection,
+// whatever a caller has been told or believes.
+type ForwardPolicy struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether ForwardService is on at all (forward.enabled).
+	Enabled bool `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// Whether this agent will carry SOCKS5-proxied connections
+	// (forward.socks_enabled). False is the default.
+	SocksEnabled bool `protobuf:"varint,2,opt,name=socks_enabled,json=socksEnabled,proto3" json:"socks_enabled,omitempty"`
+	// The non-loopback hosts, addresses and CIDRs this agent will connect to
+	// (forward.allowed_hosts), as the operator wrote them.
+	//
+	// Empty is meaningful in two different ways depending on socks_enabled, and
+	// socks_enabled is the field a caller reads to tell them apart: with it off,
+	// empty means "loopback only"; with it on, empty means "any host this
+	// machine can reach". Do not derive that second reading here — read
+	// `unrestricted`, which is the agent's own answer to the same question and
+	// covers the spelling this list cannot show.
+	AllowedHosts []string `protobuf:"bytes,3,rep,name=allowed_hosts,json=allowedHosts,proto3" json:"allowed_hosts,omitempty"`
+	// Whether a proxy through this agent is bounded by nothing but the machine's
+	// own network.
+	//
+	// It is the agent's own judgement rather than something a caller derives
+	// from allowed_hosts, because "unrestricted" has more than one spelling: an
+	// empty list is one, and a list holding a block that covers its whole
+	// address family — `0.0.0.0/0` — is another that reads as narrowing and
+	// narrows nothing. A caller re-deriving it from the list would have to carry
+	// a copy of that rule, and the copy is what drifts; the agent is the half
+	// that already has to know.
+	//
+	// It is a description, never a boundary. What the agent will actually reach
+	// is decided per connection on the agent, from the same configuration.
+	Unrestricted  bool `protobuf:"varint,4,opt,name=unrestricted,proto3" json:"unrestricted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForwardPolicy) Reset() {
+	*x = ForwardPolicy{}
+	mi := &file_sandboxd_v1_host_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForwardPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForwardPolicy) ProtoMessage() {}
+
+func (x *ForwardPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_sandboxd_v1_host_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForwardPolicy.ProtoReflect.Descriptor instead.
+func (*ForwardPolicy) Descriptor() ([]byte, []int) {
+	return file_sandboxd_v1_host_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ForwardPolicy) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *ForwardPolicy) GetSocksEnabled() bool {
+	if x != nil {
+		return x.SocksEnabled
+	}
+	return false
+}
+
+func (x *ForwardPolicy) GetAllowedHosts() []string {
+	if x != nil {
+		return x.AllowedHosts
+	}
+	return nil
+}
+
+func (x *ForwardPolicy) GetUnrestricted() bool {
+	if x != nil {
+		return x.Unrestricted
+	}
+	return false
+}
+
 type HealthRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -226,7 +336,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_sandboxd_v1_host_proto_msgTypes[2]
+	mi := &file_sandboxd_v1_host_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -238,7 +348,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sandboxd_v1_host_proto_msgTypes[2]
+	mi := &file_sandboxd_v1_host_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -251,7 +361,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_sandboxd_v1_host_proto_rawDescGZIP(), []int{2}
+	return file_sandboxd_v1_host_proto_rawDescGZIP(), []int{3}
 }
 
 type HealthResponse struct {
@@ -268,7 +378,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_sandboxd_v1_host_proto_msgTypes[3]
+	mi := &file_sandboxd_v1_host_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -280,7 +390,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sandboxd_v1_host_proto_msgTypes[3]
+	mi := &file_sandboxd_v1_host_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -293,7 +403,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_sandboxd_v1_host_proto_rawDescGZIP(), []int{3}
+	return file_sandboxd_v1_host_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *HealthResponse) GetStatus() HealthResponse_Status {
@@ -330,7 +440,7 @@ const file_sandboxd_v1_host_proto_rawDesc = "" +
 	"\n" +
 	"\x16sandboxd/v1/host.proto\x12\vsandboxd.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x18sandboxd/v1/common.proto\"C\n" +
 	"\x12GetHostInfoRequest\x12-\n" +
-	"\x12include_toolchains\x18\x01 \x01(\bR\x11includeToolchains\"\xf4\x02\n" +
+	"\x12include_toolchains\x18\x01 \x01(\bR\x11includeToolchains\"\xb7\x03\n" +
 	"\x13GetHostInfoResponse\x121\n" +
 	"\bplatform\x18\x01 \x01(\v2\x15.sandboxd.v1.PlatformR\bplatform\x124\n" +
 	"\tresources\x18\x02 \x01(\v2\x16.sandboxd.v1.ResourcesR\tresources\x126\n" +
@@ -341,7 +451,13 @@ const file_sandboxd_v1_host_proto_rawDesc = "" +
 	"\rallowed_roots\x18\x05 \x03(\tR\fallowedRoots\x129\n" +
 	"\n" +
 	"started_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x127\n" +
-	"\x17authenticated_principal\x18\a \x01(\tR\x16authenticatedPrincipal\"\x0f\n" +
+	"\x17authenticated_principal\x18\a \x01(\tR\x16authenticatedPrincipal\x12A\n" +
+	"\x0eforward_policy\x18\b \x01(\v2\x1a.sandboxd.v1.ForwardPolicyR\rforwardPolicy\"\x97\x01\n" +
+	"\rForwardPolicy\x12\x18\n" +
+	"\aenabled\x18\x01 \x01(\bR\aenabled\x12#\n" +
+	"\rsocks_enabled\x18\x02 \x01(\bR\fsocksEnabled\x12#\n" +
+	"\rallowed_hosts\x18\x03 \x03(\tR\fallowedHosts\x12\"\n" +
+	"\funrestricted\x18\x04 \x01(\bR\funrestricted\"\x0f\n" +
 	"\rHealthRequest\"\x98\x02\n" +
 	"\x0eHealthResponse\x12:\n" +
 	"\x06status\x18\x01 \x01(\x0e2\".sandboxd.v1.HealthResponse.StatusR\x06status\x12\x18\n" +
@@ -371,33 +487,35 @@ func file_sandboxd_v1_host_proto_rawDescGZIP() []byte {
 }
 
 var file_sandboxd_v1_host_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_sandboxd_v1_host_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_sandboxd_v1_host_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_sandboxd_v1_host_proto_goTypes = []any{
 	(HealthResponse_Status)(0),    // 0: sandboxd.v1.HealthResponse.Status
 	(*GetHostInfoRequest)(nil),    // 1: sandboxd.v1.GetHostInfoRequest
 	(*GetHostInfoResponse)(nil),   // 2: sandboxd.v1.GetHostInfoResponse
-	(*HealthRequest)(nil),         // 3: sandboxd.v1.HealthRequest
-	(*HealthResponse)(nil),        // 4: sandboxd.v1.HealthResponse
-	(*Platform)(nil),              // 5: sandboxd.v1.Platform
-	(*Resources)(nil),             // 6: sandboxd.v1.Resources
-	(*Toolchain)(nil),             // 7: sandboxd.v1.Toolchain
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*ForwardPolicy)(nil),         // 3: sandboxd.v1.ForwardPolicy
+	(*HealthRequest)(nil),         // 4: sandboxd.v1.HealthRequest
+	(*HealthResponse)(nil),        // 5: sandboxd.v1.HealthResponse
+	(*Platform)(nil),              // 6: sandboxd.v1.Platform
+	(*Resources)(nil),             // 7: sandboxd.v1.Resources
+	(*Toolchain)(nil),             // 8: sandboxd.v1.Toolchain
+	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
 }
 var file_sandboxd_v1_host_proto_depIdxs = []int32{
-	5, // 0: sandboxd.v1.GetHostInfoResponse.platform:type_name -> sandboxd.v1.Platform
-	6, // 1: sandboxd.v1.GetHostInfoResponse.resources:type_name -> sandboxd.v1.Resources
-	7, // 2: sandboxd.v1.GetHostInfoResponse.toolchains:type_name -> sandboxd.v1.Toolchain
-	8, // 3: sandboxd.v1.GetHostInfoResponse.started_at:type_name -> google.protobuf.Timestamp
-	0, // 4: sandboxd.v1.HealthResponse.status:type_name -> sandboxd.v1.HealthResponse.Status
-	1, // 5: sandboxd.v1.HostService.GetHostInfo:input_type -> sandboxd.v1.GetHostInfoRequest
-	3, // 6: sandboxd.v1.HostService.Health:input_type -> sandboxd.v1.HealthRequest
-	2, // 7: sandboxd.v1.HostService.GetHostInfo:output_type -> sandboxd.v1.GetHostInfoResponse
-	4, // 8: sandboxd.v1.HostService.Health:output_type -> sandboxd.v1.HealthResponse
-	7, // [7:9] is the sub-list for method output_type
-	5, // [5:7] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	6, // 0: sandboxd.v1.GetHostInfoResponse.platform:type_name -> sandboxd.v1.Platform
+	7, // 1: sandboxd.v1.GetHostInfoResponse.resources:type_name -> sandboxd.v1.Resources
+	8, // 2: sandboxd.v1.GetHostInfoResponse.toolchains:type_name -> sandboxd.v1.Toolchain
+	9, // 3: sandboxd.v1.GetHostInfoResponse.started_at:type_name -> google.protobuf.Timestamp
+	3, // 4: sandboxd.v1.GetHostInfoResponse.forward_policy:type_name -> sandboxd.v1.ForwardPolicy
+	0, // 5: sandboxd.v1.HealthResponse.status:type_name -> sandboxd.v1.HealthResponse.Status
+	1, // 6: sandboxd.v1.HostService.GetHostInfo:input_type -> sandboxd.v1.GetHostInfoRequest
+	4, // 7: sandboxd.v1.HostService.Health:input_type -> sandboxd.v1.HealthRequest
+	2, // 8: sandboxd.v1.HostService.GetHostInfo:output_type -> sandboxd.v1.GetHostInfoResponse
+	5, // 9: sandboxd.v1.HostService.Health:output_type -> sandboxd.v1.HealthResponse
+	8, // [8:10] is the sub-list for method output_type
+	6, // [6:8] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_sandboxd_v1_host_proto_init() }
@@ -412,7 +530,7 @@ func file_sandboxd_v1_host_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_sandboxd_v1_host_proto_rawDesc), len(file_sandboxd_v1_host_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

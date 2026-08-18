@@ -1,6 +1,6 @@
 # Tool reference
 
-Nineteen tools. Conventions that apply to all of them:
+Twenty tools. Conventions that apply to all of them:
 
 - **Targeting.** Every tool below the Fleet group accepts an optional `sandbox`
   argument (name or handle) that overrides the sticky selection. With neither an
@@ -497,10 +497,10 @@ what is already open without a tool that does nothing else.
 Closes the remote dev loop: start a server with `fleet_process_start`, forward
 its port, then reach it over `localhost` exactly as if it were local.
 
-**Not implemented, deliberately.** There is no reverse forward (`ssh -R`) and no
-dynamic SOCKS proxy (`ssh -D`). The `ssh -L` framing above is the right mental
-model precisely because it is exact, and it would stop being useful if the two
-modes it does not cover were left ambiguous.
+**Not implemented, deliberately.** There is no reverse forward (`ssh -R`). The
+`ssh -L` framing above is the right mental model precisely because it is exact.
+Dynamic proxying (`ssh -D`) is [`fleet_socks`](#fleet_socks), which is a
+separate tool because the agent gates it separately.
 
 **Lifetime is owned by the MCP server, not by the call.** A forward stays open
 across unrelated tool calls until `stop: true` or the MCP server exits; the
@@ -530,6 +530,63 @@ themselves. Loopback forwards are not recorded. See
 The sandbox-side port is checked before a local listener is opened, so a
 forward pointed at a port nothing is serving fails with an error naming it,
 rather than leaving a local port that accepts connections and then drops them.
+
+### `fleet_socks`
+Open a SOCKS5 proxy that reaches the sandbox's network. **This is `ssh -D`.**
+
+```
+fleet_socks()
+  ==  ssh -D 1080 sandbox      (on a port it picks and reports)
+
+curl --socks5-hostname 127.0.0.1:<port> http://db.internal:5432/
+```
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `sandbox` | string | Name or handle. Defaults to the current selection. |
+| `local_port` | int | 0 (the default) picks a free port and reports it. |
+| `stop` | bool | Tear down this sandbox's proxy. |
+
+One proxy per sandbox, not per port — a proxy has no port until a client names
+one. Returns `local_address` and `allowed_hosts`, plus `active_proxies`: every
+proxy this MCP server holds, in the result of **every** call.
+
+**Use it for what a forward cannot reach**: a service the sandbox can see and
+the workstation cannot, where you do not know the port list in advance — a
+database on a private subnet, an internal registry, a staging host behind a
+bastion. For one known port, `fleet_forward` is simpler.
+
+**Names are resolved on the sandbox.** That is what `--socks5-hostname` selects
+in `curl`, and it is the whole reason to use a proxy rather than a forward: a
+private name means nothing to the workstation's resolver, so resolving it there
+reaches the wrong host or fails outright.
+
+**CONNECT only.** No BIND, no UDP ASSOCIATE — UDP would need a datagram path the
+transport does not have. Both are refused with the reply code RFC 1928 has for
+them rather than half-implemented.
+
+**The agent decides where it may reach**, in `forward.socks_enabled` and
+`forward.allowed_hosts`. `allowed_hosts` holds names, addresses and CIDR blocks;
+the result reports it, so a caller choosing destinations is not guessing.
+
+**This tool refuses an agent that permits every host.** An agent with
+`socks_enabled: true` and an empty `allowed_hosts` will proxy anywhere its
+network reaches, and `fleet_socks` will not open a proxy on those terms — that
+is a decision an operator made about their own workstation, not one this tool
+inherits on a model's behalf. An `allowed_hosts` that covers everything
+(`0.0.0.0/0`) is the same grant written differently and is refused the same way.
+`fleetctl socks` has no such rule. The refusal names the setting, the entry
+responsible, and the one line of config that fixes it. See
+[security.md](security.md#the-models-proxy) for why the two callers differ.
+
+**Every connection is audited**, on the same terms and in the same fields as a
+forward's: principal, destination host and port, address dialed, bytes each way,
+duration. Never the bytes themselves. A refused destination is recorded too.
+
+**Lifetime is owned by the MCP server**, exactly as a forward's is: the proxy
+stays open across unrelated tool calls until `stop: true` or the MCP server
+exits, and `fleet_remove` closes the proxy reaching through a sandbox it
+deregisters.
 
 ---
 

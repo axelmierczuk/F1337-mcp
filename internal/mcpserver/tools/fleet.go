@@ -486,6 +486,9 @@ type RemoveResult struct {
 	// ForwardsClosed are the local addresses of the port forwards that reached
 	// this sandbox and were torn down with it.
 	ForwardsClosed []string `json:"forwards_closed,omitempty"`
+	// ProxyClosed is the local address of the SOCKS proxy that reached through
+	// this sandbox, torn down with it for the same reason the forwards are.
+	ProxyClosed string `json:"proxy_closed,omitempty"`
 	// Note states what removal did not do.
 	Note string `json:"note"`
 }
@@ -535,6 +538,14 @@ func (r *Registrar) sandboxRemove(_ context.Context, _ *mcp.CallToolRequest, in 
 	if r.forwards != nil {
 		forwardsClosed = r.forwards.stopForSandbox(sb.Name)
 	}
+	// And the proxy, which is the same argument: a SOCKS listener whose sandbox
+	// this server can no longer dial accepts every connection and fails it, and
+	// a client pointed at a proxy has no way to tell that from the destinations
+	// being down.
+	var proxyClosed string
+	if r.proxies != nil {
+		proxyClosed = r.proxies.stopForSandbox(sb.Name)
+	}
 	if d.Clients != nil {
 		d.Clients.Remove(sb.Name)
 	}
@@ -544,10 +555,14 @@ func (r *Registrar) sandboxRemove(_ context.Context, _ *mcp.CallToolRequest, in 
 		note += fmt.Sprintf(" %d port forward(s) reaching it were closed with it (%s); a forward to a sandbox this server can no longer dial would accept connections and drop them.",
 			len(forwardsClosed), strings.Join(forwardsClosed, ", "))
 	}
+	if proxyClosed != "" {
+		note += fmt.Sprintf(" The SOCKS proxy through it (%s) was closed with it, for the same reason.", proxyClosed)
+	}
 
 	return RemoveResult{
 		SelectionsCleared: cleared,
 		ForwardsClosed:    forwardsClosed,
+		ProxyClosed:       proxyClosed,
 		Note:              note,
 	}, sb.Name, nil
 }

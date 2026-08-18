@@ -99,6 +99,7 @@ func NewRootCommand(out io.Writer) *cobra.Command {
 		newRemoveCommand(out),
 		newSelectCommand(out),
 		newShellCommand(out),
+		newSocksCommand(out),
 		newVersionCommand(out),
 	)
 	return root

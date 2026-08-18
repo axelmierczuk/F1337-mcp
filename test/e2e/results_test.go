@@ -158,6 +158,38 @@ type forwardResult struct {
 	Active       []forwardLine `json:"active_forwards"`
 }
 
+type removeResult struct {
+	Sandbox        string   `json:"sandbox"`
+	ForwardsClosed []string `json:"forwards_closed"`
+	ProxyClosed    string   `json:"proxy_closed"`
+	Note           string   `json:"note"`
+}
+
+type socksLine struct {
+	Sandbox      string   `json:"sandbox"`
+	LocalAddress string   `json:"local_address"`
+	LocalPort    int      `json:"local_port"`
+	AllowedHosts []string `json:"allowed_hosts"`
+	Connections  uint64   `json:"connections"`
+	LastError    string   `json:"last_error"`
+}
+
+type socksResult struct {
+	Sandbox string `json:"sandbox"`
+	// Address is the sandbox's, which is what the note's sentence is about.
+	Address      string   `json:"address"`
+	LocalAddress string   `json:"local_address"`
+	LocalPort    int      `json:"local_port"`
+	AllowedHosts []string `json:"allowed_hosts"`
+	// Unrestricted is `fleetctl socks`'s own field: the one posture worth a
+	// script being able to check without parsing a sentence.
+	Unrestricted bool        `json:"unrestricted"`
+	Stopped      bool        `json:"stopped"`
+	Existing     bool        `json:"existing"`
+	Active       []socksLine `json:"active_proxies"`
+	Note         string      `json:"note"`
+}
+
 type transferResult struct {
 	Sandbox     string `json:"sandbox"`
 	Direction   string `json:"direction"`
