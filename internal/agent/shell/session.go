@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -143,6 +144,10 @@ var errTerminalGone = errors.New("shell: the session terminal has been closed")
 // also be a liveness bug — a Write that blocks because the far end has stopped
 // reading its console would hold the lock the teardown needs.
 //
+// Fd is the one call left unguarded that would not be safe after the release:
+// go-pty's ConPTY hands back the raw pseudo-console handle and does not zero it
+// when it frees it. Nothing here calls it, and nothing should start.
+//
 // The pty is embedded rather than held in a field, and that is load-bearing:
 // Command is promoted, so the *go-pty* value is what ends up on the Cmd, and
 // go-pty's Start type-asserts it back to its own concrete type. A wrapper
@@ -151,6 +156,8 @@ var errTerminalGone = errors.New("shell: the session terminal has been closed")
 type sessionTerminal struct {
 	platform.PTY
 
+	log *slog.Logger
+
 	// mu orders a resize against the close that destroys the terminal: the
 	// resize takes it for reading, the close for writing, so the two can never
 	// overlap and a resize that lost the race sees closed rather than a freed
@@ -158,13 +165,16 @@ type sessionTerminal struct {
 	mu     sync.RWMutex
 	closed bool
 
-	// closeOnce releases the terminal, exactly once however many paths reach
-	// it. See the type comment.
-	closeOnce func() error
+	// begin starts the release exactly once however many paths reach it,
+	// released is closed when it has finished, and releaseErr is what it
+	// reported. See release.
+	begin      sync.Once
+	released   chan struct{}
+	releaseErr error
 }
 
-func newSessionTerminal(p platform.PTY) *sessionTerminal {
-	return &sessionTerminal{PTY: p, closeOnce: sync.OnceValue(p.Close)}
+func newSessionTerminal(p platform.PTY, log *slog.Logger) *sessionTerminal {
+	return &sessionTerminal{PTY: p, log: log, released: make(chan struct{})}
 }
 
 // Resize applies a new window size, unless the terminal has already gone.
@@ -177,12 +187,65 @@ func (t *sessionTerminal) Resize(columns, rows int) error {
 	return t.PTY.Resize(columns, rows)
 }
 
-// Close hangs the terminal up and shuts the door behind it.
+// release hangs the terminal up, shuts the door behind it, and gives it back —
+// starting the last of those rather than waiting for it. The returned channel
+// is closed once the release has finished.
+//
+// # Why nothing waits here
+//
+// [Service.reap] closes the terminal as its first step, because the hangup is
+// the half of a teardown an interactive shell understands and the only one that
+// reaches jobs in process groups this agent cannot name. On Windows that close
+// is ClosePseudoConsole, which does not return until the console host's
+// remaining output has somewhere to go — and the only reader of that pipe is
+// [session.pumpOutput].
+//
+// The pump is not always reading. It keeps reading after a send *fails*, which
+// is what a caller hanging up produces; that cannot help with a send that
+// neither fails nor returns. A client that is still connected and has stopped
+// reading parks the pump inside gRPC's flow control for as long as it stays
+// that way — the state [sender]'s own deadline exists to survive, so it is one
+// this package already expects — and a teardown that waited for the close would
+// then park at its own first statement with everything that makes a teardown a
+// teardown still below it: the group is never killed, the RPC never returns,
+// its process-limit slot is never released, and its audit record is never
+// written. One session per occurrence, for the life of the daemon.
+//
+// So nothing waits, and the close still finishes — by the same route that used
+// to be deadlocked. The handler returning is what ends the stream, ending the
+// stream is what unparks the pump, and the unparked pump drains the console the
+// close is waiting on. What changed is only that the handler is no longer
+// behind it.
+//
+// The door is shut synchronously, before the goroutine starts, and that part is
+// unchanged: taking the write lock waits for every resize already in flight,
+// and every later one sees closed rather than a handle that is about to be
+// freed.
+func (t *sessionTerminal) release() <-chan struct{} {
+	t.begin.Do(func() {
+		t.mu.Lock()
+		t.closed = true
+		t.mu.Unlock()
+
+		go func() {
+			defer close(t.released)
+			t.releaseErr = t.PTY.Close()
+			if t.releaseErr != nil {
+				t.log.Debug("releasing the session terminal reported an error; the session is being torn down anyway",
+					"error", t.releaseErr)
+			}
+		}()
+	})
+	return t.released
+}
+
+// Close releases the terminal and waits for the release to finish, which is
+// what an [io.Closer] promises and what anything reaching this through
+// [platform.PTY] would expect. The session's own teardown calls
+// [sessionTerminal.release] instead; its comment says why.
 func (t *sessionTerminal) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.closed = true
-	return t.closeOnce()
+	<-t.release()
+	return t.releaseErr
 }
 
 // session is one running terminal: the pseudo-terminal, the stream it is
@@ -221,7 +284,7 @@ func (s *Service) run(
 	spec sessionSpec,
 	rec *sessionAudit,
 ) error {
-	raw, err := platform.OpenPTY()
+	raw, err := s.openPTY()
 	if err != nil {
 		rec.outcome, rec.failure = policy.OutcomeError, "this host could not allocate a pseudo-terminal"
 		if errors.Is(err, platform.ErrUnsupported) {
@@ -229,12 +292,14 @@ func (s *Service) run(
 		}
 		return status.Errorf(codes.Internal, "allocating a pseudo-terminal: %s", err)
 	}
-	// Closed on every path out, and it is not only cleanup: on Unix this is the
-	// terminal hanging up, which is what tells the far end the session ended.
-	// Once, and through the same guard the teardown and the input pump use —
-	// see sessionTerminal.
-	tty := newSessionTerminal(raw)
-	defer func() { _ = tty.Close() }()
+	// Released on every path out, and it is not only cleanup: on Unix this is
+	// the terminal hanging up, which is what tells the far end the session
+	// ended. Once, and through the same guard the teardown and the input pump
+	// use — see sessionTerminal. Started rather than waited for, for the reason
+	// sessionTerminal.release gives: a handler that can park on this close is a
+	// handler that never returns.
+	tty := newSessionTerminal(raw, s.log)
+	defer func() { _ = tty.release() }()
 
 	// Before the command starts, so the shell's first prompt is drawn at the
 	// operator's real width rather than at 80 columns and then reflowed.
@@ -449,16 +514,15 @@ func (s *Service) await(ctx context.Context, sess *session, waited <-chan error)
 // survives, exactly as it does over ssh. That is a property of what they asked
 // for rather than a gap in this teardown.
 //
-// What makes the close safe as the *first* step is that something is still
-// draining the terminal while it runs: on Windows it does not return until the
-// console host's remaining output has somewhere to go, and on macOS a process
-// with output queued is held inside exit for the same reason. The only reader
-// is [session.pumpOutput], which is why a failed send there stops the sending
-// and not the reading. Read its comment before changing either.
+// What makes the close safe as the *first* step is that it is only *started*
+// here. On Windows it does not return until the console host's remaining output
+// has somewhere to go, and on macOS a process with output queued is held inside
+// exit for the same reason; the only reader is [session.pumpOutput], which is
+// why a failed send there stops the sending and not the reading — and why a
+// stalled one must not be able to stop this. See [sessionTerminal.release], and
+// read [session.pumpOutput] before changing either.
 func (s *Service) reap(sess *session, group *platform.ProcessGroup, waited <-chan error) bool {
-	if err := sess.tty.Close(); err != nil {
-		s.log.Debug("closing the session terminal reported an error; the session is being killed anyway", "error", err)
-	}
+	_ = sess.tty.release()
 
 	reaped := false
 	select {

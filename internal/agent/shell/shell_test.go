@@ -306,6 +306,51 @@ func TestSession_ActivityKeepsAnIdleTimeoutAtBay(t *testing.T) {
 	assert.Equal(t, int32(0), exit.GetExitCode())
 }
 
+// TestSession_OutputAloneKeepsAnIdleTimeoutAtBay is the half of that setting
+// which the test above cannot see, and which is the one an operator loses a
+// job to.
+//
+// "Either direction" is the promise — ShellConfig.IdleTimeout says so,
+// docs/security.md says so, and session.activity says so — and the whole point
+// of it is the session where only one direction is carrying anything: an
+// operator watching a long build types nothing for an hour while the build
+// prints continuously. The test above types *and* reads, so it holds with the
+// output half of the clock deleted; this one does not, because nothing here
+// ever types.
+func TestSession_OutputAloneKeepsAnIdleTimeoutAtBay(t *testing.T) {
+	requirePTY(t)
+
+	// Same margins, and for the same reason, as the test above: the assertion
+	// holds for any interval shorter than the timeout, so the gap between them
+	// only has to be wider than a round trip through a pty and a gRPC stream on
+	// a loaded machine.
+	const (
+		idle     = 2 * time.Second
+		interval = idle / 8
+		keepFor  = 2 * idle
+	)
+	svc := newService(t, options{shell: agent.ShellConfig{IdleTimeout: agent.Duration(idle)}})
+	client := serve(t, svc)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	sess, err := openSession(ctx, t, client,
+		openOptions("tick", strconv.FormatInt(interval.Milliseconds(), 10)))
+	require.NoError(t, err)
+
+	// A line the helper can only have printed after twice the idle timeout had
+	// passed, so a session reaped on time never produces it. Nothing is typed
+	// at the session between opening it and this arriving: the only thing
+	// keeping it alive is what it is printing.
+	sess.awaitOutput("tick " + strconv.Itoa(int(keepFor/interval)))
+
+	select {
+	case <-sess.done:
+		t.Fatalf("the session ended while its program was still printing: %s", sess.state())
+	default:
+	}
+}
+
 // TestAwait_IdleIsMeasuredFromTheLastByteRatherThanFromTheStart is the same
 // property without a terminal, and it is the one that cannot go flaky: it
 // asserts a lower bound on when the reaping happened, and a lower bound can
@@ -446,7 +491,7 @@ func TestSession_AProgramThatIgnoresTheHangupIsStillKilled(t *testing.T) {
 // names it rather than a comment alone.
 func TestSession_TheTerminalIsClosedExactlyOnce(t *testing.T) {
 	fake := &countingPTY{}
-	tty := newSessionTerminal(fake)
+	tty := newSessionTerminal(fake, slog.New(slog.DiscardHandler))
 
 	var wg sync.WaitGroup
 	for range 8 {
@@ -474,7 +519,7 @@ func TestSession_TheTerminalIsClosedExactlyOnce(t *testing.T) {
 // than a thought experiment.
 func TestSession_ATerminalIsNeverResizedAfterItIsClosed(t *testing.T) {
 	fake := &countingPTY{}
-	tty := newSessionTerminal(fake)
+	tty := newSessionTerminal(fake, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, tty.Resize(100, 40))
 	require.Equal(t, int32(1), fake.resizes.Load(), "a resize before the close has to reach the terminal")
@@ -496,7 +541,7 @@ func TestSession_ATerminalIsNeverResizedAfterItIsClosed(t *testing.T) {
 // have already lost.
 func TestSession_AResizeRacingTheCloseNeverReachesAFreedTerminal(t *testing.T) {
 	fake := &countingPTY{}
-	tty := newSessionTerminal(fake)
+	tty := newSessionTerminal(fake, slog.New(slog.DiscardHandler))
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -516,6 +561,112 @@ func TestSession_AResizeRacingTheCloseNeverReachesAFreedTerminal(t *testing.T) {
 		"a resize reached the terminal after it had been closed")
 }
 
+// TestSession_TheInputPumpGoesThroughTheGuardedTerminal is the missing half of
+// the two tests above, and the half this repository keeps leaving out.
+//
+// Those two assert what [sessionTerminal] does when it is asked. Nothing
+// asserted that the code which does the asking asks *it*: replacing
+// s.tty.Resize with s.tty.PTY.Resize in [session.pumpInput] — one embedded
+// field, no compile error, no failing test — puts back round one's
+// use-after-free in full, and the platform where it matters reports it as a
+// corrupted heap with no stack rather than as a failure.
+//
+// The same line is the only caller of [sizeOf] on the resize path, so the clamp
+// is asserted here too: an unclamped 70000 columns is not a wide terminal, it
+// is a four-column one, arrived at silently inside the ioctl's 16-bit
+// conversion.
+func TestSession_TheInputPumpGoesThroughTheGuardedTerminal(t *testing.T) {
+	fake := &countingPTY{}
+	tty := newSessionTerminal(fake, slog.New(slog.DiscardHandler))
+	sess := &session{svc: &Service{log: slog.New(slog.DiscardHandler)}, tty: tty}
+
+	sess.pumpInput(scripted(resizeTo(70000, 1<<20)))
+	require.Equal(t, int32(1), fake.resizes.Load(), "a resize from the client never reached the terminal at all")
+	assert.Equal(t, windowSize{columns: maxDimension, rows: maxDimension}, fake.size(),
+		"the client's exaggerated size reached the platform unclamped")
+
+	// And once the terminal has gone, the pump's resize is refused rather than
+	// handed to a freed pseudo-console.
+	require.NoError(t, tty.Close())
+	sess.pumpInput(scripted(resizeTo(120, 50)))
+
+	assert.Equal(t, int32(1), fake.resizes.Load(),
+		"a resize from the client reached a terminal that had already been released")
+	assert.Zero(t, fake.afterClose.Load(),
+		"the input pump resized the terminal after the teardown had released it")
+}
+
+// TestSession_TheOutputPumpGoesThroughTheSender is the same omission on the
+// other pump.
+//
+// [sender] is what keeps a ShellExit the last message on the stream — the wire
+// contract shell.proto states — and [TestSender_NothingFollowsTheSessionsExit]
+// asserts that it does. Nothing asserted that the pump uses it: sending on the
+// stream directly compiles, passes, and breaks the contract for every client,
+// because the pump is deliberately not joined before the exit goes out and on
+// Windows it is still reading by definition.
+func TestSession_TheOutputPumpGoesThroughTheSender(t *testing.T) {
+	stream := &recordingStream{}
+	send := newSender(stream)
+	require.NoError(t, send.within(time.Second, exit(&sessionAudit{}, false)))
+
+	sess := &session{
+		svc:  &Service{log: slog.New(slog.DiscardHandler)},
+		tty:  newSessionTerminal(&sayingPTY{say: []byte("output after the exit")}, slog.New(slog.DiscardHandler)),
+		send: send,
+	}
+	sess.pumpOutput()
+
+	assert.Equal(t, []string{"exit"}, stream.kinds(),
+		"the output pump reached the stream without going through the sender, so terminal output followed the session's exit")
+}
+
+// scripted is a stream that delivers reqs and then ends, which is what a client
+// half-closing looks like to [session.pumpInput].
+func scripted(reqs ...*sandboxdv1.ShellRequest) *scriptedStream {
+	return &scriptedStream{reqs: reqs}
+}
+
+func resizeTo(columns, rows uint32) *sandboxdv1.ShellRequest {
+	return &sandboxdv1.ShellRequest{
+		Event: &sandboxdv1.ShellRequest_Resize{Resize: &sandboxdv1.ShellSize{Columns: columns, Rows: rows}},
+	}
+}
+
+type scriptedStream struct {
+	grpc.ServerStream
+
+	reqs []*sandboxdv1.ShellRequest
+	at   int
+}
+
+func (s *scriptedStream) Recv() (*sandboxdv1.ShellRequest, error) {
+	if s.at >= len(s.reqs) {
+		return nil, io.EOF
+	}
+	s.at++
+	return s.reqs[s.at-1], nil
+}
+
+func (s *scriptedStream) Send(*sandboxdv1.ShellResponse) error { return nil }
+
+// sayingPTY prints once and then reports the hangup, which is a terminal whose
+// last process has gone.
+type sayingPTY struct {
+	countingPTY
+
+	say  []byte
+	said bool
+}
+
+func (p *sayingPTY) Read(b []byte) (int, error) {
+	if p.said {
+		return 0, io.EOF
+	}
+	p.said = true
+	return copy(b, p.say), nil
+}
+
 // countingPTY is a pseudo-terminal that never allocates anything, and reports
 // what was done to it after it was closed.
 //
@@ -528,6 +679,8 @@ type countingPTY struct {
 	resizes    atomic.Int32
 	afterClose atomic.Int32
 	closed     atomic.Bool
+	columns    atomic.Int32
+	rows       atomic.Int32
 }
 
 func (p *countingPTY) Read([]byte) (int, error) { return 0, io.EOF }
@@ -541,12 +694,19 @@ func (p *countingPTY) Close() error {
 	return nil
 }
 
-func (p *countingPTY) Resize(int, int) error {
+func (p *countingPTY) Resize(columns, rows int) error {
 	if p.closed.Load() {
 		p.afterClose.Add(1)
 	}
 	p.resizes.Add(1)
+	p.columns.Store(int32(columns)) //nolint:gosec // a test's own bounded dimensions
+	p.rows.Store(int32(rows))       //nolint:gosec // as above
 	return nil
+}
+
+// size is the last window the terminal was given.
+func (p *countingPTY) size() windowSize {
+	return windowSize{columns: int(p.columns.Load()), rows: int(p.rows.Load())}
 }
 
 func (p *countingPTY) Name() string                         { return "counting-pty" }
@@ -648,6 +808,180 @@ func TestSession_TheTerminalIsDrainedEvenWhenTheClientHasStoppedReading(t *testi
 		"the session's program did not run to completion behind a client that had stopped reading")
 	assert.False(t, rec.idle, "the session was reaped for idleness rather than ending when its program did")
 	assert.Equal(t, policy.OutcomeOK, rec.outcome)
+}
+
+// TestSession_TheLastOutputArrivesBeforeTheExitStatus covers the wait between
+// a session's command finishing and its status going out.
+//
+// A shell prints on its way out — "logout", a job-control warning, whatever the
+// last command left in the buffer — and a terminal does not stop producing the
+// moment the process behind it does. On Windows it emphatically does not: a
+// ConPTY's output pipe stays open until the pseudo-console is closed, so the
+// wait there is the only thing between the operator and a farewell they never
+// see. [sender] refuses everything after the exit, so a farewell that arrives
+// at all is one that arrived before it; there is nothing else to order.
+//
+// The terminal is one that still has something to say a moment after its
+// command has gone, which is the Windows behaviour staged on a platform that
+// does not have it — and staged as a delay rather than a race, so that a build
+// without the wait fails every time rather than most times.
+func TestSession_TheLastOutputArrivesBeforeTheExitStatus(t *testing.T) {
+	requirePTY(t)
+
+	const farewell = "logout-after-the-command-had-already-gone"
+	svc := newService(t, options{openPTY: lingeringPTY([]byte(farewell))})
+	client := serve(t, svc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sess, err := openSession(ctx, t, client, openOptions("exit", "0"))
+	require.NoError(t, err)
+
+	exit := sess.awaitEnd()
+	require.NotNil(t, exit, "the session never reported its status")
+	assert.Equal(t, int32(0), exit.GetExitCode())
+	assert.Contains(t, sess.printed(), farewell,
+		"the session's last output was dropped: its exit status went out while the terminal still had something to give, "+
+			"and nothing may follow a ShellExit")
+}
+
+// farewellDelay is how long the terminal below waits before its last words.
+// Well inside drainAfterExit, so the wait is what decides this rather than the
+// machine's load.
+const farewellDelay = 25 * time.Millisecond
+
+// lingeringPTY allocates a real terminal that still has something to say a
+// moment after its command has ended.
+func lingeringPTY(say []byte) func() (platform.PTY, error) {
+	return func() (platform.PTY, error) {
+		raw, err := platform.OpenPTY()
+		if err != nil {
+			return nil, err
+		}
+		return &lastWordPTY{PTY: raw, say: say}, nil
+	}
+}
+
+// lastWordPTY reads as the real terminal does until that read ends, and then
+// produces one more chunk before ending itself.
+//
+// Read is called only by the session's output pump, one goroutine, so the flag
+// needs no lock.
+type lastWordPTY struct {
+	platform.PTY
+
+	say  []byte
+	said bool
+}
+
+func (p *lastWordPTY) Read(b []byte) (int, error) {
+	n, err := p.PTY.Read(b)
+	if err == nil || p.said {
+		return n, err
+	}
+	p.said = true
+	time.Sleep(farewellDelay)
+	return copy(b, p.say), nil
+}
+
+// TestSession_ATeardownIsNotHeldUpByATerminalThatWillNotClose is the fifth
+// ConPTY lifetime hazard on this branch, and the one the fourth's fix does not
+// reach.
+//
+// Closing a pseudo-console does not return until the console host's remaining
+// output has somewhere to go, and the only reader is [session.pumpOutput]. That
+// pump keeps reading after a send *fails*, which is what a caller hanging up
+// produces. It cannot help with a send that neither fails nor returns: a client
+// that is still connected and has stopped reading parks the pump inside gRPC's
+// flow control for as long as it stays that way, which is the state [sender]'s
+// own deadline exists to survive. A teardown that waited for the close would
+// then park at its first statement — no group kill, no released process slot,
+// no audit record, no end to the RPC, and the process tree the close was
+// supposed to end still running.
+//
+// So the close is started and not waited for, and this asserts the things below
+// it in the teardown rather than the close itself. The terminal is one whose
+// close never returns, which is the only way to stage on Unix what
+// ClosePseudoConsole does on Windows — the same reasoning that makes the drain
+// test above platform-neutral, approached from the other side.
+func TestSession_ATeardownIsNotHeldUpByATerminalThatWillNotClose(t *testing.T) {
+	requirePTY(t)
+
+	// Released at the very end, so the session's own goroutines can finish
+	// whichever way this test went. Registered after the service and the server
+	// so that it is the first cleanup to run.
+	stalled := make(chan struct{})
+
+	svc := newService(t, options{
+		shell:   agent.ShellConfig{IdleTimeout: agent.Duration(300 * time.Millisecond)},
+		openPTY: stallingClosePTY(stalled),
+	})
+	client := serve(t, svc)
+	t.Cleanup(func() { close(stalled) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sess, err := openSession(ctx, t, client, openOptions("sleep"))
+	require.NoError(t, err)
+	pid := int(sess.opened.GetPid())
+
+	// The kill: the guarantee the teardown exists to make, and the first thing
+	// below the close.
+	waitFor(t, "the reaped session's process to be killed", func() (bool, string) {
+		if !processRunning(pid) {
+			return true, ""
+		}
+		return false, "pid " + strconv.Itoa(pid) + " is still running: the teardown never got past closing a terminal that would not close"
+	})
+
+	// And the RPC ended, which is what releases its process slot and is the
+	// only reason there is a record to read at all.
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, policy.OutcomeTimedOut, rec.Outcome)
+	assert.True(t, rec.TimedOut)
+
+	// The close really was still outstanding while all of that happened, rather
+	// than the fake having quietly let it through.
+	assert.False(t, closedNow(stalled),
+		"the terminal's close finished on its own, so this proved nothing about a teardown that has to survive one that does not")
+}
+
+// closedNow reports whether ch has been closed, without blocking on it.
+func closedNow(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// stallingClosePTY allocates a real terminal whose Close does not return until
+// blocked is closed — a pseudo-console with nobody draining it, on platforms
+// that have no such thing.
+func stallingClosePTY(blocked <-chan struct{}) func() (platform.PTY, error) {
+	return func() (platform.PTY, error) {
+		raw, err := platform.OpenPTY()
+		if err != nil {
+			return nil, err
+		}
+		return &stallingPTY{PTY: raw, blocked: blocked}, nil
+	}
+}
+
+// stallingPTY is that terminal. Everything except Close is the real one's, so
+// the session it carries is a real session: a command runs on it, its output is
+// read from it, and its process group is the platform's.
+type stallingPTY struct {
+	platform.PTY
+	blocked <-chan struct{}
+}
+
+func (p *stallingPTY) Close() error {
+	<-p.blocked
+	return p.PTY.Close()
 }
 
 // TestSender_NothingFollowsTheSessionsExit pins the wire contract shell.proto
@@ -908,6 +1242,28 @@ func TestSizeOf_FillsInTheDefaultAndClampsTheExaggerated(t *testing.T) {
 	huge := sizeOf(&sandboxdv1.ShellSize{Columns: 70000, Rows: 1 << 20})
 	assert.Equal(t, windowSize{columns: maxDimension, rows: maxDimension}, huge,
 		"an exaggerated size was passed through to an ioctl that takes 16 bits, where it wraps into a small one")
+}
+
+// TestPlan_AppliesTheSizeRulesToTheOpeningWindow is the caller of the above.
+//
+// Everything TestSizeOf asserts holds of a function; this asserts that the size
+// a session opens with is the one that function returned. Reading the client's
+// numbers straight off the ShellOpen instead compiles and passes, and is the
+// same omission the input pump had on the resize path.
+func TestPlan_AppliesTheSizeRulesToTheOpeningWindow(t *testing.T) {
+	t.Parallel()
+
+	svc := newService(t, options{})
+
+	var rec sessionAudit
+	spec, err := svc.plan(&sandboxdv1.ShellOpen{
+		Argv: selfArgv(),
+		Env:  []string{helperEnvFor("exit")},
+		Size: &sandboxdv1.ShellSize{Columns: 70000},
+	}, &rec)
+	require.NoError(t, err)
+	assert.Equal(t, windowSize{columns: maxDimension, rows: defaultRows}, spec.size,
+		"a session opened at the size the client asked for rather than at the one the rules allow")
 }
 
 // ---------------------------------------------------------------- leaks

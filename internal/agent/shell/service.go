@@ -65,6 +65,14 @@ type Service struct {
 	// asserted on the real one would assert something different on every
 	// machine.
 	loginShell func() []string
+
+	// openPTY allocates a session's terminal, and is a field for the same
+	// reason loginShell is. What a test has to be able to stage here is a
+	// terminal whose close behaves the way a pseudo-console's does — one that
+	// does not return until somebody drains it — and no real pty on the
+	// platforms this suite can run on behaves that way. See
+	// [sessionTerminal.release] for the teardown that depends on it.
+	openPTY func() (platform.PTY, error)
 }
 
 // New builds the shell service. It satisfies agent.Factory.
@@ -86,6 +94,7 @@ func New(deps agent.Deps) (agent.Service, error) {
 		defaultDir:  exec.DefaultWorkingDir(),
 		idleTimeout: deps.Config.Shell.IdleTimeout.Duration(),
 		loginShell:  loginShell,
+		openPTY:     platform.OpenPTY,
 	}
 
 	// One line at every start, because this is the service that hands out a

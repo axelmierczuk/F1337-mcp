@@ -86,6 +86,13 @@ func helperMain(mode string, args []string) int {
 	case "sleep":
 		return blockUntilKilled()
 
+	case "tick":
+		// Prints a numbered line at an interval and never stops on its own. It
+		// is a session that produces output and takes none, which is the only
+		// arrangement in which the output half of the activity clock is what
+		// keeps the idle timeout at bay.
+		return helperTick(args)
+
 	case "announce":
 		// Says it is running, then waits to be killed. It exists so a test can
 		// know that *this* program is the terminal's foreground process before
@@ -112,6 +119,27 @@ func helperMain(mode string, args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "unknown helper mode %q\n", mode)
 	return 2
+}
+
+// tickLifetime bounds the tick helper. See treeLifetime: nothing asserts that
+// this process is still running at the end of it, so a stop far beyond any
+// deadline cannot make an assertion pass for the wrong reason — it only keeps a
+// failed run from stranding a process.
+const tickLifetime = 10 * time.Minute
+
+// helperTick prints a numbered line every interval-ms.
+func helperTick(args []string) int {
+	every, err := strconv.Atoi(arg(args, "250"))
+	if err != nil || every <= 0 {
+		fmt.Fprintln(os.Stderr, "usage: tick <interval-ms>")
+		return 2
+	}
+	interval := time.Duration(every) * time.Millisecond
+	for i := 1; time.Duration(i)*interval < tickLifetime; i++ {
+		fmt.Printf("tick %d\n", i)
+		time.Sleep(interval)
+	}
+	return 0
 }
 
 // blockUntilKilled waits for something to end this process.

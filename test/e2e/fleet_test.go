@@ -93,6 +93,11 @@ func newFleet(t *testing.T) *fleet {
 // the far end emits, and an operator's own shell always has one.
 func (f *fleet) ctlEnv() []string { return f.configEnv(f.ctlDir) }
 
+// operatorTerm is the terminal type the operator's own environment carries.
+// `fleetctl shell` forwards it, and TestShellCarriesTheOperatorsTerminalType
+// asserts that a remote session sees it.
+const operatorTerm = "xterm-256color"
+
 // configEnv is ctlEnv pointed at some other config directory — an operator's
 // second workstation, or one that is missing a credential on purpose.
 func (f *fleet) configEnv(dir string) []string {
@@ -101,7 +106,7 @@ func (f *fleet) configEnv(dir string) []string {
 		envEntry("PATH", os.Getenv("PATH")),
 		envEntry("HOME", f.root),
 		envEntry("TMPDIR", os.TempDir()),
-		envEntry("TERM", "xterm-256color"),
+		envEntry("TERM", operatorTerm),
 	)
 }
 

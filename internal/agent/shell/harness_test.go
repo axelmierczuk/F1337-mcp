@@ -22,6 +22,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
@@ -43,6 +44,9 @@ type options struct {
 	// no test hits it by accident.
 	maxConcurrent int
 	loginTo       []string
+	// openPTY replaces the allocator a session's terminal comes from. Nil
+	// means the real one. See Service.openPTY.
+	openPTY func() (platform.PTY, error)
 }
 
 // enabled is the address of a bool, for the config fields whose default is
@@ -126,6 +130,9 @@ func newService(t *testing.T, opts options) *Service {
 	require.True(t, ok)
 	if len(opts.loginTo) > 0 {
 		svc.loginShell = func() []string { return opts.loginTo }
+	}
+	if opts.openPTY != nil {
+		svc.openPTY = opts.openPTY
 	}
 	return svc
 }

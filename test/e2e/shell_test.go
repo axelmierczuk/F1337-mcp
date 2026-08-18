@@ -342,6 +342,39 @@ func TestShellCtrlCInterruptsTheRemoteProgramRatherThanTheClient(t *testing.T) {
 	}
 }
 
+// TestShellCarriesTheOperatorsTerminalType follows the one environment variable
+// that decides whether a remote full-screen program can draw at all.
+//
+// TERM is what tells `vi` and `top` which escape sequences this terminal
+// understands, and the agent's base environment deliberately has none — see
+// internal/agent/exec/env.go, which is an allowlist built to keep the daemon's
+// own environment out of a caller's command. So a session's TERM can only be
+// the one `fleetctl shell` forwarded from the operator's terminal, and a client
+// that stopped forwarding it would leave every session rendering as well as
+// `TERM=dumb` allows.
+//
+// It is asserted from the command an operator types rather than from sessionEnv,
+// which has a test of its own: that function being right is not the same fact as
+// the command using it, and dropping the call is a change no test but this one
+// notices.
+func TestShellCarriesTheOperatorsTerminalType(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+
+	c := f.openShell(t, [2]int{100, 40}, a.name)
+
+	// The value the operator's terminal has, printed by the remote shell rather
+	// than echoed: the brackets are there so an unset TERM reads as a match
+	// this assertion can fail on instead of an empty line it could not see.
+	c.typedLine("echo term=[$TERM]")
+	c.awaitOutput("term=[" + operatorTerm + "]")
+
+	c.typedLine("exit 0")
+	if code := c.awaitExit(); code != 0 {
+		t.Fatalf("fleetctl shell exited %d", code)
+	}
+}
+
 // sizeLine matches what the winsize helper prints.
 var sizeLine = regexp.MustCompile(`size (\d+)x(\d+)`)
 
