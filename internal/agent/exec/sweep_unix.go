@@ -19,41 +19,11 @@ import (
 //
 // # The order is the whole of it
 //
-// kill(-pgid) names a number, and that number is a pid. The kernel keeps it
-// reserved for exactly as long as some process is still attached to it: the
-// leader, alive or an unreaped zombie, or any surviving member of its group.
-// Once the last of those is gone the id is free, and the next process group to
-// be given it belongs to somebody else.
-//
-// So the sweep goes out between the leader exiting and Wait collecting it. The
-// leader's own zombie is what makes that safe — a group with an unreaped member
-// cannot have its id reused, so the group this signals is always the one the
-// command led.
-//
-// It used to be sent from run's deferred cleanup, after Wait had reaped, on the
-// argument that reaching a specific pid again means wrapping the whole pid space
-// in the microseconds between the two statements. Every step of that is true and
-// the conclusion was not, in two ways #91 records:
-//
-//   - The window is not microseconds. Wait does not return until the output
-//     copiers do, and a grandchild that inherited the pipes holds them for the
-//     whole of Cmd.WaitDelay — seconds, in precisely the case the sweep exists
-//     for.
-//   - The wrap happens. #82's identical call answered EPERM four times in 2400
-//     runs on a loaded 12-core host, which is a signal that reached a process
-//     owned by somebody else, and instrumenting it caught the id being handed
-//     out again to a new session leader.
-//
-// Reproduced deterministically in a pid namespace, where ns_last_pid places the
-// next pid exactly: reap the leader of an emptied group, hand its id to an
-// unrelated session leader, make the call this used to make — the bystander
-// dies of SIGKILL. The same run shows the kernel refusing to hand out that id at
-// all while the zombie is still there.
-//
-// Note what that says about the old ordering. Any surviving descendant pins the
-// group id too, so the id could only be stale once the group had emptied: the
-// call was misdirectable exactly when it had nothing to do, and killed a
-// stranger's tree in exchange for nothing.
+// It goes out between the leader exiting and Wait collecting it, because the
+// leader's own zombie is what keeps the group id the command's own. That
+// argument, the measurements behind it and what the old ordering cost are in
+// [platform.AwaitExit], which is where the ordering now lives so that
+// internal/agent/shell keeps the same one rather than a third copy of it.
 //
 // # What it costs
 //
@@ -66,8 +36,9 @@ import (
 // wait for a descendant the sweep cannot reach, which is one that left the
 // group.
 //
-// An empty group answers ESRCH, which is the ordinary answer here and not a
-// failure.
+// A group with nothing left in it is the ordinary answer here and not a
+// failure; [platform.ProcessGroup.Sweep] is what makes both platforms say that
+// the same way.
 func waitForCommand(cmd *osexec.Cmd, group *platform.ProcessGroup, log *slog.Logger) error {
 	if !group.Isolated() {
 		// The group has degraded to "signal this one pid", and there is
@@ -83,7 +54,7 @@ func waitForCommand(cmd *osexec.Cmd, group *platform.ProcessGroup, log *slog.Log
 		return cmd.Wait()
 	}
 
-	if err := awaitExit(cmd.Process.Pid); err != nil {
+	if err := platform.AwaitExit(cmd.Process.Pid); err != nil {
 		// Sweeping now would mean SIGKILL to a group id whose ownership
 		// nothing has established, which is the call this whole ordering
 		// exists to avoid. Not sweeping leaves a descendant running on the
@@ -99,7 +70,14 @@ func waitForCommand(cmd *osexec.Cmd, group *platform.ProcessGroup, log *slog.Log
 	// running on the host after the RPC that started it has returned. At DEBUG
 	// — which is not the level a daemon runs at — a broken guarantee would be
 	// invisible exactly where it matters.
-	if err := group.Kill(); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
+	//
+	// ErrGroupClosed is not one either: run releases the group on its way out,
+	// and the path where it gives up on a stalled stream leaves it while this
+	// wait is still watching for the leader. A sweep that arrives afterwards
+	// finds a group the call has given up, and the kill that ended the command
+	// went out before the release.
+	err := group.Sweep()
+	if err != nil && !errors.Is(err, platform.ErrProcessNotFound) && !errors.Is(err, platform.ErrGroupClosed) {
 		log.Warn("could not sweep the process group after exec; a descendant may have outlived the call",
 			"error", err)
 	}

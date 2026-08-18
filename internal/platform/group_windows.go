@@ -357,7 +357,7 @@ func (g *ProcessGroup) Adopt(p *os.Process) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
-		return errors.New("platform: process group is closed")
+		return ErrGroupClosed
 	}
 
 	g.pid = uint32(p.Pid) //nolint:gosec // pid is positive, checked above
@@ -461,7 +461,7 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 	defer g.mu.Unlock()
 
 	if g.closed {
-		return errors.New("platform: process group is closed")
+		return ErrGroupClosed
 	}
 	if g.pid == 0 {
 		return ErrNoProcess
@@ -629,6 +629,23 @@ func processExited(h windows.Handle) bool {
 
 // Kill terminates the whole tree immediately.
 func (g *ProcessGroup) Kill() error { return g.Signal(SignalKill) }
+
+// Sweep is Kill on Windows, and there is nothing for it to change.
+//
+// On Unix it exists to read one errno differently, because a process group
+// there is a number the kernel reclaims and a group holding nothing but its
+// leader's zombie answers a signal in a way that is not a failure. A job
+// object is not a number: it is a kernel object this group holds a handle to,
+// terminating one that holds nothing succeeds, and the leader is reached
+// through a handle of its own rather than through its pid. There is no answer
+// here that means something different for a sweep than it does for a kill.
+//
+// Neither agent path calls it. Both have a job object with KillOnClose, so
+// closing the group is what takes the tree down and an extra signal would add
+// no guarantee; see internal/agent/shell's and internal/agent/exec's Windows
+// sweeps. It exists so that a caller written against [ProcessGroup] compiles
+// and means the same thing on every platform.
+func (g *ProcessGroup) Sweep() error { return g.Signal(SignalKill) }
 
 // Close releases the job handle and the leader handle. When the group was
 // created with GroupConfig.KillOnClose, closing the job is what kills the tree

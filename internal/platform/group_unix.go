@@ -208,7 +208,7 @@ func (g *ProcessGroup) Adopt(p *os.Process) error {
 	closed, configured := g.closed, g.configured
 	g.mu.Unlock()
 	if closed {
-		return errors.New("platform: process group is closed")
+		return ErrGroupClosed
 	}
 
 	// Outside the lock. This waits on the child, and holding the mutex across it
@@ -218,7 +218,7 @@ func (g *ProcessGroup) Adopt(p *os.Process) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
-		return errors.New("platform: process group is closed")
+		return ErrGroupClosed
 	}
 	g.pid = p.Pid
 	g.pgid = pgid
@@ -262,9 +262,10 @@ func (g *ProcessGroup) GroupID() int {
 // group holding nothing but an unreaped zombie leader: Linux reports the group
 // from getpgid(2) and delivers the signal, while Darwin answers ESRCH from
 // getpgid(2) and EPERM from kill(2) — there is a group, and nothing in it that
-// can take a signal. Neither is worth depending on, and no caller here has to:
-// every one of them signals a group that still holds a live process, or accepts
-// ErrProcessNotFound as "already stopped".
+// can take a signal. Most callers here need not care: they signal a group that
+// still holds a live process, or accept ErrProcessNotFound as "already
+// stopped". The one that does is [ProcessGroup.Sweep], which signals a group
+// whose leader has just exited on purpose.
 //
 // What is worth depending on is the other side of that rule: a group id belongs
 // to its members until the last of them is reaped, so a group that has outlived
@@ -286,7 +287,7 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 	g.mu.Unlock()
 
 	if closed {
-		return errors.New("platform: process group is closed")
+		return ErrGroupClosed
 	}
 	if pid == 0 {
 		return ErrNoProcess
@@ -310,6 +311,44 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 // Kill sends SIGKILL to the group. It is the escalation step of a graceful
 // stop and cannot be caught or ignored.
 func (g *ProcessGroup) Kill() error { return g.Signal(SignalKill) }
+
+// Sweep kills whatever the group's leader left behind, for a caller that has
+// just watched that leader exit and has not yet collected it. See [AwaitExit]
+// for the ordering this belongs to, and why the two halves are not
+// interchangeable with writing them in that order.
+//
+// It is Kill with one answer changed. A group whose only remaining member is
+// its leader's uncollected zombie has nothing that can receive a signal, and
+// the two platforms say so differently — measured, on this host and in a Linux
+// container:
+//
+//	                     leader a zombie      leader collected, group empty
+//	Linux   kill(-pgid)  delivered, 0         ESRCH
+//	Darwin  kill(-pgid)  EPERM                ESRCH
+//
+// Kill passes EPERM back, deliberately: for a supervisor, a group it may not
+// signal is a live group, and reporting it as "already gone" is the one answer
+// that would stop the caller trying again. For a sweep it is the ordinary
+// ending rather than a failure — the command left nothing behind, which is
+// most commands, and a shell session that ends at a prompt with no jobs is
+// exactly that. Passing it back cost every successful exec on macOS a WARN
+// saying a descendant may have outlived the call, which is how a diagnostic
+// stops being read.
+//
+// The reading is sound because of what this group is. Every member is a
+// descendant of a child this agent started as itself — nothing here spawns
+// with a Credential — so a member that exists and cannot be signalled is not a
+// state this group can be in: an unprivileged agent's descendants share its
+// uid, and a root agent may signal anything. EPERM from a group signal
+// therefore means no member could receive it, which is the same fact ESRCH
+// reports one moment later, and it is reported the same way.
+func (g *ProcessGroup) Sweep() error {
+	err := g.Signal(SignalKill)
+	if errors.Is(err, syscall.EPERM) {
+		return fmt.Errorf("platform: sweeping group %d: %w", g.GroupID(), ErrProcessNotFound)
+	}
+	return err
+}
 
 // Close releases the handle. On Unix it holds no OS resource, so this only
 // marks the group unusable; the child is not signalled. Terminating the tree

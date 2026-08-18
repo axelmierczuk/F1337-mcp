@@ -520,9 +520,15 @@ func TestSession_ClosingTheStreamKillsTheWholeTree(t *testing.T) {
 // cancelled caller, an idle timeout — and those all go through reap, which
 // hangs the terminal up and kills the group. A command that exits on its own
 // goes through none of it: the only thing between it and a child it left
-// running is the sweep in run's own defer, and on Unix that is the only thing
-// at all, because ProcessGroup.Close signals nothing there. Deleting that
-// sweep left this package green.
+// running is the sweep the wait sends when the leader exits, and on Unix that
+// is the only thing at all, because ProcessGroup.Close signals nothing there.
+// Deleting that sweep left this package green.
+//
+// It is asserted here through the RPC as well as in TestSweepAndCollect_*
+// because the two say different things. That one can say when the sweep went
+// out relative to the collection; this one says that the command an operator
+// runs reaches it at all — three consecutive rounds on one PR each found a fix
+// that never ran, because the caller short-circuited ahead of it.
 //
 // The assertion is on a pid the session's own command reported, so it is about
 // the process rather than about the agent's opinion of it.
@@ -560,8 +566,45 @@ func TestSession_ACommandThatExitsStillTakesItsChildrenWithIt(t *testing.T) {
 			return true, ""
 		}
 		return false, "pid " + strconv.Itoa(orphan) + " outlived the session that started it; a command that exits by " +
-			"itself never reaches reap, so the deferred sweep is the only thing that kills what it left running"
+			"itself never reaches reap, so the wait's sweep is the only thing that kills what it left running"
 	})
+}
+
+// TestSession_AnOrdinaryEndingSaysNothingAboutABrokenGuarantee is the other
+// half of the sweep, driven the way an operator's session ends.
+//
+// A user who types `exit` at a prompt with no jobs running leaves an emptied
+// process group, and the sweep then signals a group whose only member is the
+// leader's own uncollected zombie. Darwin refuses that with EPERM. Passed back
+// as it came it puts "a descendant may have outlived it" into the daemon's log
+// for a session that left nothing at all — every ordinary session on that
+// platform — and a warning that fires when nothing is wrong is a warning
+// nobody reads on the day something is.
+//
+// Only the warnings are asserted on, not the whole log: this runs at DEBUG, and
+// what matters is that a session which did everything right is not reported as
+// one that did not.
+func TestSession_AnOrdinaryEndingSaysNothingAboutABrokenGuarantee(t *testing.T) {
+	requirePTY(t)
+
+	logs := &syncBuffer{}
+	svc := newService(t, options{logs: logs})
+	client := serve(t, svc)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sess, err := openSession(ctx, t, client, openOptions("exit", "0"))
+	require.NoError(t, err)
+
+	exit := sess.awaitEnd()
+	require.NotNil(t, exit)
+	require.Equal(t, int32(0), exit.GetExitCode(), "the session's command did not exit on its own")
+
+	// The record is what says the session really finished, rather than the test
+	// reading a log that has not been written to yet.
+	require.Equal(t, policy.OutcomeOK, onlyRecord(t, svc).Outcome)
+	assert.NotContains(t, logs.String(), "level=WARN",
+		"a session that left nothing behind reported something wrong with its teardown")
 }
 
 // TestSession_AReapedSessionReportsTheSignalThatEndedIt covers the two lines
@@ -960,6 +1003,64 @@ func TestSession_AChildIsReapedEvenWhenTheOpenCannotBeDelivered(t *testing.T) {
 		}
 		return false, "pid " + strconv.Itoa(pid) + " is still in the process table; the handler killed its child and never waited on it"
 	})
+}
+
+// TestSession_AnOpenThatCannotBeDeliveredStillKillsASessionThatIgnoresTheHangup
+// is the other half of that path.
+//
+// The teardown there is two things — the terminal hanging up, and the kill —
+// and the hangup alone is enough for anything that takes the hint, so a session
+// running an ordinary program cannot tell the two apart. Deleting the kill left
+// that test green. This is the program that does not take the hint: it ignores
+// the hangup on purpose, so what ends it is the kill, and nothing else on this
+// path sends one — Service.reap never runs here, and ProcessGroup.Close
+// signals nothing on Unix.
+//
+// Unix only, for the reason the test above it gives, and because "ignores the
+// hangup" is a Unix idea: on Windows the pseudo-console close is not a signal
+// anything can decline, and the job object is what takes the tree down.
+func TestSession_AnOpenThatCannotBeDeliveredStillKillsASessionThatIgnoresTheHangup(t *testing.T) {
+	requirePTY(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("a hangup is a signal a program can ignore only on Unix; there the job object ends the session")
+	}
+
+	logs := &syncBuffer{}
+	svc := newService(t, options{logs: logs})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var rec sessionAudit
+	spec, err := svc.plan(openOptions("ignore-hup"), &rec)
+	require.NoError(t, err)
+
+	stream := &refusingStream{ctx: ctx, sendFail: errors.New("the caller went away mid-handshake")}
+	require.Error(t, svc.run(ctx, stream, spec, &rec))
+
+	pid := stream.openedPID()
+	require.Positive(t, pid, "the session never started a process, so this test would prove nothing")
+
+	waitFor(t, "the session's own process to be gone", func() (bool, string) {
+		if !processRunning(pid) {
+			return true, ""
+		}
+		return false, "pid " + strconv.Itoa(pid) + " ignored the hangup and outlived the handler; nothing on this path killed its process group"
+	})
+
+	// And nothing was reported as having gone wrong. The pid being gone is what
+	// makes this deterministic rather than a read of a log that may not have
+	// been written yet: the wait sweeps and then collects, and the collection is
+	// what takes the process out of the table, so anything the sweep had to say
+	// is already there.
+	//
+	// It has something to say unless it is asked to. This handler releases the
+	// group on its way out, while the wait is still watching for the leader that
+	// the kill above has only just signalled, so the sweep arrives at a group
+	// the session has given up — every time, on the one path a dropped caller
+	// produces. Reported as a failure it is a warning saying a process outlived
+	// the session, on a session that took its process with it.
+	assert.NotContains(t, logs.String(), "level=WARN",
+		"the teardown reported something wrong on a path that did everything it promised")
 }
 
 // TestSession_TheTerminalIsDrainedEvenWhenTheClientHasStoppedReading is the
