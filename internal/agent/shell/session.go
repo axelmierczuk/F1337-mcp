@@ -601,31 +601,32 @@ func (s *session) pumpInput(stream grpc.BidiStreamingServer[sandboxdv1.ShellRequ
 //
 // # A send that fails stops the sending and not the reading
 //
-// That difference is what keeps a Windows teardown from wedging, and it is the
-// fourth thing on this branch to come out of go-pty's ConPTY wrapper not
-// defending its own lifetime.
-//
 // Closing a pseudo-console is not a handle release: ClosePseudoConsole asks the
 // console host to flush what it still holds, and it does not return until that
 // flush has somewhere to go. The only reader of that pipe is this loop. So a
 // pump that returned the moment a send failed — which is what a caller hanging
-// up mid-output produces, since the very next Send fails — left the teardown in
-// [Service.reap] calling Close on a pseudo-console nobody was draining, with
-// the session's own output still queued behind it. That call is the *first*
-// statement of the teardown, so a handler parked in it never reaches the group
-// kill either: the RPC never returns, its process-limit slot is never released,
-// its audit record is never written, and the process tree the close was
-// supposed to end is still running. One session per occurrence, for the life of
-// the daemon.
+// up mid-output produces, since the very next Send fails — left a teardown
+// closing a pseudo-console nobody was draining, with the session's own output
+// still queued behind it.
 //
 // So the loop keeps reading until the terminal itself ends the read, which is
-// the close, and the close can now complete. Nothing more is sent: the session
+// the close, and the close can then complete. Nothing more is sent: the session
 // is over for the caller either way, and [sender] refuses anything after the
 // exit in any case.
 //
 // It cannot spin: once sending has stopped nothing calls touch, so a session
 // whose client is merely wedged rather than gone goes idle and is reaped on
 // shell.idle_timeout, and every other ending closes the terminal directly.
+//
+// # And that is not enough on its own
+//
+// This is what keeps the *common* teardown quick, and it is not what makes it
+// safe. A send that neither fails nor returns — a client still connected and no
+// longer reading — parks this loop inside gRPC with nothing draining the
+// console for as long as that lasts. What makes a teardown survive it is that
+// nothing waits for the close; see [sessionTerminal.release]. Neither half is
+// redundant: without this one every dropped connection stops the drain, and
+// without that one a wedged client stops the teardown.
 func (s *session) pumpOutput() {
 	buf := make([]byte, readBuffer)
 	sending := true

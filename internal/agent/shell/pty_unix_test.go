@@ -85,19 +85,19 @@ func (c *capturedPTY) get() platform.PTY {
 	return c.pty
 }
 
-// stallingPTY has to be a UnixPty and not only a Pty.
+// A wrapped terminal has to be a UnixPty and not only a Pty. See wrappedPTY.
 //
-// platform.ReleasePTYChildEnd asks a terminal for the child's end so the agent
-// can give up its own copy, and it asks by type assertion. A wrapper that could
-// not answer would leave the session holding that descriptor — a difference
-// between the staged session and a real one, in exactly the machinery the test
-// wrapping it is about. On Windows there is no second end to give up and no
-// such interface, which is why these live here.
-func (p *stallingPTY) Master() *os.File                   { return p.unix().Master() }
-func (p *stallingPTY) Slave() *os.File                    { return p.unix().Slave() }
-func (p *stallingPTY) Control(f func(fd uintptr)) error   { return p.unix().Control(f) }
-func (p *stallingPTY) SetWinsize(ws *gopty.Winsize) error { return p.unix().SetWinsize(ws) }
+// This was not academic: without it platform.ReleasePTYChildEnd refuses the
+// wrapper, the session keeps the child's end of its own terminal, and a read of
+// the master no longer ends when the command does. macOS hides that — it
+// revokes a controlling terminal when the session leader exits — so a test
+// staged on a wrapper without these passes there and fails on Linux, which is
+// exactly what CI reported.
+func (p wrappedPTY) Master() *os.File                   { return p.unix().Master() }
+func (p wrappedPTY) Slave() *os.File                    { return p.unix().Slave() }
+func (p wrappedPTY) Control(f func(fd uintptr)) error   { return p.unix().Control(f) }
+func (p wrappedPTY) SetWinsize(ws *gopty.Winsize) error { return p.unix().SetWinsize(ws) }
 
 // unix is the wrapped terminal, which platform.OpenPTY guarantees is one of
 // these on every platform this file builds for.
-func (p *stallingPTY) unix() gopty.UnixPty { return p.PTY.(gopty.UnixPty) }
+func (p wrappedPTY) unix() gopty.UnixPty { return p.PTY.(gopty.UnixPty) }

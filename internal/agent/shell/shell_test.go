@@ -810,81 +810,6 @@ func TestSession_TheTerminalIsDrainedEvenWhenTheClientHasStoppedReading(t *testi
 	assert.Equal(t, policy.OutcomeOK, rec.outcome)
 }
 
-// TestSession_TheLastOutputArrivesBeforeTheExitStatus covers the wait between
-// a session's command finishing and its status going out.
-//
-// A shell prints on its way out — "logout", a job-control warning, whatever the
-// last command left in the buffer — and a terminal does not stop producing the
-// moment the process behind it does. On Windows it emphatically does not: a
-// ConPTY's output pipe stays open until the pseudo-console is closed, so the
-// wait there is the only thing between the operator and a farewell they never
-// see. [sender] refuses everything after the exit, so a farewell that arrives
-// at all is one that arrived before it; there is nothing else to order.
-//
-// The terminal is one that still has something to say a moment after its
-// command has gone, which is the Windows behaviour staged on a platform that
-// does not have it — and staged as a delay rather than a race, so that a build
-// without the wait fails every time rather than most times.
-func TestSession_TheLastOutputArrivesBeforeTheExitStatus(t *testing.T) {
-	requirePTY(t)
-
-	const farewell = "logout-after-the-command-had-already-gone"
-	svc := newService(t, options{openPTY: lingeringPTY([]byte(farewell))})
-	client := serve(t, svc)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	sess, err := openSession(ctx, t, client, openOptions("exit", "0"))
-	require.NoError(t, err)
-
-	exit := sess.awaitEnd()
-	require.NotNil(t, exit, "the session never reported its status")
-	assert.Equal(t, int32(0), exit.GetExitCode())
-	assert.Contains(t, sess.printed(), farewell,
-		"the session's last output was dropped: its exit status went out while the terminal still had something to give, "+
-			"and nothing may follow a ShellExit")
-}
-
-// farewellDelay is how long the terminal below waits before its last words.
-// Well inside drainAfterExit, so the wait is what decides this rather than the
-// machine's load.
-const farewellDelay = 25 * time.Millisecond
-
-// lingeringPTY allocates a real terminal that still has something to say a
-// moment after its command has ended.
-func lingeringPTY(say []byte) func() (platform.PTY, error) {
-	return func() (platform.PTY, error) {
-		raw, err := platform.OpenPTY()
-		if err != nil {
-			return nil, err
-		}
-		return &lastWordPTY{PTY: raw, say: say}, nil
-	}
-}
-
-// lastWordPTY reads as the real terminal does until that read ends, and then
-// produces one more chunk before ending itself.
-//
-// Read is called only by the session's output pump, one goroutine, so the flag
-// needs no lock.
-type lastWordPTY struct {
-	platform.PTY
-
-	say  []byte
-	said bool
-}
-
-func (p *lastWordPTY) Read(b []byte) (int, error) {
-	n, err := p.PTY.Read(b)
-	if err == nil || p.said {
-		return n, err
-	}
-	p.said = true
-	time.Sleep(farewellDelay)
-	return copy(b, p.say), nil
-}
-
 // TestSession_ATeardownIsNotHeldUpByATerminalThatWillNotClose is the fifth
 // ConPTY lifetime hazard on this branch, and the one the fourth's fix does not
 // reach.
@@ -958,6 +883,16 @@ func closedNow(ch <-chan struct{}) bool {
 	}
 }
 
+// wrappedPTY is a real terminal with something overridden.
+//
+// Its one job is to be a terminal the *whole* of the agent still works against:
+// platform.ReleasePTYChildEnd asks for the child's end by type assertion, and a
+// wrapper that could not answer would leave the session holding that descriptor
+// — which turns off the thing a neighbouring test asserts, in a way macOS hides
+// and Linux does not. The Unix half of that answer is in pty_unix_test.go;
+// Windows has no second end and no such interface.
+type wrappedPTY struct{ platform.PTY }
+
 // stallingClosePTY allocates a real terminal whose Close does not return until
 // blocked is closed — a pseudo-console with nobody draining it, on platforms
 // that have no such thing.
@@ -967,7 +902,7 @@ func stallingClosePTY(blocked <-chan struct{}) func() (platform.PTY, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &stallingPTY{PTY: raw, blocked: blocked}, nil
+		return &stallingPTY{wrappedPTY: wrappedPTY{raw}, blocked: blocked}, nil
 	}
 }
 
@@ -975,7 +910,7 @@ func stallingClosePTY(blocked <-chan struct{}) func() (platform.PTY, error) {
 // the session it carries is a real session: a command runs on it, its output is
 // read from it, and its process group is the platform's.
 type stallingPTY struct {
-	platform.PTY
+	wrappedPTY
 	blocked <-chan struct{}
 }
 

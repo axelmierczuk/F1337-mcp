@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,19 +66,45 @@ func (f *fleet) openShell(t *testing.T, size [2]int, args ...string) *shellClien
 	}
 
 	// One reader, started before anything is typed, so nothing the session
-	// prints is missed between starting and the first assertion.
+	// prints is missed between starting and the first assertion. It also
+	// answers the client when it asks the terminal about itself; see
+	// terminalQuery.
+	answered := make(chan struct{})
 	go func() {
+		var once sync.Once
 		buf := make([]byte, 4096)
 		for {
 			n, err := tty.Read(buf)
 			if n > 0 {
+				if bytes.Contains(buf[:n], []byte(terminalQuery)) {
+					if _, err := tty.Write([]byte(terminalReply)); err != nil {
+						t.Logf("answer the client's terminal query: %v", err)
+					}
+					once.Do(func() { close(answered) })
+				}
 				_, _ = c.output.Write(buf[:n])
 			}
 			if err != nil {
+				once.Do(func() { close(answered) })
 				return
 			}
 		}
 	}()
+
+	// Nothing is typed until that exchange is over. See terminalQuery: the
+	// client reads the terminal while it waits for an answer, and a scenario
+	// that typed into that window would be typing into termenv rather than
+	// into the session.
+	//
+	// The grace is shorter than the five seconds the client waits, deliberately.
+	// A longer one would let every scenario pass by outlasting a query nobody
+	// answered, which would make the answer above decoration — and would leave
+	// this harness silently mis-modelling a terminal on the day the client's
+	// query changes shape.
+	select {
+	case <-answered:
+	case <-time.After(2 * time.Second):
+	}
 	go func() {
 		defer close(c.done)
 		c.err = cmd.Wait()
@@ -123,8 +151,34 @@ func (c *shellClient) resized(columns, rows int) {
 	}
 }
 
+// The client asks the terminal about itself before it does anything else, and
+// this harness is the only terminal it has.
+//
+// `fleetctl` links `fleetctl tui`, whose bubbletea dependency queries the
+// terminal's background colour from an init function — so every fleetctl
+// command, on every terminal, writes an OSC 11 query and a cursor-position
+// request to stdout and then reads the terminal for up to five seconds waiting
+// for the answers. A real terminal emulator answers in a millisecond. A bare
+// pseudo-terminal with nothing behind it never answers at all, and what the
+// client consumes while it waits is whatever arrives next — which, in a
+// scenario that types immediately, is the scenario's own keystrokes.
+//
+// So this reader answers, because that is what a terminal does, and openShell
+// waits for the exchange before letting anything be typed. The queries are kept
+// out of printed for the same reason the carriage returns are: they are the
+// client talking to the terminal rather than anything the session produced, and
+// an assertion anchored on the start of a line would otherwise be matching
+// against them.
+const (
+	terminalQuery = "\x1b]11;?\x1b\\"
+	terminalReply = "\x1b]11;rgb:0000/0000/0000\a\x1b[1;1R"
+)
+
+// terminalQueries strips what the client wrote to ask. See terminalQuery.
+var terminalQueries = strings.NewReplacer(terminalQuery, "", "\x1b[6n", "")
+
 // printed is everything the client has rendered so far.
-func (c *shellClient) printed() string { return c.output.String() }
+func (c *shellClient) printed() string { return terminalQueries.Replace(c.output.String()) }
 
 // awaitOutput waits for the client to render something containing want.
 func (c *shellClient) awaitOutput(want string) {
