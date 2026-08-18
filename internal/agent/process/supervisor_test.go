@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -92,11 +91,14 @@ func TestListReflectsTransitions(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 
-	// Written when this test wants the process gone, and not before.
+	// Written when this test wants the process gone, and not before. What is
+	// in it is the code the helper leaves with, so a helper that never waited
+	// for it cannot produce that code — the handshake every assertion below
+	// rests on is checked rather than assumed. See markerCode.
 	stop := filepath.Join(t.TempDir(), "stop")
 
 	start, err := svc.StartProcess(ctx, &sandboxdv1.StartProcessRequest{
-		Argv: helperArgv(t, "exit-when", stop, "0"),
+		Argv: helperArgv(t, "exit-when", stop),
 		Name: "transitions",
 		Env:  helperEnviron(),
 	})
@@ -129,13 +131,17 @@ func TestListReflectsTransitions(t *testing.T) {
 	require.Len(t, listed(sandboxdv1.ProcessState_PROCESS_STATE_RUNNING), 1)
 	require.Empty(t, listed(sandboxdv1.ProcessState_PROCESS_STATE_EXITED))
 
-	// Now it exits, because this test said so.
-	require.NoError(t, os.WriteFile(stop, []byte("go"), 0o600))
+	// Now it exits, because this test said so — and with the code this test
+	// put in the marker, which is the proof it exited on the marker rather
+	// than on its own. A helper that stopped waiting leaves with markerUnread
+	// instead, which is CRASHED and never EXITED.
+	writeMarker(t, stop, "0")
 	waitState(t, r, 10*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
 
 	exited := listed(sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
 	require.Len(t, exited, 1, "the exit should be visible in the very next list")
 	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_EXITED, exited[0].GetState())
+	require.EqualValues(t, 0, exited[0].GetExitCode(), "the helper left with the code the marker carried")
 
 	// A state filter that does not match returns nothing, rather than everything.
 	require.Empty(t, listed(sandboxdv1.ProcessState_PROCESS_STATE_RUNNING))

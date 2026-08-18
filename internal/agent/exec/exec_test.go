@@ -598,6 +598,84 @@ func TestExec_ADescendantThatOutlivesItsParentDoesNotOutliveTheCall(t *testing.T
 	requireProcessGone(t, grandchild)
 }
 
+// The escalation starts politely, and that half is a guarantee of its own.
+//
+// docs/tools.md promises SIGTERM to the process group on expiry and SIGKILL
+// only after the grace period, which is what lets a command that traps it flush
+// and exit on its own terms. Nothing here looked at that: every other kill test
+// in this file either runs a tree that ignores SIGTERM — where only the KILL
+// can be what ended it — or asserts that the process is gone without asking
+// what it died of. Deleting the TERM step therefore left the whole package
+// green, with every command in the fleet killed outright.
+func TestExec_TheEscalationStartsWithSIGTERM(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no catchable termination request: SignalTerm terminates the job object, and terminatingSignal reports no signal at all")
+	}
+	h := newHarness(t)
+	// The product's own grace rather than the harness's shortened one. Nothing
+	// below is asserted on how long anything took: a command that has not died
+	// of SIGTERM within the grace is a command SIGTERM did not reach, and the
+	// SIGKILL that follows is then what this test sees. Shortening it would
+	// make the assertion a race between signal delivery and the next timer.
+	h.svc.killGrace = defaultKillGrace
+
+	// A helper that takes the default disposition for SIGTERM, so what it died
+	// of is what was sent to it.
+	req := helperReq("sleep", "600")
+	req.Timeout = durationpb.New(500 * time.Millisecond)
+
+	stream, err := h.run(t, req)
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.True(t, res.GetTimedOut())
+	require.True(t, res.GetSignaled())
+	require.Equal(t, "SIGTERM", res.GetSignal(),
+		"the command took the default disposition, so SIGKILL here means the polite half of the escalation never happened")
+}
+
+// A descendant holding the output pipe open does not hold the call open.
+//
+// os/exec's Wait does not return while anything still holds the write end of
+// the command's stdout, and a grandchild that inherited it does — `sh -c
+// 'daemon &'` is the shape. So a command that finished in a millisecond would
+// keep its RPC, its concurrency slot and its audit record waiting until the
+// timeout, and then be reported as having timed out. Cmd.WaitDelay is what
+// bounds that; see defaultIODrain.
+//
+// Nothing asserted it. Every other grandchild in this file is started with no
+// pipes at all, so deleting WaitDelay left the package, and the end-to-end
+// suite, green.
+func TestExec_ADescendantHoldingTheOutputPipeDoesNotHoldTheCall(t *testing.T) {
+	h := newHarness(t)
+
+	pidFile := filepath.Join(t.TempDir(), "holding.pid")
+	req := helperReq("spawn-exit-holding-stdout", pidFile)
+	// Far longer than the harness's drain, so a call that waited for the pipe
+	// instead of for the drain is reported as a timeout rather than as a
+	// result. The value is a bound on the failure, not on the behaviour.
+	req.Timeout = durationpb.New(10 * time.Second)
+
+	stream, err := h.run(t, req)
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.False(t, res.GetTimedOut(),
+		"the command exited on its own; only its descendant still held the output pipe")
+	require.Equal(t, int32(0), res.GetExitCode())
+
+	// And the descendant goes with the call like any other.
+	_, grandchild := readPIDs(t, pidFile)
+	requireProcessGone(t, grandchild)
+
+	records := h.records(t)
+	require.Len(t, records, 1)
+	require.Equal(t, policy.OutcomeOK, records[0].Outcome)
+	require.False(t, records[0].TimedOut)
+}
+
 // A tree that declines SIGTERM is still gone when the timeout expires.
 //
 // The escalation has two halves and only the second one is a guarantee. With
