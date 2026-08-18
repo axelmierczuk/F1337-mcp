@@ -315,8 +315,10 @@ cannot talk its way past.
   uniformly across platforms — Windows has no `sh -c`. `shell: true` is opt-in.
 - **The daemon's environment is not inherited.** A command starts from a
   documented base — `PATH`, `HOME`, `TMPDIR`, the locale, and on Windows the
-  variables a process cannot start without — and the request's `env` is applied
-  on top. The daemon's own environment holds whatever the thing that installed
+  variables a process cannot start without plus `%APPDATA%` and
+  `%LOCALAPPDATA%`, which name the account's own configuration directories and
+  are what a session-0 agent has no useful version of — and the request's `env`
+  is applied on top. The daemon's own environment holds whatever the thing that installed
   the service was holding: a CI runner's registry token, an operator's cloud
   credentials, a `GITHUB_TOKEN` from the shell that ran the installer. Handing
   that to every command a model asks for would be a credential leak with a

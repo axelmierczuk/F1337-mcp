@@ -35,27 +35,73 @@ type Confinement struct {
 // under a *named* account may still see the account's profile, which is why
 // that case is decided by the probe rather than by the name.
 //
-// Written lowercase and matched case-insensitively: Windows account names fold,
-// and an operator may well type "networkservice".
+// Written lowercase, without spaces, and matched through sessionZeroKey:
+// Windows account names fold, an operator may well type "networkservice", and
+// the same identity arrives spelled with a space and without one.
+//
+// The last three are the well-known SIDs themselves, which is what
+// currentAccount records when LookupAccountSid cannot reach a name — a
+// domain-joined host that cannot see a domain controller. A report saying
+// `S-1-5-20` describes the same confined agent as one saying NetworkService.
 var sessionZeroAccounts = []string{
-	`nt authority\networkservice`,
-	`nt authority\localservice`,
-	`nt authority\system`,
+	`ntauthority\networkservice`,
+	`ntauthority\localservice`,
+	`ntauthority\system`,
 	"networkservice",
 	"localservice",
 	"localsystem",
 	"system",
+	"s-1-5-18",
+	"s-1-5-19",
+	"s-1-5-20",
+}
+
+// sessionZeroKey normalises an account name for comparison against
+// sessionZeroAccounts: lowercased, trimmed, and with the internal spaces
+// removed.
+//
+// The spaces are the point. One identity has two spellings and only one of them
+// was ever recognised here. `NT AUTHORITY\NetworkService` is the *logon* name:
+// what CreateService takes, what docs/service.md prints, what an operator
+// types, and what every test in this package uses. LookupAccountSid returns the
+// *display* name for the same well-known SID, and that one has a space in it —
+// `NT AUTHORITY\NETWORK SERVICE`, which is also what `whoami` prints and what
+// services.msc shows.
+//
+// runtimeReport.Account comes from LookupAccountSid by design: it records the
+// account "as the platform names it — not as the service definition named it".
+// So the account the *reported* agent runs as never matched this list, and the
+// verdict #74 exists for — "running in session 0 as a built-in service
+// identity" — could not fire for NetworkService or LocalService on any host.
+// The next case caught it by its home directory and named the wrong fault
+// ("its profile was never loaded", which is untrue of an account whose profile
+// that is) and dropped the second remedy only that verdict offers. An agent
+// whose environment left %USERPROFILE% unset was not caught at all and was
+// reported as simply running.
+//
+// It reaches the input side too: `--user "NT AUTHORITY\NETWORK SERVICE"`,
+// copied from any of the three places Windows spells it that way, resolved to
+// --mechanism task — a logon trigger for an account that never logs on, which
+// is the one combination resolveMechanism exists to refuse — and made install
+// prompt for the password of an account that has none.
+func sessionZeroKey(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ' ' {
+			return -1
+		}
+		return r
+	}, strings.ToLower(strings.TrimSpace(name)))
 }
 
 // runsInSessionZero reports whether name is a built-in Windows service identity
 // — one that never logs on interactively and never has an operator profile.
 func runsInSessionZero(name string) bool {
-	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "" {
+	key := sessionZeroKey(name)
+	if key == "" {
 		return false
 	}
 	for _, candidate := range sessionZeroAccounts {
-		if name == candidate {
+		if key == candidate {
 			return true
 		}
 	}

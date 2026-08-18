@@ -360,6 +360,50 @@ func TestConfinementFor(t *testing.T) {
 	}
 }
 
+// The verdict #74 exists for, drawn from the report a real host produces.
+//
+// Every case in TestConfinementFor spells the account the way the operator
+// types it and CreateService takes it: `NT AUTHORITY\NetworkService`. Nothing
+// ever writes that into a report. runtimeReport.Account is deliberately "the
+// account the platform says the daemon is running as", which means
+// LookupAccountSid, which returns the display name for the well-known SID —
+// with a space in it. So the branch this whole issue is about was reachable
+// only from a test, and a host running the reported install fell through to the
+// case below it: an operator was told their agent's "profile was never loaded",
+// which is untrue of the account whose profile that is, and was not offered the
+// second way out that only this verdict has.
+//
+// Driven with both spellings, and asserted on what only this branch says.
+func TestConfinementFor_TheAccountAsThePlatformNamesIt(t *testing.T) {
+	for _, account := range []string{`NT AUTHORITY\NETWORK SERVICE`, `NT AUTHORITY\LOCAL SERVICE`} {
+		summary, detail, remedy := fleetagent.ConfinementForTest(&fleetagent.RuntimeReportForTest{
+			Account:     account,
+			Home:        `C:\Windows\ServiceProfiles\NetworkService`,
+			SessionZero: true,
+			Visibility:  fleetagent.ProfileUnknownForTest,
+		})
+		assert.Equal(t, "running, but unusable", summary, "account %s", account)
+		assert.Contains(t, strings.Join(detail, "\n"), "built-in service identity has no operator profile",
+			"%s is a built-in service identity however Windows spells it, and that is what this verdict is drawn from", account)
+		assert.NotContains(t, strings.Join(detail, "\n"), "profile was never loaded",
+			"that is the named-account verdict, and it names a fault this account does not have")
+		assert.Contains(t, strings.Join(remedy, "\n"), "--user DOMAIN",
+			"a built-in identity has a second way out, and this is the only verdict that offers it")
+	}
+
+	// And the account alone decides it, so an agent whose environment left
+	// %USERPROFILE% unset — which is how a service is started when its profile
+	// was never loaded — is still reported rather than passed as healthy.
+	summary, detail, _ := fleetagent.ConfinementForTest(&fleetagent.RuntimeReportForTest{
+		Account:     `NT AUTHORITY\NETWORK SERVICE`,
+		SessionZero: true,
+		Visibility:  fleetagent.ProfileUnknownForTest,
+	})
+	assert.Equal(t, "running, but unusable", summary,
+		"with no home directory recorded there is nothing else left to catch this agent")
+	assert.Contains(t, strings.Join(detail, "\n"), "built-in service identity has no operator profile")
+}
+
 // pinAgentConfig writes a config naming a fresh state directory and points the
 // agent's own discovery at it, which is how `service status` finds the runtime
 // report.
@@ -527,6 +571,15 @@ func TestServiceInstall_DryRunReportsTheRegistrationItWouldReplace(t *testing.T)
 	require.Equal(t, 0, code, "%s", text)
 	assert.Contains(t, text, "would first remove the existing")
 	assert.Contains(t, text, "second daemon against the same")
+	if other == fleetagent.MechanismTask {
+		// And the largest thing that removal does. A dry run exists to say what
+		// install will do before it does it, and ending a task terminates the
+		// processes the agent supervises.
+		assert.Contains(t, text, "terminates the processes it started")
+	} else {
+		assert.NotContains(t, text, "terminates the processes it started",
+			"a service manager registration's removal leaves supervised processes alone")
+	}
 }
 
 // The mechanism an operator asks for is the one they are told about, and the
@@ -754,6 +807,76 @@ func TestServiceStop_WarnsThatEndingATaskKillsWhatItStarted(t *testing.T) {
 	_ = fleetagent.Main([]string{"service", "stop"}, out)
 	assert.NotContains(t, out.String(), "terminates the processes it started",
 		"a service manager stop leaves supervised processes alone")
+}
+
+// The same warning, from the other two commands that end a task.
+//
+// `stop` and `restart` warned; `uninstall` and `install` did the identical
+// thing and said nothing. Both stop the registration before they remove it, so
+// an operator removing a task, or moving one to a service — which is what
+// `status` tells a confined agent's owner to do — lost every process the agent
+// supervised, with no line anywhere saying it would happen. The command that
+// warned was the one they were least likely to run by accident.
+func TestServiceUninstall_WarnsThatEndingATaskKillsWhatItStarted(t *testing.T) {
+	pinAgentConfig(t)
+	defer fleetagent.PinElevatedForTest()()
+
+	_, restore := fleetagent.PinRecordingRegistrationsForTest(
+		[]fleetagent.Mechanism{fleetagent.MechanismTask}, nil)
+	defer restore()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main([]string{"service", "uninstall"}, out), "%s", out.String())
+	assert.Contains(t, out.String(), "terminates the processes it started")
+	assert.Contains(t, out.String(), "supervises")
+
+	// And not for a service manager registration, whose removal leaves them
+	// alone — a note printed always would satisfy the assertion above without
+	// meaning anything.
+	_, restoreService := fleetagent.PinRecordingRegistrationsForTest(
+		[]fleetagent.Mechanism{fleetagent.MechanismService}, nil)
+	defer restoreService()
+
+	out = &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main([]string{"service", "uninstall"}, out), "%s", out.String())
+	assert.NotContains(t, out.String(), "terminates the processes it started")
+}
+
+// And install, which stops the registration it replaces. This is the flow
+// `status` prints as the remedy for a confined agent, so it is the one an
+// operator is most likely to run without expecting it to touch anything they
+// started.
+func TestServiceInstall_WarnsBeforeItEndsTheTaskItReplaces(t *testing.T) {
+	args := installArgs(t)
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{fleetagent.MechanismTask},
+		Running:   map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
+	text := out.String()
+
+	assert.Contains(t, text, "terminates the processes it started")
+	assert.Less(t, strings.Index(text, "terminates the processes it started"),
+		strings.Index(text, "removed the existing "+fleetagent.MechanismTask.Describe()),
+		"said before it happens, like every other warning this command prints")
+	require.Contains(t, calls(), "task:stop", "which is the call the warning is about")
+}
+
+// A task that is not running has nothing to take with it, and install says
+// nothing. Without this, warning unconditionally would pass the scenario above.
+func TestServiceInstall_SaysNothingAboutATaskThatIsNotRunning(t *testing.T) {
+	args := installArgs(t)
+	_, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{fleetagent.MechanismTask},
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
+	assert.NotContains(t, out.String(), "terminates the processes it started")
 }
 
 // `--mechanism task` off Windows is a combination that cannot exist, and the
@@ -1134,15 +1257,58 @@ func TestServiceStatus_SaysWhenItCouldNotReadTheDaemonsReport(t *testing.T) {
 	assert.Contains(t, text, "cannot tell a confined")
 }
 
-// And a host that simply has no report is not told anything: an agent that has
-// never started is an ordinary state, not a fault of this command.
-func TestServiceStatus_SaysNothingWhenThereIsNoReportAtAll(t *testing.T) {
+// And a host whose agent is not running is not told anything: an agent that has
+// never started has nothing to have recorded, which is an ordinary state rather
+// than a fault of this command.
+func TestServiceStatus_SaysNothingAboutAStoppedAgentWithNoReport(t *testing.T) {
 	pinAgentConfig(t)
+	defer fleetagent.PinInstalledForTest([]fleetagent.Mechanism{fleetagent.MechanismService}, false)()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main([]string{"service", "status"}, out))
+	assert.NotContains(t, out.String(), "no record")
+	assert.NotContains(t, out.String(), "could not read the record")
+}
+
+// But a *running* agent with no record at all is not an ordinary state, and it
+// used to be reported as plain `running` with nothing said.
+//
+// `serve` writes the record before agent.New binds the listener, so a daemon
+// that is up has written one; "something is running here" and "there is no
+// record" cannot both be true of the same daemon. They can both be true of this
+// command, and the way that happens is the documented one: `install --config`
+// bakes a config path into the definition, `status` re-discovers a config of
+// its own, and `state_dir` comes from whichever it found. Looking in the wrong
+// directory produced exactly the outcome #74 exists to stop — a confined agent
+// reported as running, exiting zero.
+func TestServiceStatus_SaysWhenARunningAgentHasLeftNoReport(t *testing.T) {
+	stateDir := pinAgentConfig(t)
+	defer fleetagent.PinInstalledForTest([]fleetagent.Mechanism{fleetagent.MechanismService}, true)()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main([]string{"service", "status"}, out),
+		"the agent may be perfectly fine; this command just cannot tell")
+	text := out.String()
+	assert.Contains(t, text, "no record of what it")
+	assert.Contains(t, text, filepath.Join(stateDir, "runtime.json"),
+		"and it has to name the file it looked for, or there is nothing to go and check")
+	assert.Contains(t, text, "--config", "which is the one way a running daemon's record is somewhere else")
+}
+
+// And a running agent that *did* leave one is told nothing, or the note above
+// would be printed to everybody and mean nothing.
+func TestServiceStatus_SaysNothingWhenTheReportIsThere(t *testing.T) {
+	stateDir := pinAgentConfig(t)
+	plantLiveReport(t, stateDir, fleetagent.RuntimeReportForTest{
+		Account:    "fleet",
+		Home:       "/home/fleet",
+		Visibility: fleetagent.ProfileVisibleForTest,
+	})
 	defer fleetagent.PinInstalledForTest([]fleetagent.Mechanism{fleetagent.MechanismService}, true)()
 
 	out := &bytes.Buffer{}
 	require.Equal(t, 0, fleetagent.Main([]string{"service", "status"}, out))
-	assert.NotContains(t, out.String(), "could not read the record")
+	assert.NotContains(t, out.String(), "no record")
 }
 
 // The confined shape `status` has to name, in the one report field an operator

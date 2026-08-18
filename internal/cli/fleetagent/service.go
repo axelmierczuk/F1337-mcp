@@ -198,6 +198,13 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 			p.Printf("dry run: install would first remove the existing %s registered on this\n", m.Describe())
 			p.Println("         host, which would otherwise start a second daemon against the same")
 			p.Println("         state directory.")
+			// The largest thing that removal does, said by the preview of the
+			// command as well as by the command. Removing a task means ending
+			// it, and a dry run exists to say what install will do before it
+			// does it.
+			for _, line := range taskStopNote(m) {
+				p.Println(line)
+			}
 		}
 		p.Printf("dry run: %s would be registered as follows. Nothing has been created,\n", ServiceName)
 		p.Println("         granted, or registered.")
@@ -301,6 +308,32 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	if installed {
 		if status, err := svc.Status(); err == nil && status == service.StatusRunning {
 			wasRunning = true
+			for _, line := range taskStopNote(mechanism) {
+				p.Println(line)
+			}
+			// Stopped before it is removed, which removeOtherMechanism has
+			// always done and this path did not.
+			//
+			// It is not tidiness. DeleteService only *marks* a running service
+			// for deletion: the entry stays in the SCM database until the
+			// process exits, OpenService keeps finding it, and the
+			// CreateService that comes next fails — kardianos reports it as
+			// "service fleet-agent already exists". So re-running `install`
+			// over its own running Windows service, which this command
+			// advertises as safe and which is what an upgrade does, failed and
+			// left the host with a definition marked for deletion and no
+			// replacement: an agent that disappears at the next reboot. The
+			// other two managers are unaffected — launchd's Uninstall stops the
+			// job itself, and systemd's disables a unit whose process keeps
+			// running — which is why this was invisible everywhere but on the
+			// one platform.
+			//
+			// Best-effort for the reason removeOtherMechanism's is: a stop that
+			// fails is not a reason to refuse to replace the definition, and
+			// the restart below is what puts the agent back.
+			if err := svc.Stop(); err != nil {
+				p.Printf("note: could not stop the running %s before replacing it: %v\n", mechanism.Describe(), err)
+			}
 		}
 		if err := svc.Uninstall(); err != nil {
 			return fmt.Errorf("replace existing service definition: %w", err)
@@ -563,6 +596,31 @@ func mechanismNotes(m Mechanism, goos, account string) []string {
 	return nil
 }
 
+// taskStopNote is what an operator is told before a command ends a Scheduled
+// Task.
+//
+// Ending a task is not a service manager stop. Task Scheduler terminates the
+// processes the task started, which is every background process this agent
+// supervises — the thing KillMode=process and AbandonProcessGroup exist to
+// prevent on the other two platforms, and the one Windows offers no setting
+// for. Losing them is the largest thing any of these commands does, and it is
+// invisible until an operator goes looking for a dev server that is gone.
+//
+// A function rather than a branch inside `service stop`, because `stop` is not
+// the only command that ends the task. `uninstall` stops every registration it
+// removes, and `install` stops the one it replaces — the same termination, from
+// commands whose output said nothing about it, while the command that warned
+// was the one an operator was least likely to run by accident.
+func taskStopNote(m Mechanism) []string {
+	if m != MechanismTask {
+		return nil
+	}
+	return []string{
+		"NOTE: ending a Scheduled Task terminates the processes it started, so the",
+		"      background processes this agent supervises stop with it.",
+	}
+}
+
 // servicePassword obtains the account's password for the SCM, and nothing else
 // ever sees it.
 func servicePassword(in io.Reader, out io.Writer, account string, fromStdin bool) (string, error) {
@@ -631,6 +689,12 @@ func removeOtherMechanism(p *cli.Printer, keeping Mechanism) (replacedRegistrati
 		// still exists.
 		if status, err := other.Status(); err == nil && status == service.StatusRunning {
 			replaced.running = true
+			// Only when it is running, unlike `stop` and `uninstall`: install
+			// is a command an operator runs on a host in any state, and a task
+			// that is not running has nothing to take with it.
+			for _, line := range taskStopNote(m) {
+				p.Println(line)
+			}
 		}
 		if err := other.Stop(); err != nil {
 			p.Printf("note: could not stop the existing %s before removing it: %v\n", m.Describe(), err)
@@ -687,6 +751,12 @@ func runServiceUninstall(out io.Writer) error {
 		svc, err := controlRegistration(mechanism)
 		if err != nil {
 			return err
+		}
+		// The same warning `service stop` prints, because this is the same
+		// termination: uninstall stops every registration it removes, and an
+		// operator removing a task loses every process it supervises.
+		for _, line := range taskStopNote(mechanism) {
+			p.Println(line)
 		}
 		// Stopping first is best-effort: on some managers uninstalling a
 		// running service leaves it running until reboot, and a stop failure is
@@ -745,14 +815,11 @@ func runServiceControl(out io.Writer, verb string) error {
 		if err != nil {
 			return err
 		}
-		// Said before it happens, not after. Task Scheduler ends a task by
-		// terminating what the task started, which is every background process
-		// this agent supervises — the thing KillMode=process and
-		// AbandonProcessGroup exist to prevent on the other two platforms, and
-		// the one Windows offers no setting for.
-		if mechanism == MechanismTask && (verb == "stop" || verb == "restart") {
-			p.Println("NOTE: ending a Scheduled Task terminates the processes it started, so the")
-			p.Println("      background processes this agent supervises stop with it.")
+		// Said before it happens, not after; see taskStopNote.
+		if verb == "stop" || verb == "restart" {
+			for _, line := range taskStopNote(mechanism) {
+				p.Println(line)
+			}
 		}
 		switch verb {
 		case "start":
@@ -832,7 +899,7 @@ func runServiceStatus(out io.Writer) error {
 	report, reportErr := readLiveRuntimeReport(stateDir)
 	confinement := confinementFor(report)
 
-	unusable := false
+	unusable, running := false, false
 	for _, mechanism := range mechanisms {
 		svc, err := controlRegistration(mechanism)
 		if err != nil {
@@ -849,6 +916,7 @@ func runServiceStatus(out io.Writer) error {
 		p.Printf("mechanism:  %s\n", mechanism.Describe())
 		p.Printf("platform:   %s\n", service.Platform())
 		if status == service.StatusRunning {
+			running = true
 			if pid, ok := runningPID(report); ok {
 				p.Printf("pid:        %d\n", pid)
 			} else {
@@ -864,7 +932,8 @@ func runServiceStatus(out io.Writer) error {
 	if path, err := agent.DefaultConfigPath(); err == nil {
 		p.Printf("config:     %s\n", path)
 	}
-	if reportErr != nil {
+	switch {
+	case reportErr != nil:
 		// Not a failure of the command, and not silence either. Every answer
 		// above about a confined agent comes out of that one file, and an
 		// operator who cannot read it is being told "running" by a command that
@@ -875,6 +944,29 @@ func runServiceStatus(out io.Writer) error {
 		p.Println("      agent from a working one. Re-run it as the account the agent runs")
 		p.Println("      as, or elevated: `install` gives the state directory to that")
 		p.Println("      account, and `status` is not an elevated command.")
+
+	case running && report == nil:
+		// A daemon that is up has already written this file: `serve` writes it
+		// before agent.New binds the listener, so "something is running here"
+		// and "there is no record of it" cannot both be true of the same
+		// daemon. They can both be true of this command, and there is one way
+		// that happens: `install --config` bakes a config path into the service
+		// definition, `status` re-discovers a config of its own, and state_dir
+		// is read from whichever it found. Looking in the wrong directory then
+		// produces the answer this whole issue exists to stop — a confined
+		// agent reported as `running`, exiting zero, with nothing said.
+		//
+		// Silence used to be the answer here on the grounds that an agent which
+		// has never started is an ordinary state. It is — but that agent is not
+		// running, and this branch is only reached when something says one is.
+		p.Println("NOTE: this agent is reported as running and has left no record of what it")
+		p.Println("      can reach:")
+		p.Printf("        %s\n", runtimeReportPath(stateDir))
+		p.Println("      The daemon writes that file at every start, into the state directory")
+		p.Println("      of the config it was started with. Until there is one, `status`")
+		p.Println("      cannot tell a confined agent from a working one — if `install` was")
+		p.Println("      given a --config other than the one above, this command is looking")
+		p.Println("      in the wrong place.")
 	}
 
 	if confinement != nil && unusable {

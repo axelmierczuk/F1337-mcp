@@ -110,6 +110,55 @@ func TestRunsInSessionZero(t *testing.T) {
 	}
 }
 
+// The same identities, spelled the way the platform spells them back.
+//
+// Every case above is the *logon* name: what CreateService takes and what an
+// operator types. LookupAccountSid — which is where runtimeReport.Account comes
+// from, deliberately, and what `whoami` and services.msc print — returns the
+// display name for the same well-known SIDs, and two of the three have a space
+// in them. Recognised on neither side, that spelling made `service status` name
+// the wrong fault for the account #74 is about, and made `--user` with it
+// resolve to a logon-triggered task for an account that never logs on.
+func TestRunsInSessionZero_TheSpellingThePlatformReports(t *testing.T) {
+	for _, account := range []string{
+		`NT AUTHORITY\NETWORK SERVICE`,
+		`NT AUTHORITY\LOCAL SERVICE`,
+		`nt authority\network service`,
+		"Network Service",
+		"Local Service",
+		// What currentAccount records when the name lookup cannot be made:
+		// the well-known SIDs themselves.
+		"S-1-5-18",
+		"S-1-5-19",
+		"S-1-5-20",
+	} {
+		assert.True(t, fleetagent.RunsInSessionZeroForTest(account),
+			"%q is how Windows itself names a built-in service identity", account)
+	}
+	for _, account := range []string{`CORP\network services`, `CORP\system`, `WORKSTATION\axel smith`} {
+		assert.False(t, fleetagent.RunsInSessionZeroForTest(account),
+			"%q is an ordinary account and must not be treated as session-0-only", account)
+	}
+}
+
+// And the two rules that decide what an operator ends up with, driven with that
+// spelling: a built-in identity can only be a service, and asking for a task
+// under one is refused.
+func TestResolveMechanism_TheSpellingThePlatformReports(t *testing.T) {
+	const reported = `NT AUTHORITY\NETWORK SERVICE`
+
+	mechanism, err := fleetagent.ResolveMechanismForTest(fleetagent.MechanismAuto, "windows", reported)
+	require.NoError(t, err)
+	assert.Equal(t, fleetagent.MechanismService, mechanism,
+		"a logon trigger fires when an account logs on interactively, and this one never does")
+
+	_, err = fleetagent.ResolveMechanismForTest(fleetagent.MechanismTask, "windows", reported)
+	require.Error(t, err, "asking for a task under a built-in identity is refused, however the identity is spelled")
+
+	assert.False(t, fleetagent.ServiceNeedsPasswordForTest(fleetagent.MechanismService, "windows", reported),
+		"a built-in service identity has no password, so install must not stop to ask for one")
+}
+
 // `service install` runs elevated by definition, so "the invoking user" would
 // otherwise quietly mean the machine's most privileged account.
 func TestInvokingServiceUser_RefusesASuperuser(t *testing.T) {

@@ -130,6 +130,18 @@ func TestServiceInstall_SwitchingMechanismDoesNotStartAStoppedAgent(t *testing.T
 
 // Re-running install over its own registration replaces the definition and
 // restarts what was running, which is what makes re-running an installer safe.
+//
+// The stop is the load-bearing step, and it was missing. removeOtherMechanism
+// stops the registration it removes; this path — the same command, replacing
+// its own definition rather than the other mechanism's — went straight to
+// Uninstall. On Windows DeleteService only *marks* a running service for
+// deletion, so the entry stays in the SCM database, the CreateService that
+// follows fails with "service fleet-agent already exists", and the host is left
+// with a definition marked for deletion and no replacement: an agent that
+// disappears at the next reboot, from the command this one documents as safe to
+// re-run. launchd stops the job inside its own Uninstall and systemd disables a
+// unit whose process keeps running, so the two managers CI can reason about
+// both hid it.
 func TestServiceInstall_ReplacesItsOwnDefinitionAndRestartsIt(t *testing.T) {
 	args := installArgs(t)
 	mechanism := fleetagent.MechanismService
@@ -144,11 +156,27 @@ func TestServiceInstall_ReplacesItsOwnDefinitionAndRestartsIt(t *testing.T) {
 	text := out.String()
 	require.Equal(t, 0, code, "%s", text)
 
-	assert.Equal(t, []string{"new:uninstall", "new:install", "new:restart"}, calls(),
-		"kardianos refuses to install over an existing definition, so a re-run has to replace it")
+	assert.Equal(t, []string{"new:stop", "new:uninstall", "new:install", "new:restart"}, calls(),
+		"kardianos refuses to install over an existing definition, so a re-run has to replace it — "+
+			"and the SCM will not let the replacement be written while the old one is still running")
 	assert.Contains(t, text, "existing service definition removed for replacement")
 	assert.Contains(t, text, "reinstalled")
 	assert.Contains(t, text, "service restarted with the new definition")
+}
+
+// And a registration that is not running is not stopped: there is nothing to
+// stop, and a failed stop would print a note about a state nobody is in.
+func TestServiceInstall_ReplacesAStoppedDefinitionWithoutStoppingIt(t *testing.T) {
+	args := installArgs(t)
+	mechanism := fleetagent.MechanismService
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{mechanism},
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
+	assert.Equal(t, []string{"new:uninstall", "new:install"}, calls())
 }
 
 // A host with nothing registered gets exactly one write and no lifecycle calls
@@ -288,6 +316,16 @@ func TestServiceInstall_CreatesItsDirectoriesClosed(t *testing.T) {
 // account these scenarios use is a built-in identity, which install grants
 // nothing at all, and the icacls argv it would use otherwise is asserted in
 // acl_test.go. The call site being asserted here is shared, untagged code.
+//
+// Run against a host that already carries a registration, which is what makes
+// "nothing was registered" mean anything. Against an empty host — which is how
+// this scenario started out — the assertion is satisfied by there having been
+// nothing to remove, and moving the handover below removeOtherMechanism left
+// the whole suite green while turning "install refuses and changes nothing"
+// into "install takes the host's only registration off it and then refuses".
+// That ordering is the same property TestServiceInstall_ADefinitionItCannotBuild-
+// RemovesNothing pins for the definition, for the step that actually fails in
+// the field.
 func TestServiceInstall_RefusesWhenTheEnrollmentMaterialCannotChangeHands(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("install grants a built-in service identity nothing; the icacls argv is asserted in acl_test.go")
@@ -299,7 +337,10 @@ func TestServiceInstall_RefusesWhenTheEnrollmentMaterialCannotChangeHands(t *tes
 	configPath, _, _ := installConfig(t, "tls:\n  certificate: "+filepath.ToSlash(missing)+"\n")
 	args := append([]string{"service", "install", "--config", configPath}, installAccount(t)...)
 
-	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{fleetagent.MechanismTask},
+		Running:   map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+	})
 	defer restore()
 
 	out := &bytes.Buffer{}
@@ -308,7 +349,9 @@ func TestServiceInstall_RefusesWhenTheEnrollmentMaterialCannotChangeHands(t *tes
 	require.Error(t, err, "%s", out.String())
 	assert.Contains(t, err.Error(), missing, "the file the daemon will not be able to read has to be named")
 	assert.Contains(t, err.Error(), "will not start without it")
-	assert.Empty(t, calls(), "nothing may be registered once the material the daemon reads cannot reach it")
+	assert.Empty(t, calls(),
+		"nothing may be registered — or unregistered — once the material the daemon reads cannot reach it: "+
+			"this host had a running agent on it, and a refusal that has already removed it is not a refusal")
 }
 
 // The password the operator supplies is the one handed to the service manager,
