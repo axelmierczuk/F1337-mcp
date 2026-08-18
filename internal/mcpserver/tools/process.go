@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 )
 
@@ -224,41 +225,16 @@ type ProcessDetail struct {
 // stateString renders a process state. Short strings, not enum names: they
 // land in model context on every list call, and "crashed" says everything
 // PROCESS_STATE_CRASHED does in a quarter of the tokens.
-func stateString(s sandboxdv1.ProcessState) string {
-	switch s {
-	case sandboxdv1.ProcessState_PROCESS_STATE_STARTING:
-		return "starting"
-	case sandboxdv1.ProcessState_PROCESS_STATE_READY:
-		return "ready"
-	case sandboxdv1.ProcessState_PROCESS_STATE_RUNNING:
-		return "running"
-	case sandboxdv1.ProcessState_PROCESS_STATE_EXITED:
-		return "exited"
-	case sandboxdv1.ProcessState_PROCESS_STATE_CRASHED:
-		return "crashed"
-	case sandboxdv1.ProcessState_PROCESS_STATE_RESTARTING:
-		return "restarting"
-	case sandboxdv1.ProcessState_PROCESS_STATE_ORPHANED:
-		return "orphaned"
-	default:
-		return "unknown"
-	}
-}
+//
+// Defined in internal/client rather than here, for the same reason the health
+// names are: `fleetctl tui` shows an operator the same states, and the word the
+// model uses for a crashed process and the word the operator's screen uses for
+// it must not be two independently maintained lists.
+func stateString(s sandboxdv1.ProcessState) string { return client.ProcessStateName(s) }
 
 // liveState reports whether a state means the process is still there. Uptime
 // is measured to now for these and to the exit for the rest.
-func liveState(s sandboxdv1.ProcessState) bool {
-	switch s {
-	case sandboxdv1.ProcessState_PROCESS_STATE_STARTING,
-		sandboxdv1.ProcessState_PROCESS_STATE_READY,
-		sandboxdv1.ProcessState_PROCESS_STATE_RUNNING,
-		sandboxdv1.ProcessState_PROCESS_STATE_RESTARTING,
-		sandboxdv1.ProcessState_PROCESS_STATE_ORPHANED:
-		return true
-	default:
-		return false
-	}
-}
+func liveState(s sandboxdv1.ProcessState) bool { return client.ProcessStateLive(s) }
 
 func policyString(p sandboxdv1.RestartPolicy) string {
 	switch p {

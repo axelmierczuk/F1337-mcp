@@ -2,7 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // The renderings a fleet view is made of: how long ago something happened, how
@@ -54,6 +57,60 @@ func HumanBytes(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
+}
+
+// SafeText makes an agent-supplied string safe to print on a terminal.
+//
+// Control characters are dropped, not escaped and not turned into spaces, and
+// runs of whitespace collapse to one space. Everything a sandbox says about
+// itself — a health message, a process name, a line of a log — arrives from a
+// machine running someone else's code and lands on the operator's screen. A
+// terminal escape in a fleet listing is a lie about the fleet, and in a
+// full-screen view it is worse: one escape sequence can move the cursor out of
+// the pane it was drawn in and corrupt every frame after it.
+//
+// A discarded escape does not become a space, because a gap where one was would
+// split a single word into two that then read as separate columns.
+func SafeText(msg string) string {
+	var b strings.Builder
+	b.Grow(len(msg))
+	space := false
+	for _, r := range msg {
+		switch {
+		case unicode.IsSpace(r):
+			space = b.Len() > 0
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			// Dropped outright; see above.
+		default:
+			if space {
+				b.WriteRune(' ')
+				space = false
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// Clip bounds a string to limit bytes, cutting on a rune boundary and marking
+// the cut.
+//
+// Bytes rather than display columns, because this bounds what one machine may
+// contribute to a structured result — a JSON field, a stored row — where the
+// budget is memory. Fitting text to a column of a terminal is a different job,
+// done against the rendered width; see internal/tui.
+func Clip(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // HumanDuration renders an uptime without the sub-second noise
