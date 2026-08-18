@@ -1,13 +1,17 @@
 package tunnel
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -201,4 +205,89 @@ func TestOpenFailure_ReportsAPolicyRefusalAsDenied(t *testing.T) {
 func TestTargetLabel(t *testing.T) {
 	assert.Equal(t, "localhost:3000", Target{Port: 3000}.Label())
 	assert.Equal(t, "db.internal:5432", Target{Host: "db.internal", Port: 5432}.Label())
+}
+
+// ------------------------------------------------------- the onOpen seam
+
+// openedStream answers the open and then ends, standing in for a stream that
+// came up and had nothing more to say.
+//
+// It counts the data messages it was sent, which is what the assertion below
+// turns on: what must not happen is bytes moving after the caller's own
+// handshake failed.
+type openedStream struct {
+	grpc.ClientStream
+	opened bool
+
+	mu   sync.Mutex
+	data int
+}
+
+func (s *openedStream) Send(req *sandboxdv1.ForwardRequest) error {
+	if len(req.GetData()) > 0 {
+		s.mu.Lock()
+		s.data++
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+func (s *openedStream) CloseSend() error { return nil }
+
+func (s *openedStream) Recv() (*sandboxdv1.ForwardResponse, error) {
+	if !s.opened {
+		s.opened = true
+		return &sandboxdv1.ForwardResponse{
+			Event: &sandboxdv1.ForwardResponse_Opened{Opened: &sandboxdv1.ForwardOpened{Success: true}},
+		}, nil
+	}
+	return nil, io.EOF
+}
+
+func (s *openedStream) dataMessages() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data
+}
+
+type openingClient struct{ stream *openedStream }
+
+func (c *openingClient) Forward(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[sandboxdv1.ForwardRequest, sandboxdv1.ForwardResponse], error) {
+	return c.stream, nil
+}
+
+// A handshake reply that could not be written ends the connection, carrying
+// nothing.
+//
+// onOpen is where a protocol with a handshake of its own answers its client:
+// for the SOCKS proxy it writes the ten bytes that say the destination is
+// connected, and [Carry] documents an error from it as ending the connection
+// without carrying anything. It has to — a client that never received those ten
+// bytes is still waiting for them, so a response body pumped at it arrives
+// where a handshake reply should be, on exactly the transfers a proxy exists to
+// carry.
+//
+// Deterministic rather than statistical, which is what made this contract look
+// untestable and left it unpinned: the failure it guards is a socket write that
+// fails, which is hard to force on a live connection and trivial to state to
+// the seam itself. Ignoring onOpen's error left every test in this repository
+// green.
+func TestCarry_CarriesNothingWhenTheHandshakeReplyFailed(t *testing.T) {
+	client, server := tcpPair(t)
+
+	// Queued before Carry runs, so a build that started the pumps anyway has
+	// something to forward and is caught here rather than by a timeout.
+	_, err := client.Write([]byte("a request the far side must never see"))
+	require.NoError(t, err)
+
+	stream := &openedStream{}
+	unanswerable := errors.New("answering the SOCKS request: broken pipe")
+
+	err = Carry(t.Context(), &openingClient{stream: stream}, server,
+		Target{Host: "db.internal", Port: 5432}, func() error { return unanswerable })
+
+	require.ErrorIs(t, err, unanswerable,
+		"the caller's own handshake failure is what ended this connection, and is what it has to be told")
+	assert.Zero(t, stream.dataMessages(),
+		"nothing may be carried once the client's handshake could not be answered")
 }

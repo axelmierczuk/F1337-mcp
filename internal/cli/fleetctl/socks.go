@@ -156,7 +156,7 @@ func newSocksCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&registryPath, "registry", "", "path to the fleet registry (default: <config dir>/registry.yaml)")
 	cmd.Flags().IntVar(&port, "port", 0, "local port to listen on; 0 (the default) picks a free one and reports it")
 	cmd.Flags().StringArrayVar(&allow, "allow", nil,
-		"narrow destinations on this side: a host, host:port, or CIDR block; repeatable. Does not replace the agent's own allow list")
+		"narrow destinations on this side: a host, host:port, or CIDR block; repeatable. A block is matched against an address the client asked for, never against a name that resolves into it — resolving here is what a proxy exists not to do. Does not replace the agent's own allow list")
 	return cmd
 }
 

@@ -154,9 +154,12 @@ func Carry(ctx context.Context, client sandboxdv1.ForwardServiceClient, conn net
 		return &OpenError{Kind: FailureUnknown, Message: "the agent answered a forward open with an unexpected message"}
 	}
 	if !opened.GetSuccess() {
-		// Close the local connection rather than leaving it hanging: a client
-		// that gets an immediate reset retries or reports, and a client left
-		// waiting on a socket that will never answer does neither.
+		// Reported, and the local connection deliberately left open: the
+		// caller owns it, and one speaking a protocol of its own has something
+		// left to say on it. A destination the agent refused is exactly where
+		// the SOCKS proxy writes 0x02 onto this socket, and closing it here
+		// would give its client a reset instead — which is the defect this
+		// ownership rule was moved out of fleet_forward to prevent.
 		return &OpenError{Kind: classifyDialFailure(opened.GetError()), Message: opened.GetError()}
 	}
 

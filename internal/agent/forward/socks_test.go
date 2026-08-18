@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -357,4 +358,47 @@ func TestSocks_StartupLogAnnouncesAnUnrestrictedProxy(t *testing.T) {
 	// And a block written as its own network has nothing to answer for.
 	exact := warnings(agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{"10.0.4.0/24"}}, true)
 	assert.NotContains(t, exact, "wider than")
+}
+
+// And the daemon says it, not merely the function that composes it.
+//
+// Every other assertion about the posture calls logPosture directly, which is
+// true of a build where nothing calls logPosture at all: replacing New's call
+// to it with `_ = logPosture` left every test in internal/agent green, and an
+// operator with no line in their log to read. Both round 1 findings the posture
+// log carries — a block wider than it reads, and an unrestricted proxy — reach
+// an operator only through this call, so this is where that is pinned.
+//
+// It builds the service the way the daemon does, through the agent.Factory that
+// init registers, so the wiring under test is the shipped one.
+func TestSocks_StartupPostureReachesTheDaemonsLog(t *testing.T) {
+	var log bytes.Buffer
+	auditLog := policy.NewAudit(policy.AuditConfig{
+		Path:    filepath.Join(t.TempDir(), "audit.jsonl"),
+		Sandbox: "test-box",
+		Enabled: true,
+	})
+	t.Cleanup(func() { _ = auditLog.Close() })
+
+	enabled := true
+	_, err := New(agent.Deps{
+		Config: &agent.Config{Forward: agent.ForwardConfig{
+			Enabled:      &enabled,
+			SocksEnabled: true,
+			// A block wider than it reads, which is round 1's finding: valid,
+			// so MalformedAllowedHosts cannot see it, and it permits the whole
+			// /24 rather than the one host in front of the mask.
+			AllowedHosts: []string{"10.0.4.7/24"},
+		}},
+		Log:     slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Status:  agent.NewStatus(),
+		Audit:   auditLog,
+		Version: "test",
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, log.String(), "wider than the address they name",
+		"an operator learns what their mask actually permits from the daemon's own log, or nowhere")
+	assert.Contains(t, log.String(), "10.0.4.0/24")
+	assert.Contains(t, log.String(), "SOCKS proxying is permitted")
 }

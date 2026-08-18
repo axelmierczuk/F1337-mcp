@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -165,10 +166,17 @@ func (d *dialingConnector) connect(ctx context.Context, conn net.Conn, dst Desti
 
 // startProxy opens a proxy on a free port and serves it for the test's
 // lifetime.
-func startProxy(t *testing.T, opts Options) *Server {
+//
+// tune, when given, runs between Listen and Serve. That window is the only
+// place a test may touch a Server's unexported state: once the accept loop is
+// running, a connection may be reading it, and -race says so.
+func startProxy(t *testing.T, opts Options, tune ...func(*Server)) *Server {
 	t.Helper()
 	server, err := Listen(0, opts)
 	require.NoError(t, err)
+	for _, apply := range tune {
+		apply(server)
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -300,6 +308,40 @@ func TestSocks_RefusesEverythingButConnect(t *testing.T) {
 			c := dialProxy(t, server.Addr())
 			require.Equal(t, byte(authNone), c.greet(t, authNone))
 			assert.Equal(t, byte(replyCommandNotSupported), c.request(t, tc.cmd, addrIPv4, net.IPv4(10, 0, 4, 7).To4(), 80))
+		})
+	}
+	assert.Empty(t, connector.destinations(),
+		"a refused command must not reach the connector at all")
+}
+
+// And it refuses them with that code for the request a conformant client
+// actually sends.
+//
+// RFC 1928 §4: a client that does not yet know the address it will send
+// datagrams from "MUST use a port number and address of all zeros" in its UDP
+// ASSOCIATE. That is the ordinary spelling of the one command this proxy most
+// expects to be asked for, and it arrives with port 0 — so a proxy that judged
+// the destination fields before the command answered it "general failure",
+// which sends its operator to look at a destination that was never the
+// subject. The case above never sees it: it names a real address and a real
+// port, which no client asking for UDP ASSOCIATE has to have.
+func TestSocks_RefusesUDPAssociateSpelledTheWayTheRFCSpellsIt(t *testing.T) {
+	connector := &dialingConnector{}
+	server := startProxy(t, Options{Connect: connector.connect})
+
+	for _, tc := range []struct {
+		name string
+		cmd  byte
+	}{
+		{"UDP ASSOCIATE", cmdUDPAssociate},
+		{"BIND", cmdBind},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := dialProxy(t, server.Addr())
+			require.Equal(t, byte(authNone), c.greet(t, authNone))
+			assert.Equal(t, byte(replyCommandNotSupported),
+				c.request(t, tc.cmd, addrIPv4, net.IPv4zero.To4(), 0),
+				"the answer is about the command, not about the all-zero destination the RFC told the client to send")
 		})
 	}
 	assert.Empty(t, connector.destinations(),
@@ -609,28 +651,57 @@ func TestSocks_RefusesToListenWithoutAConnector(t *testing.T) {
 // A client that connects and says nothing must not hold a goroutine and a
 // descriptor for the life of the proxy. Opening connections and saying nothing
 // is the cheapest thing a process on this machine can do.
+//
+// The deadline is watched biting, on a proxy whose copy of it has been
+// shortened, rather than inferred from the constant existing. Asserting that
+// handshakeTimeout is positive and that the connection was accepted is true of
+// a proxy with no deadline at all: both halves of that hold whether or not
+// conn.SetDeadline is ever called, so the assertion could not fail for the
+// reason it was written for — and deleting the SetDeadline outright left it,
+// and every other test in this tree, green.
 func TestSocks_DropsAClientThatNeverSpeaks(t *testing.T) {
-	server := startProxy(t, Options{Connect: (&dialingConnector{}).connect})
-
-	// The deadline is a constant rather than an option, so this asserts that
-	// one exists and bounds the handshake rather than waiting out the real one.
 	require.Positive(t, handshakeTimeout, "the handshake must be bounded")
 	require.LessOrEqual(t, handshakeTimeout, time.Minute,
 		"a handshake deadline long enough to be worth leaking is not a bound")
+
+	// Set before the accept loop starts: a connection reads this, so writing it
+	// afterwards is a race, and -race is what says so.
+	server := startProxy(t, Options{Connect: (&dialingConnector{}).connect}, func(s *Server) {
+		// Short enough to watch, long enough that a loaded machine cannot trip
+		// it between the dial and the write below.
+		s.handshakeTimeout = 250 * time.Millisecond
+	})
 
 	conn, err := net.DialTimeout("tcp", server.Addr(), 10*time.Second)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
 	// Half a greeting: enough to be accepted, not enough to finish. This is
-	// what the deadline is for, and the connection is counted as open until it
-	// bites.
+	// what the deadline is for.
 	_, err = conn.Write([]byte{version5})
 	require.NoError(t, err)
 
 	eventually(t, 10*time.Second, "the connection to be counted", func() bool {
 		return server.Stats().Accepted == 1
 	})
+
+	// The proxy drops it: the goroutine and the descriptor come back without
+	// the client having said anything more, and without the proxy being torn
+	// down — which is the whole point, since tearing a listener down releases
+	// everything under it whether or not any of this exists.
+	eventually(t, 10*time.Second, "the parked handshake to be dropped", func() bool {
+		return server.Stats().OpenNow == 0
+	})
+
+	// And the client's own socket is closed rather than merely forgotten: a
+	// proxy that returned the goroutine and kept the socket still runs out of
+	// descriptors, just more slowly.
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	var discard [1]byte
+	_, err = conn.Read(discard[:])
+	require.Error(t, err, "the proxy must close a handshake that timed out, not leave it open")
+	assert.NotErrorIs(t, err, os.ErrDeadlineExceeded,
+		"the read hit this test's own deadline, so the proxy had not closed the connection")
 }
 
 // And tearing the proxy down must not wait for that deadline.

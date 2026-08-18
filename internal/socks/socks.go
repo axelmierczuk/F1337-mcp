@@ -76,6 +76,13 @@ const (
 // lives, and opening connections and saying nothing is the cheapest thing a
 // process on this machine can do. It is cleared before the connection is
 // carried — a proxied connection may be idle for hours and that is ordinary.
+//
+// Not an [Options] field: there is no version of this an operator should be
+// choosing, and one that could set it to zero would be choosing the leak. It is
+// copied onto each [Server] instead, so a test can shorten it and watch a
+// parked handshake actually be dropped. Asserting that this constant is a
+// sensible number is not the same claim, and it held while nothing applied it:
+// deleting the SetDeadline below left every test in this tree green.
 const handshakeTimeout = 30 * time.Second
 
 // Destination is where a client asked to be connected.
@@ -155,6 +162,10 @@ type Server struct {
 	opts     Options
 	log      *slog.Logger
 
+	// handshakeTimeout is [handshakeTimeout], per server so a test can shorten
+	// it. Never zero: Listen is the only constructor and always sets it.
+	handshakeTimeout time.Duration
+
 	cancel context.CancelFunc
 	// wg covers the accept loop and every per-connection goroutine, so Close
 	// returns only once nothing is still running. Two pumps and a stream per
@@ -201,7 +212,7 @@ func Listen(port int, opts Options) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Server{listener: listener, opts: opts, log: log}, nil
+	return &Server{listener: listener, opts: opts, log: log, handshakeTimeout: handshakeTimeout}, nil
 }
 
 // Addr is the address the listener took, e.g. 127.0.0.1:1080.
@@ -378,7 +389,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) error {
 	// goroutine for the life of the proxy. Cleared below before any bytes are
 	// carried: an idle proxied connection is ordinary and must not be killed
 	// for being quiet.
-	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(s.handshakeTimeout)); err != nil {
 		return fmt.Errorf("setting the handshake deadline: %w", err)
 	}
 
@@ -386,7 +397,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) error {
 		return err
 	}
 
-	dst, cmd, err := readRequest(conn)
+	dst, err := readRequest(conn)
 	if err != nil {
 		var reqErr *requestError
 		if errors.As(err, &reqErr) {
@@ -396,10 +407,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) error {
 			_ = writeReply(conn, reqErr.code)
 		}
 		return err
-	}
-	if cmd != cmdConnect {
-		_ = writeReply(conn, replyCommandNotSupported)
-		return fmt.Errorf("this proxy implements CONNECT only; the client asked for %s", commandName(cmd))
 	}
 
 	if s.opts.Allow != nil && !s.opts.Allow(dst) {
@@ -500,10 +507,19 @@ type requestError struct {
 func (e *requestError) Error() string { return e.msg }
 
 // readRequest parses one CONNECT request and returns where it points.
-func readRequest(conn net.Conn) (Destination, byte, error) {
+//
+// It reads the whole request whatever it turns out to be, and judges it at the
+// end. Answering before the destination fields have been consumed would leave
+// them unread in the receive buffer, and closing a socket with unread data
+// sends a reset rather than a FIN — which can discard the reply that was just
+// written, leaving the client with exactly the bare "connection reset" this
+// package answers reply codes in order to avoid. An address type this does not
+// implement is the one thing it cannot read past, because nothing says how long
+// that address is; it is answered where it is found.
+func readRequest(conn net.Conn) (Destination, error) {
 	var header [4]byte
 	if _, err := io.ReadFull(conn, header[:]); err != nil {
-		return Destination{}, 0, fmt.Errorf("reading the SOCKS request: %w", err)
+		return Destination{}, fmt.Errorf("reading the SOCKS request: %w", err)
 	}
 	// Byte 2 is the protocol's reserved field, which is ignored deliberately:
 	// clients do write things there, and refusing over it would break them for
@@ -512,7 +528,7 @@ func readRequest(conn net.Conn) (Destination, byte, error) {
 	version, cmd, addrType := header[0], header[1], header[3]
 
 	if version != version5 {
-		return Destination{}, 0, &requestError{
+		return Destination{}, &requestError{
 			code: replyGeneralFailure,
 			msg:  fmt.Sprintf("the SOCKS request named version %d, not 5", version),
 		}
@@ -523,33 +539,33 @@ func readRequest(conn net.Conn) (Destination, byte, error) {
 	case addrIPv4:
 		raw := make([]byte, net.IPv4len)
 		if _, err := io.ReadFull(conn, raw); err != nil {
-			return Destination{}, cmd, fmt.Errorf("reading the destination address: %w", err)
+			return Destination{}, fmt.Errorf("reading the destination address: %w", err)
 		}
 		dst.Host = net.IP(raw).String()
 	case addrIPv6:
 		raw := make([]byte, net.IPv6len)
 		if _, err := io.ReadFull(conn, raw); err != nil {
-			return Destination{}, cmd, fmt.Errorf("reading the destination address: %w", err)
+			return Destination{}, fmt.Errorf("reading the destination address: %w", err)
 		}
 		dst.Host = net.IP(raw).String()
 	case addrDomain:
 		var length [1]byte
 		if _, err := io.ReadFull(conn, length[:]); err != nil {
-			return Destination{}, cmd, fmt.Errorf("reading the destination name length: %w", err)
+			return Destination{}, fmt.Errorf("reading the destination name length: %w", err)
 		}
 		if length[0] == 0 {
-			return Destination{}, cmd, &requestError{
+			return Destination{}, &requestError{
 				code: replyAddressNotSupported,
 				msg:  "the SOCKS request carried an empty destination name",
 			}
 		}
 		raw := make([]byte, int(length[0]))
 		if _, err := io.ReadFull(conn, raw); err != nil {
-			return Destination{}, cmd, fmt.Errorf("reading the destination name: %w", err)
+			return Destination{}, fmt.Errorf("reading the destination name: %w", err)
 		}
 		dst.Host, dst.Name = string(raw), true
 	default:
-		return Destination{}, cmd, &requestError{
+		return Destination{}, &requestError{
 			code: replyAddressNotSupported,
 			msg:  fmt.Sprintf("the SOCKS request used address type 0x%02x, which this proxy does not implement", addrType),
 		}
@@ -557,16 +573,33 @@ func readRequest(conn net.Conn) (Destination, byte, error) {
 
 	var port [2]byte
 	if _, err := io.ReadFull(conn, port[:]); err != nil {
-		return Destination{}, cmd, fmt.Errorf("reading the destination port: %w", err)
+		return Destination{}, fmt.Errorf("reading the destination port: %w", err)
 	}
 	dst.Port = int(binary.BigEndian.Uint16(port[:]))
+
+	// The command is judged before the destination fields are, because a
+	// request for a command this proxy does not implement is unsupported
+	// whatever they hold. RFC 1928 §4 tells a client that does not yet know
+	// the address it will send datagrams from to put all zeros in a UDP
+	// ASSOCIATE — so the conformant spelling of the one request this proxy
+	// most expects to refuse arrives with port 0, and judging the port first
+	// answered it with "general failure". A client told that goes looking at
+	// its destination instead of at the command it asked for, which is the
+	// wrong layer, and is the outcome refusing cleanly exists to avoid.
+	if cmd != cmdConnect {
+		return Destination{}, &requestError{
+			code: replyCommandNotSupported,
+			msg:  fmt.Sprintf("this proxy implements CONNECT only; the client asked for %s", commandName(cmd)),
+		}
+	}
+
 	if dst.Port == 0 {
-		return Destination{}, cmd, &requestError{
+		return Destination{}, &requestError{
 			code: replyGeneralFailure,
 			msg:  "the SOCKS request named port 0",
 		}
 	}
-	return dst, cmd, nil
+	return dst, nil
 }
 
 // writeReply answers a request.
