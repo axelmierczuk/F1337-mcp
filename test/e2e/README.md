@@ -65,7 +65,10 @@ Everything except one scenario.
 | `TestAgentRejectsForeignAndWrongProfileClientCertificates` | A leaf from another CA is refused, and so is an agent's own leaf used as a client certificate. |
 | `TestEnrollmentRefusesWhatTheTokenDoesNotAuthorize` | A host cannot enroll as a name or an address its token does not authorize, and a spent token cannot be replayed. |
 | `TestEnrollmentRequiresThePinnedFingerprint` | Enrollment refuses to proceed unpinned, and a wrong pin fails the handshake before the token is sent. |
-| `TestARefusedEnrollmentSpendsItsToken` | Records a defect, not a requirement. See the comment on the test. |
+| `TestARefusedEnrollmentKeepsItsToken` | A wrong `--name` and a mistyped `--address` are each refused on what they name, and the corrected command enrolls on the same token; single-use still holds afterwards. |
+| `TestARefusedEnrollmentKeepsItsTokenWhenTheAgentAddsALoopbackName` | A loopback SAN the agent adds takes the leaf one name over the CA's limit; the refusal is correct and costs no token. |
+| `TestARefusedEnrollmentKeepsItsTokenWhenACollisionLengthensTheName` | Collision resolution offers `<name>-2`, two bytes past the DNS label limit; the refusal is correct and costs no token. |
+| `TestTheSANLimitThisSuiteAssumesIsTheOneTheCAEnforces` | Pins this suite's `maxLeafSANs` to the product through `enroll mint`, so raising `ca.MaxSANs` cannot leave the loopback scenario passing on an enrollment that was never refused. |
 | `TestConcurrentCallsKeepTheirTargets` | Two dozen calls in flight across both sandboxes each run where they were aimed. |
 | `TestListReportsAnUnreachableSandboxWithoutWaitingForIt` | A dead sandbox is reported dead in the same listing that still reports its neighbour live. |
 | `TestFileSearchToolsWalkTheSandbox` | `fleet_ls`, `fleet_glob` and `fleet_grep` — the last of which is a server stream — over a real tree. |

@@ -54,6 +54,19 @@ operator                control plane              new host
 ```
 
 - Tokens are **single-use** and short-lived.
+- **The token is spent last, not first.** Everything that can refuse an
+  enrollment — the name, the addresses, the CSR, the SAN set the CA is asked to
+  sign — is checked before the token is redeemed, so a request refused for a
+  mistyped `--address` leaves the token spendable and the operator's corrected
+  retry works. Redemption is still a single atomic check-and-mark under the
+  store's lock, and it is still the only thing that grants the right to proceed:
+  of any number of enrollments holding one token, exactly one wins it and the
+  rest are refused as replays. The read that runs first claims nothing and is
+  advisory — a token revoked or expired inside that window is refused by the
+  redemption, not admitted on the strength of the earlier read. The redemption
+  comes before the fleet registry write, because that write is the first thing
+  that cannot be taken back: the loser of a race must be refused without leaving
+  a fleet member behind.
 - **A token authorizes an identity, not just admission.** The name and addresses
   given to `enroll mint` are the only ones the issued certificate carries — in
   its subject as much as in its subject alternative names, because an attacker

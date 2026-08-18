@@ -147,8 +147,13 @@ func buildBinaries(dir string) (binaries, error) {
 		// running as root, git refuses a working tree owned by another uid, and
 		// `go build` turns that refusal into "error obtaining VCS status" — a
 		// build failure caused entirely by stamping a commit hash into a binary
-		// that is deleted at the end of the run. Nothing here asserts on a
-		// version string.
+		// that is deleted at the end of the run.
+		//
+		// No scenario asserts what the version string *is*, and none may: these
+		// binaries carry internal/version's unstamped defaults. One asserts that
+		// the two sources of it agree, which those defaults are enough for — the
+		// bug it covers was "dev" against "dev (unknown, built unknown)", both
+		// of them unstamped values.
 		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", dir+string(os.PathSeparator), target)
 		cmd.Dir = repoRoot
 		if out, err := cmd.CombinedOutput(); err != nil {

@@ -106,19 +106,28 @@ jobs:
       # runners; only the linters were host-only, and cross-linting needs no
       # runner of that OS. Kept as three steps in one job rather than a matrix
       # so the required check stays named "Lint".
+      #
+      # The args mirror `make lint`, and for the reason CHECK_EXTRA_PKGS in the
+      # Makefile gives: the implicit `./...` a bare run uses skips everything
+      # under testdata, so test/e2e/testdata/helpers was outside this gate too.
+      # Naming any package at all replaces the implicit default, so `./...` has
+      # to be spelled out alongside it. The vet step above already does this.
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.6.2
+          args: ./... ./test/e2e/testdata/helpers
         env:
           GOOS: linux
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.6.2
+          args: ./... ./test/e2e/testdata/helpers
         env:
           GOOS: darwin
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.6.2
+          args: ./... ./test/e2e/testdata/helpers
         env:
           GOOS: windows
 

@@ -8,8 +8,11 @@
 // program, built by the suite from source it owns, behaves identically
 // everywhere the agent runs.
 //
-// It lives under testdata so the module's own build and lint passes ignore it;
-// the suite compiles it at startup, so it cannot rot unnoticed.
+// It lives under testdata so that `go build ./...` and `go test ./...` do not
+// pick it up. That exclusion is the go tool's, not a choice, and it applied to
+// the checkers too until the Makefile started naming this package: vet and
+// golangci-lint both reach it now, under every GOOS, which is the only reason
+// the file below can be held to the same standard as the rest of the tree.
 package main
 
 import (
@@ -85,7 +88,11 @@ func serve(args []string) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, body)
+		// A client that hung up mid-body is the caller's problem, not this
+		// helper's: the scenarios read the response to completion or fail on
+		// what they got, and there is nowhere useful for a handler to report
+		// a half-written 200 to anyway.
+		_, _ = fmt.Fprint(w, body)
 	})
 	if !announce {
 		fmt.Printf("serving %d without announcing it\n", port)
@@ -205,6 +212,8 @@ func tree(args []string) {
 
 	fmt.Printf("pid %d pgid %d\n", os.Getpid(), processGroup())
 	if depth > 0 {
+		// #nosec G204 -- this is a self-exec: the binary is os.Args[0] and the
+		// only interpolated value is a depth counter formatted from an int.
 		child := exec.Command(os.Args[0], "tree", strconv.Itoa(depth-1))
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
