@@ -125,6 +125,14 @@ enforced only on an agent with `exec` disabled.
 
 Windows hosts get the PowerShell form, printed directly below the shell one.
 
+That command names every answer the installer needs, so it asks nothing. Run
+with no arguments and a terminal, it asks instead — the posture, this host's own
+addresses (enumerated and labelled, tailnet first), and whether to register a
+service — then writes the config, registers the service, starts it, and waits
+until the agent is up before saying so. `--dry-run` prints the plan and changes
+nothing; `--non-interactive` turns every unanswered question into an error
+naming the flag that answers it, which is what a provisioning script wants.
+
 Prefer not to pipe to a shell? Download the archive from the releases page,
 check it against `checksums.txt`, then run `fleet-agent enroll` yourself with
 the same flags.
@@ -275,13 +283,32 @@ the control plane, that identity check has already been made by something that
 also encrypts the traffic, and you can skip the CA entirely:
 
 ```sh
-# On the host: an agent.yaml with no certificates in it.
-sudo tee /etc/fleet/agent.yaml >/dev/null <<'YAML'
+# On the host. It asks the posture, offers this host's own addresses with the
+# tailnet one first, writes the config, registers the service and starts it.
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh | sudo sh
+```
+
+Or say it outright, which is the same install with nothing to answer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
+  | sudo sh -s -- --no-mtls --listen 100.83.4.17:8722 --name tailnet-box
+```
+
+Either way what lands on the host is an `agent.yaml` with no certificates in it:
+
+```yaml
 name: "tailnet-box"
 listen: "100.83.4.17:8722"   # this host's tailnet address, not 0.0.0.0
 tls:
   enabled: false
-YAML
+```
+
+By hand instead — the same file, written at
+`/etc/fleet/agent.yaml`, `/Library/Application Support/fleet/agent.yaml` or
+`%ProgramData%\fleet\agent.yaml` — then:
+
+```sh
 sudo fleet-agent service install    # creates the state and log directories
 sudo fleet-agent service start
 ```
