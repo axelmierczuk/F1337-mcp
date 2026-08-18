@@ -75,6 +75,16 @@ jobs:
         with:
           path: .tools
           key: ${{ steps.tools.outputs.key }}
+      # The step above is only as good as the checks in front of it, and a
+      # check that has quietly stopped firing is indistinguishable from one
+      # with nothing to report. This hands each of them the input it exists to
+      # reject — a pin the key would miss, an installed binary tools-verify
+      # does not look at, a partial restore, a binary left behind by a bump,
+      # one built for another machine — and fails if any of them accepts it.
+      # Two seconds, and it runs here rather than in `make check` because what
+      # it is protecting is this job's cache.
+      - name: Self-test the tooling gates
+        run: make tools-selftest
       - name: Lint and format
         run: make proto-lint
       - name: Verify committed codegen is current
@@ -225,8 +235,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Shellcheck install.sh
-        run: shellcheck --severity=warning install.sh
+      - name: Shellcheck the shell scripts
+        run: shellcheck --severity=warning install.sh scripts/tools-selftest.sh
       - name: Lint install.ps1
         shell: pwsh
         run: |

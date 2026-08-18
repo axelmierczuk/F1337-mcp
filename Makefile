@@ -116,11 +116,14 @@ tools-key: tools-key-check
 # cache: it would serve the pre-bump binary until someone noticed by hand. So
 # make the omission loud rather than trusting whoever adds the fifth tool to
 # remember. Convention is what is scanned for — a pin is a `*_VERSION` (plus
-# the toolchain) assigned at column zero — so a pin named outside it still
-# needs adding to TOOL_PINS by hand.
+# the toolchain) assigned at column zero, with or without an `export` — so a
+# pin named outside it still needs adding to TOOL_PINS by hand.
+#
+# This covers the key only. tools-bins-check below covers the other half: that
+# the fifth tool is also something tools-verify actually looks at.
 .PHONY: tools-key-check
 tools-key-check:
-	@pins=$$(awk '/^(GO_TOOLCHAIN|[A-Z][A-Z0-9_]*_VERSION)[ \t]*[:?+]*=/ { sub(/[ \t]*[:?+]*=.*/, ""); print }' $(firstword $(MAKEFILE_LIST))); \
+	@pins=$$(awk '/^(export[ \t]+)?(GO_TOOLCHAIN|[A-Z][A-Z0-9_]*_VERSION)[ \t]*[:?+]*=/ { sub(/^export[ \t]+/, ""); sub(/[ \t]*[:?+]*=.*/, ""); print }' $(firstword $(MAKEFILE_LIST))); \
 	if [ -z "$$pins" ]; then \
 		echo "tools-key-check: no pinned versions found in $(firstword $(MAKEFILE_LIST));" >&2; \
 		echo "  the cache key would be a constant and CI would never reinstall" >&2; \
@@ -135,6 +138,38 @@ tools-key-check:
 		esac; \
 	done
 
+## tools-bins-check: fail if `make tools` installs a binary TOOL_BINS omits
+#
+# tools-key-check keeps the cache *key* honest when a fifth tool arrives. This
+# keeps the cache *check* honest, which is the half that was missing: TOOL_BINS
+# is a hand-written list, tools-verify iterates it and nothing else, so a fifth
+# tool that nobody adds to it is a fifth binary tools-verify never looks at. A
+# restore that dropped exactly that binary would still be reported as "matches
+# every pin" — which is the partial restore this whole mechanism exists to
+# catch, reintroduced by the same omission tools-key-check already guards the
+# key against.
+#
+# What counts as installed is the recipe line that puts it in .tools/, so scan
+# for those rather than keeping a second hand-written list in step with the
+# first. Recipe lines only — anchored to leading whitespace so that prose about
+# the scan, including this paragraph, can never be read as input to it. The
+# binary name is the last path element, minus a /vN major-version suffix, which
+# is how the go tool names it.
+.PHONY: tools-bins-check
+tools-bins-check:
+	@fail=0; \
+	for pkg in $$(sed -n 's/^[[:blank:]].*GOBIN=$$(TOOLS_DIR).*go install \([^@ ]*\)@.*/\1/p' $(firstword $(MAKEFILE_LIST))); do \
+		name=$${pkg##*/}; \
+		case "$$name" in v[0-9]|v[0-9][0-9]) rest=$${pkg%/*}; name=$${rest##*/};; esac; \
+		case " $(TOOL_BINS) " in \
+			*" $$name:"*) ;; \
+			*) echo "tools-bins-check: 'make tools' installs $$name but TOOL_BINS does not name it;" >&2; \
+			   echo "  tools-verify only checks TOOL_BINS, so a cache restore missing $$name would pass" >&2; \
+			   fail=1;; \
+		esac; \
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi
+
 ## tools-verify: assert .tools/ holds exactly the pinned versions
 #
 # `go install` is not the only thing that writes .tools/ any more — CI restores
@@ -142,12 +177,18 @@ tools-key-check:
 # a slow one: these binaries decide what `buf lint` accepts and what the wire
 # check compares against. Cheap enough (four execs, no compiling) to run on
 # every restore, so ask each binary what it is instead of trusting the key that
-# fetched it. `go version -m` reads the module version and the building
-# toolchain out of the binary itself, which is the same claim for all four and
-# is not a `--version` flag anyone can reformat.
+# fetched it. `go version -m` reads the module version, the building toolchain
+# and the target GOOS/GOARCH out of the binary itself, which is the same claim
+# for all four and is not a `--version` flag anyone can reformat.
+#
+# GOOS/GOARCH is checked because the cache key was the only thing standing
+# between a runner and a binary for another platform, and a key is a claim
+# about what was stored, not about what came back. Everything else here is a
+# check of the contents against the pins; this is the one axis where "it is a
+# Go binary of exactly the right version" is still the wrong file.
 .PHONY: tools-verify
-tools-verify:
-	@fail=0; \
+tools-verify: tools-bins-check
+	@fail=0; hostos=$$(go env GOHOSTOS); hostarch=$$(go env GOHOSTARCH); \
 	for pair in $(TOOL_BINS); do \
 		bin=$${pair%%:*}; want=$${pair#*:}; path=$(TOOLS_DIR)/$$bin; \
 		if [ ! -x "$$path" ]; then \
@@ -156,14 +197,32 @@ tools-verify:
 		info=$$(go version -m "$$path") || { echo "  $$bin: not a Go binary" >&2; fail=1; continue; }; \
 		got=$$(echo "$$info" | awk '$$1 == "mod" { print $$3; exit }'); \
 		built=$$(echo "$$info" | awk 'NR == 1 { print $$2; exit }'); \
+		goos=$$(echo "$$info" | awk '$$1 == "build" && $$2 ~ /^GOOS=/ { sub(/^GOOS=/, "", $$2); print $$2; exit }'); \
+		goarch=$$(echo "$$info" | awk '$$1 == "build" && $$2 ~ /^GOARCH=/ { sub(/^GOARCH=/, "", $$2); print $$2; exit }'); \
 		[ "$$got" = "$$want" ] || { echo "  $$bin: is $$got, want $$want" >&2; fail=1; }; \
 		[ "$$built" = "$(GO_TOOLCHAIN)" ] || { echo "  $$bin: built by $$built, want $(GO_TOOLCHAIN)" >&2; fail=1; }; \
+		[ "$$goos/$$goarch" = "$$hostos/$$hostarch" ] || { echo "  $$bin: built for $$goos/$$goarch, want $$hostos/$$hostarch" >&2; fail=1; }; \
 	done; \
 	if [ $$fail -ne 0 ]; then \
 		echo "  .tools/ does not match the pins in $(firstword $(MAKEFILE_LIST)); run 'make tools'" >&2; \
 		exit 1; \
 	fi; \
 	echo "  .tools/ matches every pin"
+
+## tools-selftest: prove the tooling gates reject what they exist to reject
+#
+# The three checks above are the whole reason caching .tools/ is not worse than
+# recompiling it, and a check that has quietly stopped firing is indistinguish-
+# able from a check with nothing to report: both are green. So hand each one the
+# input it exists for and require it to fail.
+#
+# Not in `check`. It needs a populated .tools/ and cross-builds a throwaway
+# binary, and it is verifying CI's cache rather than this working tree — so CI's
+# Proto job runs it, next to the cache it protects. Same reasoning as
+# test-norace: the gate belongs where the thing it guards lives.
+.PHONY: tools-selftest
+tools-selftest:
+	@bash $(CURDIR)/scripts/tools-selftest.sh $(CURDIR)/$(firstword $(MAKEFILE_LIST)) $(TOOLS_DIR)
 
 ## proto: regenerate Go code from proto/
 .PHONY: proto
@@ -206,9 +265,21 @@ build:
 # jobs paying six checkouts and six setup-gos for twenty seconds of work each,
 # and those six carried fail-fast: false: one platform breaking should still
 # tell you about the other five in the same run, not one per push.
+#
+# An empty list is an error rather than a no-op. A loop over nothing succeeds,
+# and this target is now the only thing standing behind a CI job called "build
+# the agent for every supported platform" — so the one way it could report
+# green having built nothing is the one way the six-way matrix could not (an
+# empty matrix vector is a hard workflow error). This is not hypothetical
+# tidiness: AGENT_PLATFORMS is a `\`-continued list, and dropping the
+# continuation off the first line silently empties it.
 .PHONY: build-agent-all
 build-agent-all:
 	@mkdir -p $(BIN_DIR)
+	@if [ -z "$(strip $(AGENT_PLATFORMS))" ]; then \
+		echo "  build-agent-all: AGENT_PLATFORMS is empty; nothing would be built" >&2; \
+		exit 1; \
+	fi
 	@failed=""; \
 	for p in $(AGENT_PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=""; \
