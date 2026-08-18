@@ -136,7 +136,11 @@ func serveWhen(args []string) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, body)
+		// A client that hung up mid-body is the caller's problem, not this
+		// helper's: the scenarios read the response to completion or fail on
+		// what they got, and there is nowhere useful for a handler to report
+		// a half-written 200 to anyway.
+		_, _ = fmt.Fprint(w, body)
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
