@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 
 	"github.com/stretchr/testify/assert"
@@ -145,7 +146,9 @@ func TestScheduledTask_RestartStartsEvenWhenThereWasNothingToEnd(t *testing.T) {
 		return nil
 	}}
 
-	require.NoError(t, fleetagent.NewScheduledTaskForTest(params(), rec.run).Restart(),
+	// A state directory of its own, so the wait between the end and the start
+	// has nothing of this host's to find. See awaitEnded.
+	require.NoError(t, fleetagent.NewScheduledTaskRestartForTest(rec.run, t.TempDir(), time.Second).Restart(),
 		"a task that was not running is not a reason to refuse to start it")
 	assert.Equal(t, []string{"/End", "/Run"}, rec.verbs())
 }
@@ -155,7 +158,7 @@ func TestScheduledTask_RestartStartsEvenWhenThereWasNothingToEnd(t *testing.T) {
 func TestScheduledTask_RestartReportsAFailedStart(t *testing.T) {
 	rec := &schtasksRecorder{fail: func([]string) error { return errors.New("access is denied") }}
 
-	err := fleetagent.NewScheduledTaskForTest(params(), rec.run).Restart()
+	err := fleetagent.NewScheduledTaskRestartForTest(rec.run, t.TempDir(), time.Second).Restart()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "start the scheduled task")
 	assert.Contains(t, err.Error(), "ending it first also failed")
@@ -205,6 +208,83 @@ func TestScheduledTask_StatusTakesRunningNessFromTheDaemonsOwnReport(t *testing.
 	status, err = fleetagent.NewScheduledTaskStatusForTest(rec.run, stateDir).Status()
 	require.NoError(t, err)
 	assert.Equal(t, fleetagent.StatusRunningForTest, status)
+}
+
+// Status reads the state directory the registration was built with, not the one
+// a fresh discovery lands on.
+//
+// `install` takes --config, resolves it, and builds the registration from the
+// resolved parameters; stateDirForStatus ignores all of that and re-discovers a
+// config of its own. On a host with a config in both places the two name
+// different directories, and `install` decides three things on the answer: the
+// warning that removing the task terminates every process the agent supervises,
+// whether to stop it before removing it, and whether to start the replacement.
+// A wrong "not running" skips all three, so `/Delete` ends the task anyway and
+// the agent is left down with nothing said. The fifth audit round found the
+// same wrong directory in `service status`; this is it in the command that acts.
+func TestScheduledTask_StatusReadsTheStateDirectoryItWasBuiltWith(t *testing.T) {
+	stateDir := t.TempDir()
+	// Where a fresh discovery would look, holding no record at all.
+	t.Setenv("FLEET_AGENT_CONFIG", filepath.Join(t.TempDir(), "nothing.yaml"))
+
+	pid, startID := fleetagent.LiveProcessIdentityForTest()
+	require.NotEmpty(t, startID, "the platform must be able to identify this process")
+	require.NoError(t, fleetagent.WriteRuntimeReportForTest(stateDir, fleetagent.RuntimeReportForTest{
+		PID: pid, StartID: startID, Account: "axel", Home: "/home/axel",
+		Visibility: fleetagent.ProfileUnknownForTest,
+	}))
+
+	params := fleetagent.UnitParams{Executable: "/opt/fleet/fleet-agent", StateDir: stateDir}
+	status, err := fleetagent.NewScheduledTaskStateDirForTest(params, (&schtasksRecorder{}).run).Status()
+	require.NoError(t, err)
+	assert.Equal(t, fleetagent.StatusRunningForTest, status,
+		"the daemon whose record this is is the one this registration addresses")
+}
+
+// Restart waits for the instance it ended before asking for a new one.
+//
+// Neither verb is what it looks like. `schtasks /End` asks the scheduler to
+// terminate the instance and returns without waiting for it, and this
+// definition sets MultipleInstancesPolicy IgnoreNew — so a `/Run` that arrives
+// while the previous instance is still on its way out is dropped, and schtasks
+// exits zero saying it "attempted" to run the task. `service restart` then
+// reported success with the agent down, intermittently, with nothing to read.
+func TestScheduledTask_RestartWaitsForTheInstanceItEnded(t *testing.T) {
+	stateDir := t.TempDir()
+	pid, startID := fleetagent.LiveProcessIdentityForTest()
+	require.NotEmpty(t, startID)
+	require.NoError(t, fleetagent.WriteRuntimeReportForTest(stateDir, fleetagent.RuntimeReportForTest{
+		PID: pid, StartID: startID, Account: "axel", Home: "/home/axel",
+		Visibility: fleetagent.ProfileUnknownForTest,
+	}))
+
+	rec := &schtasksRecorder{}
+	budget := 300 * time.Millisecond
+	started := time.Now()
+	// The daemon this record describes is this test process, so it never goes
+	// away: the wait can only end at its budget.
+	require.NoError(t, fleetagent.NewScheduledTaskRestartForTest(rec.run, stateDir, budget).Restart())
+	assert.GreaterOrEqual(t, time.Since(started), budget,
+		"the run was asked for before the instance being ended had gone, which the scheduler drops")
+	assert.Equal(t, []string{"/End", "/Run"}, rec.verbs(),
+		"and it still starts: waiting is not refusing")
+}
+
+// And it does not wait for a daemon that is already gone, which is every
+// restart on a healthy host.
+func TestScheduledTask_RestartDoesNotWaitForADaemonThatIsGone(t *testing.T) {
+	stateDir := t.TempDir()
+	require.NoError(t, fleetagent.WriteRuntimeReportForTest(stateDir, fleetagent.RuntimeReportForTest{
+		PID: os.Getpid(), StartID: "not-the-identity-of-this-process",
+		Account: "axel", Visibility: fleetagent.ProfileUnknownForTest,
+	}))
+
+	rec := &schtasksRecorder{}
+	started := time.Now()
+	require.NoError(t, fleetagent.NewScheduledTaskRestartForTest(rec.run, stateDir, 30*time.Second).Restart())
+	assert.Less(t, time.Since(started), 5*time.Second,
+		"a record whose process is gone is not something to wait for")
+	assert.Equal(t, []string{"/End", "/Run"}, rec.verbs())
 }
 
 // A report left behind by a daemon that is gone must not make a stopped task

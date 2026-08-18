@@ -404,6 +404,50 @@ func TestServe_RecordsWhatTheDaemonCanReach(t *testing.T) {
 	}
 }
 
+// The record carries the account's SID beside the name the platform displays.
+//
+// The name is what LookupAccountSid answered, and Windows localises those: the
+// built-in identity #74 is about is spelled with different letters on a German
+// or French host than on an English one, so the verdict drawn from the name
+// cannot fire there at all — it falls through to the named-account case, which
+// tells the operator their agent's "profile was never loaded", and with
+// %USERPROFILE% unset through that one too, into plain `running`. The SID is
+// the same three strings on every installation of Windows.
+//
+// Driven from `serve` rather than from the collector, because a report that
+// carries the SID and a daemon that writes one are two different claims: the
+// rule that reads it was asserted while the line that records it could be
+// deleted with the whole suite still green.
+func TestServe_RecordsTheAccountsSIDBesideItsName(t *testing.T) {
+	ea := newEnrolledAgent(t, t.TempDir())
+	defer fleetagent.PinAccountIdentityForTest(`NT-AUTORITAET\NETZWERKDIENST`, "S-1-5-20")()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	codes, out := runServe(ctx, t, "serve", "--config", ea.configPath)
+	defer cancel()
+	waitServing(t, ea)
+
+	data, err := os.ReadFile(filepath.Join(ea.stateDir, "runtime.json"))
+	require.NoError(t, err, "%s", out.String())
+
+	var report struct {
+		Account    string `json:"account"`
+		AccountSID string `json:"account_sid"`
+	}
+	require.NoError(t, json.Unmarshal(data, &report))
+	assert.Equal(t, `NT-AUTORITAET\NETZWERKDIENST`, report.Account,
+		"the name the host displays is still what an operator is shown")
+	assert.Equal(t, "S-1-5-20", report.AccountSID,
+		"and the SID beside it, which is the only spelling the verdict can rely on")
+
+	cancel()
+	select {
+	case <-codes:
+	case <-time.After(20 * time.Second):
+		t.Fatal("serve did not exit after its context was cancelled")
+	}
+}
+
 // A daemon that cannot record what it can reach still serves.
 //
 // The record exists so `service status` can report on a confined agent; it is

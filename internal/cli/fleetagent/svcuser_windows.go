@@ -1,29 +1,15 @@
 package fleetagent
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/user"
 	"path/filepath"
-	"strings"
 
 	"golang.org/x/sys/windows"
 )
-
-// networkServiceAccount is a standing, password-less, non-administrative
-// built-in identity.
-//
-// It used to be the default, and #74 is what that cost: it runs in session 0,
-// which has been isolated from every interactive session since Vista, and it
-// has no operator profile — so an agent installed under it sees no nvm, no
-// rustup, no pyenv, no cargo, no scoop, no npm globals, and none of the
-// credentials in %APPDATA% that git and the package registries read. It stays
-// available for an operator who wants a confined agent and has weighed that.
-// It is no longer what somebody gets by not choosing.
-const networkServiceAccount = `NT AUTHORITY\NetworkService`
 
 // requireElevation refuses an operation that will fail partway through
 // without an elevated token.
@@ -113,6 +99,29 @@ func currentAccount() string {
 	return account
 }
 
+// currentAccountSID is the security identifier of the account this process is
+// running as, which is the only spelling of it that does not change.
+//
+// currentAccount is a *name*, and LookupAccountSid returns the display name the
+// running installation uses, which is localised: the account #74 is about is
+// spelled one way on an English host, another on a German one, and another
+// again on a French one. There is no list of spellings to keep up to date and
+// no amount of folding that reaches them. The fifth audit round found this same
+// verdict unable to fire because the name had a space in it; one locale over it
+// could not fire at all.
+//
+// So the report carries the SID beside the name and the judgement is drawn from
+// whichever of the two it recognises. S-1-5-18, -19 and -20 are the same three
+// strings on every installation of Windows in every language, which is the
+// reason Microsoft's own guidance is to compare SIDs and never names.
+func currentAccountSID() string {
+	u, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return ""
+	}
+	return u.User.Sid.String()
+}
+
 // inSessionZero reports whether this process is in Windows session 0.
 //
 // Session 0 is the whole of #74. It holds the services and nothing an operator
@@ -178,10 +187,15 @@ func readPassword(in io.Reader, out io.Writer, prompt string) (string, error) {
 	return line, err
 }
 
-// readLine reads one line, without the terminator.
+// readLine reads one password, without the terminator.
+//
+// It reads through readInputLine rather than a buffered reader because install
+// now asks two questions off the same stream — the account, then the password —
+// and a buffered read of the first can swallow the second. It is also read more
+// than once on its own: a rejected password is retyped, and the retry has to
+// find the retyped one still on the stream.
 func readLine(in io.Reader) (string, error) {
-	line, err := bufio.NewReader(in).ReadString('\n')
-	line = strings.TrimRight(line, "\r\n")
+	line, err := readInputLine(in)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}

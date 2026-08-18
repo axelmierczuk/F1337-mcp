@@ -113,11 +113,23 @@ func TestDevServerReadinessForwardAndFetch(t *testing.T) {
 	})
 
 	// The server on the sandbox is untouched by any of that: a forward is a
-	// route, not a lifetime.
-	logs := readLogs(t, s, started.Process.ProcessID)
-	if !contains(logs.Logs, "listening on "+strconv.Itoa(remotePort)) {
-		t.Fatalf("the dev server's own output is missing from its logs:\n%s", logs.Logs)
-	}
+	// route, not a lifetime. Its own announcement is in its own log.
+	//
+	// Waited for, not read once. The probe that passed above is a TCP connect,
+	// and the announcement reaching this log is a different event: the helper
+	// binds its port before it prints, the agent writes the child's output to a
+	// capture file, and the supervisor tails that file on a poll that backs off
+	// from 5ms to 200ms while a process is quiet. A server that takes long
+	// enough to start can therefore be connectable well before its first line
+	// is readable. This used to be read about 70ms after readiness, which is a
+	// guess that those are one event — #83, and 3 of 3 red on a busy host. The
+	// deadline is a failsafe for a line that never arrives, which is the defect
+	// worth failing on.
+	marker := "listening on " + strconv.Itoa(remotePort)
+	waitFor(t, 30*time.Second, "the dev server's own announcement to reach its logs", func() (bool, string) {
+		logs := readLogs(t, s, started.Process.ProcessID)
+		return contains(logs.Logs, marker), "log so far:\n" + logs.Logs
+	})
 	list := structured[processListResult](t, s.ok("fleet_process_list", nil))
 	if p := findProcess(list.Processes, started.Process.ProcessID); p == nil || p.State != "ready" {
 		t.Fatalf("the dev server should still be ready after its forward closed: %+v", p)

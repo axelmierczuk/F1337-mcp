@@ -2,12 +2,14 @@ package fleetagent_test
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -129,20 +131,34 @@ func TestServiceInstall_SwitchingMechanismDoesNotStartAStoppedAgent(t *testing.T
 }
 
 // Re-running install over its own registration replaces the definition and
-// restarts what was running, which is what makes re-running an installer safe.
+// leaves the agent running, which is what makes re-running an installer safe.
 //
-// The stop is the load-bearing step, and it was missing. removeOtherMechanism
-// stops the registration it removes; this path — the same command, replacing
-// its own definition rather than the other mechanism's — went straight to
-// Uninstall. On Windows DeleteService only *marks* a running service for
-// deletion, so the entry stays in the SCM database, the CreateService that
-// follows fails with "service fleet-agent already exists", and the host is left
-// with a definition marked for deletion and no replacement: an agent that
-// disappears at the next reboot, from the command this one documents as safe to
-// re-run. launchd stops the job inside its own Uninstall and systemd disables a
-// unit whose process keeps running, so the two managers CI can reason about
-// both hid it.
-func TestServiceInstall_ReplacesItsOwnDefinitionAndRestartsIt(t *testing.T) {
+// Two steps are load-bearing and they arrived one audit round apart.
+//
+// The stop was missing. removeOtherMechanism stops the registration it removes;
+// this path — the same command, replacing its own definition rather than the
+// other mechanism's — went straight to Uninstall. On Windows DeleteService only
+// *marks* a running service for deletion, so the entry stays in the SCM
+// database, the CreateService that follows fails with "service fleet-agent
+// already exists", and the host is left with a definition marked for deletion
+// and no replacement: an agent that disappears at the next reboot, from the
+// command this one documents as safe to re-run. launchd stops the job inside
+// its own Uninstall and systemd disables a unit whose process keeps running, so
+// the two managers CI can reason about both hid it.
+//
+// And then the resume has to be a Start. Adding the stop is what made this
+// definition a freshly written one that has never run, and that is the state
+// kardianos's Windows Restart cannot leave: it is ControlService(STOP) followed
+// by StartService and it returns at the first failure, so the stop fails with
+// ERROR_SERVICE_NOT_ACTIVE and StartService is never reached. launchd's
+// unload-then-load has the same shape. The command reported "could not be
+// started", exited zero, and left the agent down — the exact failure round 4
+// fixed for the mechanism switch, walked back in through the fix for the one
+// above. It is decided on whether anything is running under the definition now,
+// not on what the host carried when the command began, which is also right for
+// systemd: it keeps the old process alive across a unit replacement and answers
+// active, so Linux still restarts.
+func TestServiceInstall_ReplacesItsOwnDefinitionAndKeepsItRunning(t *testing.T) {
 	args := installArgs(t)
 	mechanism := fleetagent.MechanismService
 	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
@@ -156,12 +172,41 @@ func TestServiceInstall_ReplacesItsOwnDefinitionAndRestartsIt(t *testing.T) {
 	text := out.String()
 	require.Equal(t, 0, code, "%s", text)
 
-	assert.Equal(t, []string{"new:stop", "new:uninstall", "new:install", "new:restart"}, calls(),
+	assert.Equal(t, []string{"new:stop", "new:uninstall", "new:install", "new:start"}, calls(),
 		"kardianos refuses to install over an existing definition, so a re-run has to replace it — "+
-			"and the SCM will not let the replacement be written while the old one is still running")
+			"the SCM will not let the replacement be written while the old one is still running, and "+
+			"what that leaves cannot be restarted, only started")
 	assert.Contains(t, text, "existing service definition removed for replacement")
 	assert.Contains(t, text, "reinstalled")
 	assert.Contains(t, text, "service restarted with the new definition")
+	assert.NotContains(t, text, "could not be started",
+		"the agent was running before this command and has to be running after it")
+}
+
+// And the shape that says the choice is not "always Start": a daemon the
+// replacement did not manage to stop is restarted onto the new definition.
+//
+// install says so and carries on when a stop fails, because a stop that failed
+// is not a reason to leave the host on the old definition. What that produces
+// is a new definition with the old daemon still running under it, and there
+// Start is the wrong call: `systemctl start` on a unit systemd already
+// considers active does nothing at all, and the operator is left running the
+// definition this command was replacing, silently. Restart is what replaces it.
+func TestServiceInstall_RestartsAReplacementItCouldNotStop(t *testing.T) {
+	args := installArgs(t)
+	mechanism := fleetagent.MechanismService
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{mechanism},
+		Running:   map[fleetagent.Mechanism]bool{mechanism: true},
+		StopFails: true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
+	assert.Equal(t, []string{"new:stop", "new:uninstall", "new:install", "new:restart"}, calls(),
+		"a daemon still running under the new definition is restarted onto it, not started beside itself")
+	assert.Contains(t, out.String(), "could not stop the running")
 }
 
 // And a registration that is not running is not stopped: there is nothing to
@@ -222,6 +267,71 @@ func TestServiceInstall_SaysTheHostIsUnregisteredWhenTheWriteFails(t *testing.T)
 	assert.Contains(t, err.Error(), "is now not installed",
 		"the previous registration is gone and the new one did not land; an operator reading this as `nothing happened` leaves the host with no agent")
 	assert.Contains(t, err.Error(), "Re-run `service install`")
+}
+
+// A removal that fails after the daemon has been stopped says the agent is down.
+//
+// Round 4 established this for the failed *write*: "install service: ..." on its
+// own reads as "nothing happened", which is the one thing that is not true. The
+// stop round 5 added moves the same event one step earlier — install now stops
+// the daemon before it removes anything, because on Windows DeleteService only
+// marks a *running* service for deletion — so a removal that refuses leaves an
+// agent that is down because of this command, and said so nowhere.
+func TestServiceInstall_SaysTheAgentIsDownWhenTheRemovalFails(t *testing.T) {
+	args := installArgs(t)
+	mechanism := fleetagent.MechanismService
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed:     []fleetagent.Mechanism{mechanism},
+		Running:       map[fleetagent.Mechanism]bool{mechanism: true},
+		FailUninstall: true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, args...)
+
+	require.Error(t, err, "%s", out.String())
+	assert.Equal(t, []string{"new:stop", "new:uninstall"}, calls(),
+		"nothing may be registered over a definition the manager would not remove")
+	assert.Contains(t, err.Error(), "is not running now",
+		"the daemon was stopped by this command and an operator reading this as `nothing happened` leaves the agent down")
+	assert.Contains(t, err.Error(), "service start")
+}
+
+// And the same from the removal of the *other* mechanism, which is the flow
+// `status` prints as the remedy for a confined agent.
+func TestServiceInstall_SaysTheAgentIsDownWhenTheOtherRemovalFails(t *testing.T) {
+	args := installArgs(t)
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed:     []fleetagent.Mechanism{fleetagent.MechanismTask},
+		Running:       map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+		FailUninstall: true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, args...)
+
+	require.Error(t, err, "%s", out.String())
+	assert.Equal(t, []string{"task:stop", "task:uninstall"}, calls())
+	assert.Contains(t, err.Error(), "is not running now")
+}
+
+// A removal that fails without anything having been stopped says nothing extra:
+// the host is where it was, and a note about a stopped agent would be false.
+func TestServiceInstall_SaysNothingAboutAStoppedAgentThatWasNotRunning(t *testing.T) {
+	args := installArgs(t)
+	mechanism := fleetagent.MechanismService
+	_, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed:     []fleetagent.Mechanism{mechanism},
+		FailUninstall: true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, args...)
+	require.Error(t, err, "%s", out.String())
+	assert.NotContains(t, err.Error(), "is not running now")
 }
 
 // A definition that cannot even be assembled is discovered before anything is
@@ -355,48 +465,102 @@ func TestServiceInstall_RefusesWhenTheEnrollmentMaterialCannotChangeHands(t *tes
 }
 
 // The password the operator supplies is the one handed to the service manager,
-// and install stops to ask for it.
+// and it appears nowhere else on the machine.
 //
 // Only the Windows SCM logs an account on, so only a Windows host reaches the
 // prompt at all; the rule is asserted for every platform in mechanism_test.go
 // and the dry run's promise that it will ask in confine_test.go. This is the
-// other half — that the command consults the rule, reads the password, and
-// hands that value and no other to the definition it writes.
+// other half — that the command consults the rule, reads the password, checks
+// it, and hands that value and no other to the definition it writes.
+//
+// The leak assertions are the point of the second half. A credential written
+// into an argument list, a unit file, a log line or the config is on disk or in
+// the process table for as long as the service exists, and nothing ever reports
+// it: it is the one failure here that is both silent and permanent. So it is
+// asserted rather than assumed, against every place this command touches.
 func TestServiceInstall_HandsTheSuppliedPasswordToTheServiceManager(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("only the Windows SCM asks for an account's password")
-	}
-	current, err := user.Current()
-	require.NoError(t, err)
-	// The two host steps install takes before it asks: it looks the account up,
-	// and it grants that account access to the directories and the enrollment
-	// material with icacls. Both are the host's answers, not this change's, and
-	// a runner that cannot give them has nothing to say about the password.
-	if _, err := user.Lookup(current.Username); err != nil {
-		t.Skipf("this host cannot look up its own account %q: %v", current.Username, err)
-	}
+	account := requireWindowsNamedAccount(t)
+	const secret = "correct horse battery staple"
+	// The two host steps install takes after it asks: it grants that account
+	// access to the directories and the enrollment material with icacls. That
+	// is the host's answer, not this change's, and a runner that cannot give it
+	// has nothing to say about the password.
 	probe := t.TempDir()
-	if err := exec.Command("icacls.exe", probe, "/grant", current.Username+":(OI)(CI)M", "/T").Run(); err != nil { //nolint:gosec // the same argv install is about to use, against a directory this test owns
-		t.Skipf("icacls cannot grant %s access to a directory on this host: %v", current.Username, err)
+	if err := exec.Command("icacls.exe", probe, "/grant", account+":(OI)(CI)M", "/T").Run(); err != nil { //nolint:gosec // the same argv install is about to use, against a directory this test owns
+		t.Skipf("icacls cannot grant %s access to a directory on this host: %v", account, err)
 	}
-	configPath, _, _ := installConfig(t, "")
+	configPath, stateDir, logDir := installConfig(t, "")
 
+	// The logon the SCM performs at every start, answered here because no
+	// runner has this account's real password to answer it with.
+	asked, restoreLogon := fleetagent.PinServiceLogonForTest(nil)
+	defer restoreLogon()
 	_, password, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
 	defer restore()
 
 	out := &bytes.Buffer{}
-	root := fleetagent.NewRootCommand(out)
-	root.SetArgs([]string{
+	err := runInstallWithStdin(t, out, strings.NewReader(secret+"\n"),
 		"service", "install", "--config", configPath,
-		"--mechanism", "service", "--user", current.Username, "--password-stdin",
-	})
-	root.SetIn(strings.NewReader("correct horse battery staple\n"))
-	require.NoError(t, root.Execute(), "%s", out.String())
+		"--mechanism", "service", "--user", account, "--password-stdin")
+	require.NoError(t, err, "%s", out.String())
 
-	assert.Equal(t, "correct horse battery staple", password(),
+	assert.Equal(t, secret, password(),
 		"the SCM is the only thing that ever sees it, and it has to see the one that was typed")
-	assert.NotContains(t, out.String(), "correct horse battery staple",
-		"and it must not be echoed anywhere")
+
+	// And the check was asked about that same credential, under the spelling
+	// CreateService will be given: checking a different account from the one
+	// being registered is worse than not checking.
+	checkedAccount, checkedPassword, count := asked()
+	assert.Equal(t, secret, checkedPassword)
+	assert.Equal(t, 1, count)
+	assert.Contains(t, checkedAccount, account)
+
+	// Every place it must not be.
+	assert.NotContains(t, out.String(), secret, "not echoed, and not printed back")
+	for _, arg := range os.Args {
+		assert.NotContains(t, arg, secret, "not in the process table")
+	}
+	for _, entry := range os.Environ() {
+		assert.NotContains(t, entry, secret, "not in the environment, which every child process inherits")
+	}
+	assertNoSecretOnDisk(t, secret, configPath, stateDir, logDir)
+
+	// The definition itself carries it in exactly one field; see
+	// TestSCMConfig_ThePasswordIsInExactlyOnePlace for the whole definition.
+	assert.NotContains(t, out.String(), "Log on as a service",
+		"install performed that logon itself, so repeating the warning contradicts what it just proved")
+}
+
+// assertNoSecretOnDisk fails if the password reached any file this command
+// created or wrote.
+func assertNoSecretOnDisk(t *testing.T, secret string, configPath string, dirs ...string) {
+	t.Helper()
+	body, err := os.ReadFile(configPath) //nolint:gosec // a path this test wrote
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), secret, "not in the config install baked the path of")
+
+	for _, dir := range dirs {
+		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			// Read failures fail the test rather than skipping the file. A
+			// file that could not be opened is a file this assertion did not
+			// check, and "the password is on none of them" is not a claim a
+			// skipped one supports.
+			content, readErr := os.ReadFile(path) //nolint:gosec // a directory this test owns
+			require.NoError(t, readErr)
+			assert.NotContainsf(t, string(content), secret, "not in %s", path)
+			return nil
+		})
+		// A directory install never created is not a finding; anything else is.
+		if err != nil && !os.IsNotExist(err) {
+			require.NoError(t, err)
+		}
+	}
 }
 
 // What a dry run says about an account the host does not have.
@@ -572,6 +736,29 @@ func TestForeignConfigDirNote(t *testing.T) {
 	}
 }
 
+// The Windows half of it, driven with the shapes Windows actually produces.
+//
+// Both arguments of that `icacls` line have backslashes in them on a real host
+// — `%ProgramData%\...` and `COMPUTERNAME\build`, which is the spelling this
+// document tells an operator to pass — and the note was composed with %q, which
+// is Go string syntax and doubles every one of them. A doubled *path* survives,
+// because Win32 collapses repeated separators; a doubled *account* does not,
+// because an account name is not a path: icacls answers "No mapping between
+// account names and security IDs was done", and the operator whose daemon
+// cannot read its own config is handed a remedy that does not work.
+//
+// The rule was only ever driven with a Unix path and a bare account name, which
+// is the one pair of inputs on which %q and a plain quote agree.
+func TestForeignConfigDirNote_QuotesTheWindowsShapesUnchanged(t *testing.T) {
+	note := strings.Join(fleetagent.ForeignConfigDirNoteForTest(
+		`D:\fleet\enroll`, `WORKSTATION\build`, "windows"), "\n")
+
+	assert.Contains(t, note, `icacls "D:\fleet\enroll" /grant "WORKSTATION\build:(RX)"`,
+		"the command an operator pastes has to name the directory and the account they gave, byte for byte")
+	assert.NotContains(t, note, `\\`,
+		"a doubled backslash is Go string syntax leaking into a Windows command line")
+}
+
 // And `install` prints it, for the config it was actually given.
 func TestServiceInstall_SaysTheConfigDirectoryItLeftAlone(t *testing.T) {
 	args := installArgs(t)
@@ -690,4 +877,372 @@ func TestServiceInstall_SaysWhenTheAgentItRegisteredAuthenticatesNobody(t *testi
 		require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
 		assert.NotContains(t, out.String(), "authenticate nobody")
 	})
+}
+
+// installStdin is a stream that says whether install read it.
+//
+// "This command does not stop to ask" is a claim about the stream, and the only
+// way to make it one an assertion can fail on. A prompt that fires where it
+// should not blocks an unattended installer forever, which is the failure that
+// looks like a hung machine rather than like a bug.
+type installStdin struct{ reads int }
+
+func (s *installStdin) Read([]byte) (int, error) {
+	s.reads++
+	return 0, io.EOF
+}
+
+// runInstallWithStdin drives `service install` from the argv with a supplied
+// stream, which is the only way either prompt is reachable from a test.
+func runInstallWithStdin(t *testing.T, out *bytes.Buffer, in io.Reader, args ...string) error {
+	t.Helper()
+	root := fleetagent.NewRootCommand(out)
+	root.SetArgs(args)
+	root.SetIn(in)
+	root.SetErr(io.Discard)
+	return root.Execute()
+}
+
+// Off Windows, `install` never stops to ask — not even for `--mechanism
+// service`, which is the one form that asks on Windows.
+//
+// systemd and launchd start a unit under an account without logging it on, so
+// there is no credential to supply and nothing to choose. This is the guard on
+// #79's whole argument, from the other side: the prompt belongs to the Windows
+// SCM, and a prompt that escapes onto the other two platforms turns every
+// scripted Linux install into a hang.
+//
+// What happens after the guard differs by platform — Linux defaults to a system
+// account this runner does not have and refuses; macOS defaults to the invoking
+// user and registers — and neither is the claim. The claim is that the stream
+// was never touched.
+func TestServiceInstall_NeverStopsToAskOffWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows is the platform that does ask; that half is asserted below")
+	}
+	configPath, _, _ := installConfig(t, "")
+	stdin := &installStdin{}
+
+	_, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runInstallWithStdin(t, out, stdin, "service", "install",
+		"--config", configPath, "--mechanism", "service", "--create-user=false")
+
+	assert.Zero(t, stdin.reads,
+		"nothing off Windows logs an account on, so `install` has no credential to ask for and must not block a script waiting to be told one")
+	text := out.String()
+	if err != nil {
+		text += err.Error()
+	}
+	assert.NotContains(t, text, "Account [",
+		"and the prompt itself must not be composed either")
+}
+
+// requireWindowsNamedAccount is the account these Windows scenarios register
+// under, and the two host answers they depend on.
+//
+// The account has to be a named one — a built-in service identity has no
+// password, so none of the credential path is reached under one — and it has to
+// resolve, because `install` looks it up before it asks for anything. This
+// runner's own account is the only one that satisfies both without creating an
+// account on the machine running the tests.
+func requireWindowsNamedAccount(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("only the Windows SCM logs an account on, so only Windows asks for a credential")
+	}
+	current, err := user.Current()
+	require.NoError(t, err)
+	if _, err := user.Lookup(current.Username); err != nil {
+		t.Skipf("this host cannot look up its own account %q: %v", current.Username, err)
+	}
+	return current.Username
+}
+
+// `--mechanism service` with no `--user` asks which account it is about to
+// register, and registers the one it is told.
+//
+// This is #84's headline, driven from the argv an operator types. Before it,
+// the account was resolved silently — to whoever happened to be running the
+// elevated shell — and an operator learned which account every command their
+// models run would execute as by reading it back out of the install output.
+//
+// The answer here is a built-in identity precisely because it needs no
+// password: it isolates "the prompt is consulted and its answer is used" from
+// everything the credential path does afterwards.
+func TestServiceInstall_AsksWhichAccountTheWindowsServiceRunsAs(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the Windows SCM is the only service manager that logs an account on")
+	}
+	// The executable-access rule refuses a built-in identity a binary inside
+	// somebody's profile, and the test binary lives in one. Same reason, and
+	// the same move, as installAccount.
+	t.Setenv("USERPROFILE", filepath.Join(t.TempDir(), "profile"))
+	configPath, _, _ := installConfig(t, "")
+
+	calls, password, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runInstallWithStdin(t, out, strings.NewReader(`NT AUTHORITY\NetworkService`+"\n"),
+		"service", "install", "--config", configPath, "--mechanism", "service")
+	require.NoError(t, err, "%s", out.String())
+
+	text := out.String()
+	assert.Contains(t, text, "Account [", "the operator has to be asked, not told afterwards")
+	assert.Contains(t, text, `runs as:   NT AUTHORITY\NetworkService`,
+		"and the account they typed is the one registered")
+	assert.Equal(t, []string{"new:install"}, calls())
+	assert.Empty(t, password(), "a built-in service identity has no password, so nothing was asked for one")
+}
+
+// `--password-stdin` without `--user` refuses, and refuses having registered
+// nothing.
+//
+// stdin is the password. Reading a line off it to answer "which account" would
+// consume the password and then prompt for it — an unattended install that
+// hangs, or worse, one that registers a service under an account named by the
+// first line of a credential. The one combination this rule will not guess at.
+func TestServiceInstall_PasswordStdinWithoutAnAccountRefuses(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only a Windows service is registered with a stored credential")
+	}
+	configPath, stateDir, _ := installConfig(t, "")
+
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{fleetagent.MechanismTask},
+		Running:   map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runInstallWithStdin(t, out, strings.NewReader("hunter2\n"),
+		"service", "install", "--config", configPath, "--mechanism", "service", "--password-stdin")
+
+	require.Error(t, err, "%s", out.String())
+	assert.Contains(t, err.Error(), "--user", "and it has to name the flag that answers it")
+	assert.Contains(t, err.Error(), "--password-stdin",
+		"including the complete unattended form: this product is installed by scripts")
+	assert.Empty(t, calls(),
+		"this host had a running agent on it, and a refusal that has already removed it is not a refusal")
+	assert.NoDirExists(t, stateDir, "and nothing may be created before the account is known")
+}
+
+// A credential the SCM will reject is refused before anything is registered.
+//
+// CreateService stores a password and validates nothing; the logon happens at
+// every start, so a mistyped password produces a service that installs cleanly
+// and fails forever with error 1069. Performing the SCM's own logon first turns
+// that from something an operator discovers afterwards into something `install`
+// declines to build — and the host it declines on is left exactly as it was.
+func TestServiceInstall_RefusesACredentialTheSCMWillReject(t *testing.T) {
+	account := requireWindowsNamedAccount(t)
+	configPath, stateDir, logDir := installConfig(t, "")
+
+	// ERROR_LOGON_FAILURE: the account and password will not log on.
+	asked, restoreLogon := fleetagent.PinServiceLogonForTest(syscall.Errno(1326))
+	defer restoreLogon()
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{fleetagent.MechanismTask},
+		Running:   map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runInstallWithStdin(t, out, strings.NewReader("not-the-password\n"),
+		"service", "install", "--config", configPath,
+		"--mechanism", "service", "--user", account, "--password-stdin")
+
+	require.Error(t, err, "%s", out.String())
+	assert.Contains(t, err.Error(), "1069", "the number an operator searches for")
+	assert.Contains(t, err.Error(), "Nothing has been created, granted, or registered")
+	assert.NotContains(t, err.Error()+out.String(), "not-the-password",
+		"and a rejected password is still a password")
+
+	_, checked, count := asked()
+	assert.Equal(t, 1, count, "--password-stdin holds one password, so it is checked once and not prompted for again")
+	assert.Equal(t, "not-the-password", checked, "the credential checked is the credential that was supplied")
+
+	assert.Empty(t, calls(),
+		"this host had a running agent on it: a refusal that has already taken it off is not a refusal")
+	assert.NoDirExists(t, stateDir)
+	assert.NoDirExists(t, logDir)
+}
+
+// An account without SeServiceLogonRight is refused before anything is
+// registered, with #79's instructions.
+//
+// This is the failure #79 found and could only warn about. The password is
+// right; the privilege is separate, the Services MMC grants it as a side effect
+// and CreateService does not, and without it every start fails with error 1069.
+// A service logon is the one call that answers it: ERROR_LOGON_TYPE_NOT_GRANTED
+// is exactly this condition and nothing else.
+func TestServiceInstall_RefusesAnAccountWithoutTheServiceLogonRight(t *testing.T) {
+	account := requireWindowsNamedAccount(t)
+	configPath, stateDir, _ := installConfig(t, "")
+
+	asked, restoreLogon := fleetagent.PinServiceLogonForTest(syscall.Errno(1385))
+	defer restoreLogon()
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runInstallWithStdin(t, out, strings.NewReader("hunter2\n"),
+		"service", "install", "--config", configPath,
+		"--mechanism", "service", "--user", account, "--password-stdin")
+
+	require.Error(t, err, "%s", out.String())
+	assert.Contains(t, err.Error(), "SeServiceLogonRight")
+	assert.Contains(t, err.Error(), "secedit", "and the command that grants it")
+	assert.Contains(t, err.Error(), "1069")
+	_, _, count := asked()
+	assert.Equal(t, 1, count, "retyping a password does not grant a privilege")
+	assert.Empty(t, calls(), "nothing may be registered that provably cannot start")
+	assert.NoDirExists(t, stateDir)
+}
+
+// An account this host does not have is refused before anything is created or
+// registered, and the host is left exactly as it was.
+//
+// #84's third proof, and the one that holds on every platform: the whole point
+// of validating the account at install time is that a typo fails while the
+// machine is still untouched, rather than producing a registration that fails
+// every start. Windows adds the credential to that check; the account itself is
+// checked everywhere, and the *ordering* is what makes either worth anything.
+//
+// Run against a host that already carries a running registration, which is what
+// makes "nothing was registered" mean anything: against an empty host the
+// assertion is satisfied by there having been nothing to remove — the same trap
+// TestServiceInstall_RefusesWhenTheEnrollmentMaterialCannotChangeHands records.
+func TestServiceInstall_AnAccountThisHostDoesNotHaveChangesNothing(t *testing.T) {
+	configPath, stateDir, logDir := installConfig(t, "")
+	const missing = "no-such-account-for-issue-84"
+	if _, err := user.Lookup(missing); err == nil {
+		t.Skipf("this host really has an account called %q", missing)
+	}
+
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{fleetagent.MechanismTask},
+		Running:   map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, "service", "install", "--config", configPath,
+		"--user", missing, "--create-user=false")
+
+	require.Error(t, err, "%s", out.String())
+	assert.Contains(t, err.Error(), missing, "the account that does not resolve has to be named")
+	assert.Empty(t, calls(),
+		"this host had a running agent on it: a refusal that has already taken it off is not a refusal")
+	assert.NoDirExists(t, stateDir, "and the state directory belongs to an install that happened")
+	assert.NoDirExists(t, logDir)
+}
+
+// The account and the password come off one stream, in that order, and neither
+// read swallows the other.
+//
+// `install` now asks two questions of the same stdin. A buffered read of the
+// first fills its buffer from the underlying stream and takes the second with
+// it, which leaves the password prompt waiting on a stream that has nothing
+// left — an install that hangs, on the one platform where it is hardest to
+// notice. The unit half of that is TestReadInputLine_ConsumesExactlyOneLine;
+// this is the half that proves the command is wired through it.
+func TestServiceInstall_ReadsTheAccountAndThePasswordFromOneStream(t *testing.T) {
+	account := requireWindowsNamedAccount(t)
+	const secret = "one-stream-two-answers"
+	probe := t.TempDir()
+	if err := exec.Command("icacls.exe", probe, "/grant", account+":(OI)(CI)M", "/T").Run(); err != nil { //nolint:gosec // the same argv install is about to use, against a directory this test owns
+		t.Skipf("icacls cannot grant %s access to a directory on this host: %v", account, err)
+	}
+	configPath, _, _ := installConfig(t, "")
+
+	asked, restoreLogon := fleetagent.PinServiceLogonForTest(nil)
+	defer restoreLogon()
+	calls, password, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runInstallWithStdin(t, out, strings.NewReader(account+"\n"+secret+"\n"),
+		"service", "install", "--config", configPath, "--mechanism", "service")
+	require.NoError(t, err, "%s", out.String())
+
+	assert.Contains(t, out.String(), "Account [", "the account is asked for first")
+	assert.Contains(t, out.String(), "runs as:   "+account, "and the typed one is registered")
+	assert.Equal(t, secret, password(),
+		"and the line after it is the password, not something the account read consumed")
+	_, checked, count := asked()
+	assert.Equal(t, secret, checked)
+	assert.Equal(t, 1, count)
+	assert.Equal(t, []string{"new:install"}, calls())
+	assert.NotContains(t, out.String(), secret, "and it is not echoed")
+}
+
+// The answer to the prompt is the account install acts on — not a string it
+// collects and then resolves the default anyway.
+//
+// The positive case above cannot prove this on its own: on a host where the
+// operator types the account install would have defaulted to, "used the answer"
+// and "ignored the answer" produce the same registration, and the assertion
+// passes either way. This types an account the host does not have, so the only
+// way the command can refuse is by having carried the typed string into the
+// lookup.
+func TestServiceInstall_TheTypedAccountIsTheOneItActsOn(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only a Windows service asks which account to register under")
+	}
+	const missing = "no-such-account-for-issue-84"
+	if _, err := user.Lookup(missing); err == nil {
+		t.Skipf("this host really has an account called %q", missing)
+	}
+	configPath, stateDir, _ := installConfig(t, "")
+
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{fleetagent.MechanismTask},
+		Running:   map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runInstallWithStdin(t, out, strings.NewReader(missing+"\n"),
+		"service", "install", "--config", configPath, "--mechanism", "service", "--create-user=false")
+
+	require.Error(t, err, "%s", out.String())
+	assert.Contains(t, err.Error(), missing,
+		"the account that was typed is the one that must be looked up, and the one the refusal names")
+	assert.Empty(t, calls(), "and a refusal that has already unregistered the running agent is not a refusal")
+	assert.NoDirExists(t, stateDir)
+}
+
+// A dry run asks nothing, and says in the plan what install would ask.
+//
+// `--dry-run` is documented as changing nothing and needing no elevation, which
+// is what makes it the thing an installer script runs first to find out which
+// mechanism a host will get. A dry run that stops to ask blocks that script on a
+// prompt for a decision it was not making — and the account it prints as
+// `runs as:` is then only the default, so the plan has to say so or it reads as
+// a decision already taken.
+func TestServiceInstall_DryRunAsksNothingAndSaysWhatInstallWouldAsk(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only a Windows service resolves a mechanism that asks for anything")
+	}
+	pinAgentConfig(t)
+	stdin := &installStdin{}
+
+	out := &bytes.Buffer{}
+	root := fleetagent.NewRootCommand(out)
+	root.SetArgs([]string{"service", "install", "--dry-run", "--mechanism", "service"})
+	root.SetIn(stdin)
+	root.SetErr(io.Discard)
+	require.NoError(t, root.Execute(), "%s", out.String())
+
+	assert.Zero(t, stdin.reads, "a dry run changes nothing, so it has nothing to ask about")
+	text := out.String()
+	assert.NotContains(t, text, "Account [", "and it must not compose the prompt either")
+	assert.Contains(t, text, "would ask which account",
+		"but it has to say that install will, or an unattended installer meets the prompt with no warning")
+	assert.Contains(t, text, "the default it would offer",
+		"and that the account in the plan above is only what pressing return would accept")
 }

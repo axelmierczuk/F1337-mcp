@@ -74,6 +74,11 @@ type supervisorConfig struct {
 	// file and keeps writing would hold the exit open indefinitely, and the
 	// state machine with it.
 	drainWindow time.Duration
+	// captureOffsetInterval is how often a live process's capture offsets are
+	// written back to its record while nothing else about that process is
+	// changing. See Supervisor.persistCaptureOffsets, which is where the cost
+	// of this number and what it buys are both set out.
+	captureOffsetInterval time.Duration
 
 	probeTimeout     time.Duration
 	probeInterval    time.Duration
@@ -98,9 +103,10 @@ func defaultSupervisorConfig(cfg *agent.Config) supervisorConfig {
 		defaultRestartBackoff: time.Second,
 		maxRestartBackoff:     2 * time.Minute,
 
-		tailPollMin: 5 * time.Millisecond,
-		tailPollMax: 200 * time.Millisecond,
-		drainWindow: 250 * time.Millisecond,
+		tailPollMin:           5 * time.Millisecond,
+		tailPollMax:           200 * time.Millisecond,
+		drainWindow:           250 * time.Millisecond,
+		captureOffsetInterval: defaultCaptureOffsetInterval,
 
 		probeTimeout:     30 * time.Second,
 		probeInterval:    250 * time.Millisecond,
@@ -153,9 +159,10 @@ type Supervisor struct {
 	// afterwards — the second process is already spawned.
 	admitted map[*admission]struct{}
 
-	// wg covers every goroutine the supervisor owns: monitors, probes and
-	// restart timers. Close waits on it, which is what keeps a test's goroutine
-	// count from growing with the number of processes it started.
+	// wg covers every goroutine the supervisor owns: monitors, probes, restart
+	// timers, and the capture-offset cadence. Close waits on it, which is what
+	// keeps a test's goroutine count from growing with the number of processes
+	// it started.
 	wg sync.WaitGroup
 
 	// live is the supervised-process count HostService.Health reports. liveMu
@@ -182,6 +189,11 @@ func newSupervisor(cfg supervisorConfig, slots *policy.Policy, log *slog.Logger)
 	if cfg.waitBackoff == nil {
 		cfg.waitBackoff = realBackoffWait
 	}
+	if cfg.captureOffsetInterval <= 0 {
+		// Not a convenience: zero reaches time.NewTicker, which panics, and
+		// this ticker is started on the path every agent takes at startup.
+		cfg.captureOffsetInterval = defaultCaptureOffsetInterval
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Supervisor{
 		cfg:      cfg,
@@ -194,7 +206,60 @@ func newSupervisor(cfg supervisorConfig, slots *policy.Policy, log *slog.Logger)
 		admitted: map[*admission]struct{}{},
 	}
 	s.adoptAll()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.persistCaptureOffsets()
+	}()
 	return s, nil
+}
+
+// defaultCaptureOffsetInterval is how often the offsets of a process that is
+// producing output are written back to its record.
+//
+// Five seconds is the whole of the trade #71 asks to be made explicit. What it
+// costs is one small atomic write — an fsync — per interval per process that is
+// actually producing output; a process that is quiet writes nothing, so an idle
+// fleet costs nothing at all. What it buys is a bound on how much duplicate
+// history a killed agent can hand the next one: whatever that process wrote in
+// the last five seconds, rather than everything it has written since it
+// started.
+const defaultCaptureOffsetInterval = 5 * time.Second
+
+// persistCaptureOffsets writes back the capture offsets of processes that are
+// still producing output.
+//
+// Every other field of a record is written by the transition that changed it,
+// which is exactly right for a field that only changes on a transition. The
+// capture offsets are the one piece of per-run state that changes continuously
+// while nothing about the process changes at all: a process that reaches
+// RUNNING and then simply runs has capture_offsets [0, 0] on disk while its
+// tailer is thousands of bytes into the file (#71).
+//
+// A stop rewrites the record on the way out, so the graceful path hides it, and
+// the crash path is the one that matters — the same asymmetry #68 found. After
+// a killed agent the next one resumes the capture from the offset it finds, so
+// a re-adopted process's history opens with a duplicate of its own output, at
+// the moment an operator is trying to work out what happened to it and can
+// least afford to distrust the log.
+//
+// One goroutine for the whole supervisor rather than one per process, and a
+// write only when the offsets have moved since the last one: see
+// defaultCaptureOffsetInterval for what that costs and bounds.
+func (s *Supervisor) persistCaptureOffsets() {
+	ticker := time.NewTicker(s.cfg.captureOffsetInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		for _, r := range s.snapshotRecords() {
+			r.persistMovedOffsets()
+		}
+	}
 }
 
 // Close stops supervising. It does not stop a single supervised process:

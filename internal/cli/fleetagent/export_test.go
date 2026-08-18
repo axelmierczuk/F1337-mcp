@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli"
 	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
@@ -105,15 +107,178 @@ func ServiceNeedsPasswordForTest(m Mechanism, goos, account string) bool {
 // a built-in identity that cannot see a toolchain, and an account the SCM will
 // refuse to log on. Which of them applies is a rule, and a rule checked only on
 // a Windows runner is one two thirds of CI never sees.
-func MechanismNotesForTest(m Mechanism, goos, account string) []string {
-	return mechanismNotes(m, goos, account)
+func MechanismNotesForTest(m Mechanism, goos, account string, logonVerified bool) []string {
+	return mechanismNotes(m, goos, account, logonVerified)
 }
 
-// DryRunNotesForTest exposes what a dry run says about the step the plan itself
-// cannot show — the password prompt — with the platform supplied rather than
+// DryRunNotesForTest exposes what a dry run says about the steps the plan
+// itself cannot show — the two prompts — with the platform supplied rather than
 // read.
-func DryRunNotesForTest(m Mechanism, goos, account string) []string {
-	return dryRunNotes(m, goos, account)
+func DryRunNotesForTest(m Mechanism, goos, account string, choice AccountChoiceForTest) []string {
+	return dryRunNotes(m, goos, account, accountChoice(choice))
+}
+
+// AccountChoiceForTest is where install gets the account it registers.
+type AccountChoiceForTest int
+
+// The four answers, named so a test compares against the same values the
+// command switches on.
+const (
+	AccountFromFlagForTest    = AccountChoiceForTest(accountFromFlag)
+	AccountFromDefaultForTest = AccountChoiceForTest(accountFromDefault)
+	AccountFromPromptForTest  = AccountChoiceForTest(accountFromPrompt)
+	AccountUnaskableForTest   = AccountChoiceForTest(accountUnaskable)
+)
+
+// ResolveAccountChoiceForTest exposes #84's central rule — whether `install`
+// stops to ask which account it is about to register — with the platform
+// supplied rather than read.
+//
+// It decides whether an operator on a workstation is asked for a credential
+// they do not need, and whether a script's install hangs on a prompt or
+// refuses. Both are answers about the rule, and a rule only the Windows runner
+// can reach is a rule only that runner checks.
+func ResolveAccountChoiceForTest(requested Mechanism, goos, userFlag string, passwordStdin bool) AccountChoiceForTest {
+	return AccountChoiceForTest(resolveAccountChoice(requested, goos, userFlag, passwordStdin))
+}
+
+// PromptServiceAccountForTest drives the account prompt against a supplied
+// stream, which is the only way the prompt itself — as opposed to the rule that
+// fires it — is reachable off Windows.
+func PromptServiceAccountForTest(in io.Reader, out io.Writer, suggestion string) (string, error) {
+	return promptServiceAccount(in, out, suggestion)
+}
+
+// ReadInputLineForTest exposes the one-line read both prompts share.
+//
+// The two properties it has to keep are invisible from either caller: it must
+// consume exactly one line, or the account prompt eats the password typed after
+// it; and end-of-stream must not look like an empty line, or a script that
+// redirected stdin from nowhere gets the silent fallback to the invoking
+// account that #84 exists to remove.
+func ReadInputLineForTest(in io.Reader) (string, error) { return readInputLine(in) }
+
+// Logon verdicts, named so a test compares against the same values the command
+// switches on.
+const (
+	LogonOKForTest            = int(logonOK)
+	LogonBadCredentialForTest = int(logonBadCredential)
+	LogonRightMissingForTest  = int(logonRightMissing)
+	LogonUnverifiableForTest  = int(logonUnverifiable)
+	LogonUnknownForTest       = int(logonUnknown)
+)
+
+// ClassifyServiceLogonForTest exposes what install makes of the answer
+// LogonUser gave.
+//
+// The classification is a rule over Win32 status codes, and the two codes that
+// decide a refusal — 1326 and 1385 — are the difference between an install that
+// stops and one that produces a service failing every start. No runner here can
+// call LogonUser; every runner can check the rule.
+func ClassifyServiceLogonForTest(err error) int { return int(classifyServiceLogon(err)) }
+
+// ErrLogonUnverifiableForTest is what a platform with no SCM answers.
+var ErrLogonUnverifiableForTest = errLogonUnverifiable
+
+// SplitServiceAccountForTest exposes the split LogonUser needs, which has to
+// agree with the spelling CreateService is handed or the check validates a
+// different account from the one being registered.
+func SplitServiceAccountForTest(name string) (account, domain string) {
+	return splitServiceAccount(name)
+}
+
+// ServiceLogonRightNoteForTest and ServiceLogonRightRefusalForTest are the two
+// renderings of #79's SeServiceLogonRight text, exposed so a test can hold them
+// to being the same text.
+func ServiceLogonRightNoteForTest(account string) []string { return serviceLogonRightNote(account) }
+
+func ServiceLogonRightRefusalForTest(account string) string {
+	return serviceLogonRightRefusal(account)
+}
+
+// CredentialLoopForTest drives the read-and-check sequence `install` performs
+// before it touches the host, with both platform halves supplied.
+//
+// Neither half is reachable from any runner here: readPassword needs a Windows
+// console, and the check needs a real LSA, a real account and that account's
+// real password. What sits between them is where every decision is — which
+// verdict refuses and which proceeds, whether a mistyped password is retyped or
+// the command ends, and what the operator is told in between — and without this
+// it is reachable from nothing.
+func CredentialLoopForTest(out io.Writer, account string, attempts int, fromStdin bool, read func() (string, error), verify func(string) error) (password string, verified bool, err error) {
+	p := cli.NewPrinter(out)
+	password, verified, err = credentialLoop(p, account, attempts, fromStdin, read, verify)
+	if err == nil {
+		err = p.Err()
+	}
+	return password, verified, err
+}
+
+// InteractivePasswordAttemptsForTest is how many times an operator typing a
+// password blind gets to type it again, so a test asserts against the same
+// number the command uses.
+const InteractivePasswordAttemptsForTest = interactivePasswordAttempts
+
+// PasswordAttemptsForTest exposes the rule that decides it, which is also the
+// rule that keeps --password-stdin from turning into a prompt.
+func PasswordAttemptsForTest(fromStdin bool) int { return passwordAttempts(fromStdin) }
+
+// SCMConfigFieldsForTest is every string the Windows service definition carries
+// *except* the password field, so a test can assert where the password is not.
+//
+// It includes the Option values, which is where the rendered systemd unit and
+// launchd plist live, so "the password is not in the service definition" is a
+// claim about the whole definition rather than about the fields somebody
+// remembered to look at.
+func SCMConfigFieldsForTest(params UnitParams, goos, password string) []string {
+	cfg := scmServiceConfig(params, goos, password)
+	fields := []string{cfg.Name, cfg.DisplayName, cfg.Description, cfg.Executable, cfg.UserName}
+	fields = append(fields, cfg.Arguments...)
+	for key, value := range cfg.Option {
+		if key == "Password" {
+			continue
+		}
+		fields = append(fields, key, fmt.Sprint(value))
+	}
+	return fields
+}
+
+// PinServiceLogonForTest replaces the Windows logon check with a supplied
+// answer, and records the account and password it was asked about.
+//
+// Nothing on any runner can perform a real service logon: it needs a real LSA,
+// a real account, and that account's real password, none of which CI has or
+// should have. Without this seam every decision built on the answer — refuse a
+// bad credential, refuse a missing right, retry a mistyped password, stop
+// warning about a right just proved present — is reachable by nothing, which is
+// the state three audit rounds found the rest of `install` in.
+func PinServiceLogonForTest(answer error) (asked func() (account, password string, calls int), restore func()) {
+	previous := verifyServiceLogon
+	var gotAccount, gotPassword string
+	count := 0
+	verifyServiceLogon = func(account, password string) error {
+		gotAccount, gotPassword, count = account, password, count+1
+		return answer
+	}
+	return func() (string, string, int) { return gotAccount, gotPassword, count },
+		func() { verifyServiceLogon = previous }
+}
+
+// PinServiceLogonSequenceForTest is the same seam answering differently each
+// time it is called, which is the only way the retry is observable: "a mistyped
+// password is retyped at the prompt" is a claim about the second attempt.
+func PinServiceLogonSequenceForTest(answers []error) (passwords func() []string, restore func()) {
+	previous := verifyServiceLogon
+	seen := &[]string{}
+	verifyServiceLogon = func(_, password string) error {
+		*seen = append(*seen, password)
+		if i := len(*seen) - 1; i < len(answers) {
+			return answers[i]
+		}
+		return nil
+	}
+	return func() []string { return append([]string(nil), *seen...) },
+		func() { verifyServiceLogon = previous }
 }
 
 // SCMAccountForTest is the account `install` hands the service manager, taken
@@ -170,6 +335,26 @@ func NewScheduledTaskForTest(params UnitParams, run func(args ...string) error) 
 // and running-ness came from a state directory nothing could point anywhere.
 func NewScheduledTaskStatusForTest(run func(args ...string) error, stateDir string) ScheduledTaskForTest {
 	return &scheduledTask{run: run, stateDir: func() string { return stateDir }}
+}
+
+// NewScheduledTaskRestartForTest is the same lifecycle with the state directory
+// supplied and Restart's wait for the ended instance bounded to budget.
+//
+// The wait is the half of Restart that makes the start mean anything: `/End`
+// returns before the instance it ended is gone, and this definition's
+// MultipleInstancesPolicy is IgnoreNew, so a `/Run` issued too early is dropped
+// by the scheduler with schtasks still exiting zero. A budget is a parameter
+// because the behaviour under test is "it waits", and a test that waits the
+// shipped five seconds to prove it is a test nobody will keep.
+func NewScheduledTaskRestartForTest(run func(args ...string) error, stateDir string, budget time.Duration) ScheduledTaskForTest {
+	return &scheduledTask{run: run, endBudget: budget, stateDir: func() string { return stateDir }}
+}
+
+// NewScheduledTaskStateDirForTest builds the lifecycle the way `install` does —
+// from UnitParams, with no state directory supplied — so that which directory
+// Status reads is the thing under test.
+func NewScheduledTaskStateDirForTest(params UnitParams, run func(args ...string) error) ScheduledTaskForTest {
+	return &scheduledTask{params: params, run: run}
 }
 
 // StatusRunningForTest and friends name the states Status answers with, so a
@@ -239,6 +424,15 @@ func InvokingServiceUserForTest(current string) (string, error) {
 // service identity, which is to say one with no operator profile.
 func RunsInSessionZeroForTest(account string) bool { return runsInSessionZero(account) }
 
+// IsSuperuserForTest reports whether an account is the platform's all-powerful
+// one, which is what decides whether `install` warns that every command the
+// agent runs will run as it.
+//
+// Exported beside RunsInSessionZeroForTest because the two rules ask about the
+// same accounts and used to normalise them differently, so one recognised a
+// spelling the other let through.
+func IsSuperuserForTest(account string) bool { return isSuperuser(account) }
+
 // WindowsExecutableAccessProblemForTest exposes the check that stops `install`
 // registering a binary the service account cannot read.
 func WindowsExecutableAccessProblemForTest(exe, account, usersRoot string) string {
@@ -306,6 +500,7 @@ type RuntimeReportForTest struct {
 	PID         int
 	StartID     string
 	Account     string
+	AccountSID  string
 	Home        string
 	SessionZero bool
 	Visibility  string
@@ -321,6 +516,7 @@ func (r RuntimeReportForTest) internal() *runtimeReport {
 		Executable:  "fleet-agent",
 		Version:     "test",
 		Account:     r.Account,
+		AccountSID:  r.AccountSID,
 		Home:        r.Home,
 		SessionZero: r.SessionZero,
 		Profile: profileResult{
@@ -351,6 +547,19 @@ func ConfinementForTest(rep *RuntimeReportForTest) (summary string, detail, reme
 // through the same writer the daemon uses.
 func WriteRuntimeReportForTest(stateDir string, rep RuntimeReportForTest) error {
 	return writeRuntimeReport(stateDir, rep.internal())
+}
+
+// PinAccountIdentityForTest makes the daemon record the account a host would
+// have reported, rather than the one the runner is.
+//
+// The account is the fact the whole of #74's verdict is drawn from, and the
+// spelling a real Windows host reports is one no runner here can produce: a
+// localised display name and a well-known SID. Pinning it is the only way to
+// drive the collection with what a machine would actually give it.
+func PinAccountIdentityForTest(name, sid string) (restore func()) {
+	previous := currentIdentity
+	currentIdentity = func() accountIdentity { return accountIdentity{Name: name, SID: sid} }
+	return func() { currentIdentity = previous }
 }
 
 // ReportHomeForTest exposes which environment variable the daemon takes its
@@ -456,6 +665,15 @@ type InstallHostForTest struct {
 	FailBuild bool
 	// Legacy makes the host carry a service under the pre-rebrand name.
 	Legacy bool
+	// FailUninstall makes the removal refuse, which is what a manager that has
+	// already been asked to stop the daemon leaves behind: an agent that is
+	// down because of this command and a definition that is still there.
+	FailUninstall bool
+	// StopFails makes every stop refuse and leave the daemon running, which is
+	// how a replacement can land with something still up under it: install
+	// stops what it replaces, says so when it cannot, and carries on — a stop
+	// that failed is not a reason to refuse to write the new definition.
+	StopFails bool
 }
 
 // PinInstallForTest drives `service install` against that host, recording every
@@ -487,14 +705,14 @@ func PinInstallForTest(host InstallHostForTest) (calls func() []string, password
 	handed := new(string)
 	installedMechanisms = func() []Mechanism { return host.Installed }
 	controlRegistration = func(m Mechanism) (registration, error) {
-		return &installRegistration{label: string(m), mechanism: m, host: host, log: recorded}, nil
+		return newInstallRegistration(string(m), m, host, recorded, false), nil
 	}
 	newRegistration = func(m Mechanism, _ UnitParams, secret string) (registration, error) {
 		*handed = secret
 		if host.FailBuild {
 			return nil, fmt.Errorf("prepare service definition: no %s can be assembled here", m)
 		}
-		return &installRegistration{label: "new", mechanism: m, host: host, log: recorded, failInstall: host.FailInstall}, nil
+		return newInstallRegistration("new", m, host, recorded, host.FailInstall), nil
 	}
 	requireElevated = func(string) error { return nil }
 	legacyServiceInstalled = func() bool { return host.Legacy }
@@ -508,44 +726,114 @@ func PinInstallForTest(host InstallHostForTest) (calls func() []string, password
 }
 
 // installRegistration is a registration that says what it was asked to do and
-// answers Status from the host it was built for.
+// answers Status from what has been done to it.
 //
 // Status is not recorded: it is a query, and `install` asks it more than once
 // on purpose — the point of the recording is the sequence of things that change
 // the machine.
+//
+// It carries state, and refuses the way the real service managers refuse,
+// because the alternative hid a bug for a whole audit round. A fake whose Stop
+// always succeeds and whose Restart always succeeds asserts only that the
+// command called something; it cannot tell "restart what is running" from
+// "restart what this command stopped two lines ago", and those are the same
+// call with opposite outcomes. kardianos's Windows Restart is
+// ControlService(STOP) followed by StartService and returns at the first
+// failure, and stopping a service that is not running fails with
+// ERROR_SERVICE_NOT_ACTIVE; launchd's is unload-then-load with the same shape.
+// So a definition that has just been written and has never run cannot be
+// restarted, and this fake says so.
 type installRegistration struct {
-	label       string
-	mechanism   Mechanism
-	host        InstallHostForTest
-	log         *[]string
-	failInstall bool
+	label         string
+	mechanism     Mechanism
+	log           *[]string
+	failInstall   bool
+	failUninstall bool
+	stopFails     bool
+	installed     bool
+	running       bool
+}
+
+// newInstallRegistration starts one off in the state the host it addresses is
+// really in.
+func newInstallRegistration(label string, m Mechanism, host InstallHostForTest, log *[]string, failInstall bool) *installRegistration {
+	r := &installRegistration{label: label, mechanism: m, log: log, failInstall: failInstall, failUninstall: host.FailUninstall, stopFails: host.StopFails}
+	for _, installed := range host.Installed {
+		if installed == m {
+			r.installed = true
+			r.running = host.Running[m]
+		}
+	}
+	return r
 }
 
 func (r *installRegistration) record(verb string) error {
 	*r.log = append(*r.log, r.label+":"+verb)
-	if verb == "install" && r.failInstall {
+	return nil
+}
+
+func (r *installRegistration) Install() error {
+	if r.failInstall {
+		_ = r.record("install")
 		return fmt.Errorf("this host will not register a %s", r.mechanism)
+	}
+	// A definition that has just been written is registered, and is running
+	// only where the daemon it replaced was never actually stopped. That is
+	// the state the choice between Start and Restart turns on.
+	r.installed = true
+	return r.record("install")
+}
+
+func (r *installRegistration) Uninstall() error {
+	if r.failUninstall {
+		_ = r.record("uninstall")
+		return fmt.Errorf("%s: the specified service has been marked for deletion", r.mechanism)
+	}
+	r.installed = false
+	return r.record("uninstall")
+}
+
+func (r *installRegistration) Start() error {
+	r.running = true
+	return r.record("start")
+}
+
+func (r *installRegistration) Stop() error {
+	if r.stopFails {
+		_ = r.record("stop")
+		return fmt.Errorf("%s: this host would not stop it", r.mechanism)
+	}
+	if !r.running {
+		_ = r.record("stop")
+		// What ControlService answers for a service that is not running, and
+		// what makes the Restart below give up.
+		return fmt.Errorf("%s: the service has not been started", r.mechanism)
+	}
+	r.running = false
+	return r.record("stop")
+}
+
+// Restart is stop-then-start, and it gives up when the stop fails — which is
+// what kardianos's Windows Restart and launchd's both do, and is the whole
+// reason a definition this command has just written and just stopped cannot be
+// restarted back into life.
+func (r *installRegistration) Restart() error {
+	_ = r.record("restart")
+	if !r.running {
+		return fmt.Errorf("%s: the service has not been started", r.mechanism)
 	}
 	return nil
 }
 
-func (r *installRegistration) Install() error   { return r.record("install") }
-func (r *installRegistration) Uninstall() error { return r.record("uninstall") }
-func (r *installRegistration) Start() error     { return r.record("start") }
-func (r *installRegistration) Stop() error      { return r.record("stop") }
-func (r *installRegistration) Restart() error   { return r.record("restart") }
-
 func (r *installRegistration) Status() (service.Status, error) {
-	for _, m := range r.host.Installed {
-		if m != r.mechanism {
-			continue
-		}
-		if r.host.Running[m] {
-			return service.StatusRunning, nil
-		}
+	switch {
+	case r.running:
+		return service.StatusRunning, nil
+	case r.installed:
 		return service.StatusStopped, nil
+	default:
+		return service.StatusUnknown, service.ErrNotInstalled
 	}
-	return service.StatusUnknown, service.ErrNotInstalled
 }
 
 // ForeignConfigDirNoteForTest exposes what install says about a config

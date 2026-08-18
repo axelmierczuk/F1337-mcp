@@ -310,6 +310,39 @@ func (s *Service) Exec(req *sandboxdv1.ExecRequest, stream sandboxdv1.ExecServic
 		shell:   req.GetShell(),
 		sink:    sink,
 	})
+
+	// The command is over. run has waited for it, swept its group and closed
+	// it, so the slot no longer stands for anything running on this host, and
+	// everything left in this handler is delivery.
+	//
+	// Delivery is where a caller that has stopped reading parks the handler:
+	// sendResult below is a plain Send, and grpc-go returns from one of those
+	// only when the flow-control window opens or the stream ends — neither of
+	// which a client that stays connected, stops calling Recv and set no
+	// deadline will ever do. Holding the slot across that hands one such
+	// caller a piece of the agent's capacity for the life of the daemon, one
+	// piece per call, and the watchdog cannot take it back: by the time Wait
+	// returns, done is closed and the path that bounds a stalled *output*
+	// stream is over. So the slot goes back here instead, ahead of the audit
+	// write and the result.
+	//
+	// This is a bound on the slot rather than on the send, and that is the
+	// point: the command has already succeeded, so there is no deadline short
+	// enough to protect capacity and long enough not to throw away the output
+	// of a command that worked. A wedged caller now costs a goroutine and its
+	// own stream, both of which end when its connection does, and costs the
+	// next caller nothing. See the PR for the two options this was chosen
+	// over.
+	//
+	// release is idempotent — see policy.Acquire — so the deferred call above
+	// stays correct. What it still guards, and all it now guards, is a panic
+	// between Acquire and this line: every ordinary path out of the handler is
+	// below here. It is kept for that. A slot leaked by a panicking handler is
+	// exactly the same permanent loss of capacity as the one this line fixes,
+	// and the daemon survives a panicking handler by design — see
+	// TestServer_PanickingHandlerDoesNotKillTheDaemon.
+	release()
+
 	if errors.Is(err, errStreamStalled) {
 		// The command ran and was killed, so the record says what happened to
 		// it rather than reporting a request that failed. Nothing here reads

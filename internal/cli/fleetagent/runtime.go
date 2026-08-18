@@ -42,6 +42,19 @@ type runtimeReport struct {
 	// it — not as the service definition named it, which is the point: the two
 	// disagreeing is itself worth seeing.
 	Account string `json:"account"`
+	// AccountSID is that same account's security identifier, which is the only
+	// spelling of it that is the same on every host.
+	//
+	// Account is what LookupAccountSid answered, and that is a *display* name:
+	// localised, so the built-in identity this whole issue is about is spelled
+	// differently on a German or French Windows than on an English one. The
+	// fifth audit round found the verdict for it unable to fire because the
+	// English display name has a space the code did not fold; a localised one
+	// is not reachable by folding at all. S-1-5-18, -19 and -20 do not move.
+	//
+	// Empty off Windows, and empty on a Windows host whose token could not be
+	// read — both of which leave the judgement to the name, exactly as before.
+	AccountSID string `json:"account_sid,omitempty"`
 	// Home is the home directory the daemon was started with.
 	Home string `json:"home"`
 	// SessionZero reports that the daemon is in Windows session 0, isolated
@@ -50,6 +63,29 @@ type runtimeReport struct {
 	// Profile is what a command spawned by this daemon can see of the per-user
 	// installs under Home.
 	Profile profileResult `json:"profile"`
+}
+
+// accountIdentity is the account this process is running as, in both spellings
+// the platform can give for it.
+//
+// Name is what LookupAccountSid answered and is a display name: localised, and
+// therefore not the same string on a German host as on an English one. SID is
+// the same string everywhere. Every rule that asks "is this a built-in service
+// identity" gets both, because either one is enough and only one of them holds
+// still. See reportedRunsInSessionZero.
+type accountIdentity struct {
+	Name string
+	SID  string
+}
+
+// currentIdentity is that pair for this process, indirected for the reason
+// controlRegistration is: what the platform answers here is whatever the runner
+// asking happens to be, and the record it lands in is where every verdict about
+// a confined agent comes from. A test can hand the daemon a host's answers.
+//
+// Assigned only by a test, and only for the duration of one.
+var currentIdentity = func() accountIdentity {
+	return accountIdentity{Name: currentAccount(), SID: currentAccountSID()}
 }
 
 // collectRuntimeReport records what this process can tell about its own
@@ -65,11 +101,13 @@ func collectRuntimeReport(ctx context.Context) *runtimeReport {
 	path, _ := agentexec.EnvValue(base, "PATH")
 	home := reportHome(base)
 
+	who := currentIdentity()
 	rep := &runtimeReport{
 		PID:         os.Getpid(),
 		StartedAt:   time.Now().UTC(),
 		Version:     reportedVersion(),
-		Account:     currentAccount(),
+		Account:     who.Name,
+		AccountSID:  who.SID,
 		Home:        home,
 		SessionZero: inSessionZero(),
 	}

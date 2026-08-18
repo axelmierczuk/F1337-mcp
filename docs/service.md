@@ -41,7 +41,7 @@ them. That was the default until #74; it is not any more.
 | `--mechanism` | What it registers | Runs as | Sees the operator's toolchains |
 | --- | --- | --- | --- |
 | `task` (Windows default) | A logon-triggered Scheduled Task | The invoking user, in their own session | Yes |
-| `service` | A Windows service, through the SCM | `--user`, in session 0 | Only if the SCM loaded that account's profile |
+| `service` | A Windows service, through the SCM | `--user`, or asked for, in session 0 | Only if the SCM loaded that account's profile |
 | `service --user 'NT AUTHORITY\NetworkService'` | A Windows service | A built-in identity, in session 0 | No, by construction |
 
 `auto` — the default — picks `task`, unless `--user` names a built-in service
@@ -78,26 +78,81 @@ Two things it costs, both said by `install` at the moment you get them:
 ### The service, under a named account
 
 ```powershell
-fleet-agent service install --mechanism service --user 'WORKSTATION\build'
-# prompts for the password; --password-stdin reads it from a pipe instead
+fleet-agent service install --mechanism service
+# asks which account, then asks for that account's password without echoing it
 ```
+
+**`--mechanism service` asks.** The account a Windows service runs as is the
+account every command this agent runs executes as, and every file it writes is
+owned by; it also decides whether the agent can see a per-user toolchain at all.
+That is too large a decision to resolve on the operator's behalf, so when
+`--user` does not say, `install` stops and asks — rather than quietly
+registering whoever happened to open the elevated prompt.
+
+**It does not ask on the default install.** The logon-triggered Scheduled Task
+runs in the operator's own session and needs no credential, so there is nothing
+to ask for. The prompt belongs to the one mechanism that cannot work without a
+stored password. A workstation install is still one command and no questions.
+
+The scripted form supplies both halves non-interactively:
+
+```powershell
+# an unattended install; nothing is prompted for, and nothing is echoed
+'the password' | fleet-agent service install `
+    --mechanism service --user 'WORKSTATION\build' --password-stdin
+```
+
+`--password-stdin` makes stdin the password, which leaves nothing to ask "which
+account" with — so `--mechanism service --password-stdin` without `--user` is
+refused rather than guessed at. There is deliberately **no environment variable**
+for the password: an environment block is readable by anything running as the
+same account and is inherited by every child process, while a pipe exists only
+for the length of the command.
 
 The SCM logs the account on to start the service, so it needs credentials. The
 password is read once, handed to `CreateService`, and stored by the SCM as a
 machine-bound LSA secret. Nothing here writes it to a file, an environment
-variable, or a log line, and nothing can read it back off the machine it was
-stored on.
+variable, the service definition, or a log line, and nothing can read it back
+off the machine it was stored on.
 
-**The account also needs the "Log on as a service" right**, and nothing in this
+#### The credential is checked before anything is registered
+
+`CreateService` stores a password and validates nothing. The logon happens at
+every *start*, so a mistyped password produces a service that registers cleanly
+and then fails forever — and by then the directories, the ACL grants and the
+registration are all already on the host.
+
+So `install` performs the SCM's own logon first: `LogonUser` with
+`LOGON32_LOGON_SERVICE`, against the account spelled exactly as `CreateService`
+will be given it, before the first directory is created. Three outcomes:
+
+| What Windows says | What `install` does |
+| --- | --- |
+| The logon succeeds | Registers, and stops warning about a right it just used |
+| `ERROR_LOGON_FAILURE` and friends | Asks again — three times at a prompt, once from a pipe — then refuses |
+| `ERROR_LOGON_TYPE_NOT_GRANTED` | Refuses immediately, naming `SeServiceLogonRight` |
+| Anything else | Warns that it could not check, and registers anyway |
+
+The last row is deliberate. A status code this program has never seen is not
+evidence that the install would fail, and refusing on one would block an install
+that works for a reason nobody anticipated. The two codes that *are* evidence
+are named.
+
+Every refusal happens before the state directory, the log directory, the ACL
+grants and the registration, so a host that refused is a host that was not
+touched — and the refusal says so.
+
+**The account needs the "Log on as a service" right**, and nothing in this
 command grants it. `CreateService` stores the password; the privilege
 (`SeServiceLogonRight`) is separate, the Services MMC grants it as a side
 effect and the API does not, and without it the service installs cleanly and
 every start fails with **error 1069, "the service did not start due to a logon
 failure"** — the same shape as the error 5 below, from the other direction.
-`install` says so when it registers one. Granting it means `LsaAddAccountRights`,
-which is not something to hand-roll into an installer; do it with `secedit`, or
-under *Local Security Policy → Local Policies → User Rights Assignment → Log on
-as a service*.
+The check above is what turns that from something discovered afterwards into a
+refusal; where the check could not run, `install` says so when it registers.
+Granting it means `LsaAddAccountRights`, which is not something to hand-roll
+into an installer; do it with `secedit`, or under *Local Security Policy → Local
+Policies → User Rights Assignment → Log on as a service*.
 
 The account is still in session 0. Whether it sees its own per-user toolchains
 depends on whether its profile is loaded, which the SCM does not guarantee —
@@ -133,7 +188,7 @@ model.
 | --- | --- | --- |
 | Linux | `fleet`, a system account (but see the pre-rebrand rule below) | Yes, via `useradd` or `adduser` |
 | macOS | The invoking user (`$SUDO_USER`) | No — pass `--user` for a different one |
-| Windows | The invoking user, in a logon-triggered Scheduled Task | No — pass `--user` for a different one |
+| Windows | The invoking user, in a logon-triggered Scheduled Task; `--mechanism service` asks | No — pass `--user` for a different one |
 
 `--user` overrides the default everywhere. `--create-user=false` turns off
 account creation, so an install against a missing account fails with a message
@@ -265,7 +320,21 @@ asked for, and on Windows those are spelled differently: `CreateService` takes
 `NT AUTHORITY\NetworkService` and `LookupAccountSid` gives back the display name
 for the same well-known SID, `NT AUTHORITY\NETWORK SERVICE`. Both are recognised
 as the same built-in identity, in the report and in `--user`. The two disagreeing
-is itself worth seeing, which is why the record keeps the platform's answer. The
+is itself worth seeing, which is why the record keeps the platform's answer.
+
+**And the record keeps the account's SID beside its name, because the name is
+not a stable string.** `LookupAccountSid` returns a *display* name, and Windows
+localises those: the account this whole document is about is spelled with
+different letters on a German or French installation than on an English one.
+There is no list of spellings that can be kept complete and no amount of case-
+or space-folding that reaches them, so a verdict drawn from the name alone
+cannot fire on a host whose display language is not English — it falls through
+to the named-account case, which tells the operator their agent's "profile was
+never loaded", and with `%USERPROFILE%` unset through that one too, into plain
+`running`. `S-1-5-18`, `S-1-5-19` and `S-1-5-20` are those three strings on
+every installation of Windows in every language. Either spelling is enough:
+`account_sid` is empty off Windows, and on a host whose token could not be read,
+and the name decides it there exactly as before. The
 probe looks on disk for the directories a toolchain installs into when it is
 installed for one user — `.cargo\bin`, `AppData\Roaming\npm`, `scoop\shims`,
 `.local/bin` and the rest — and then asks whether the `PATH` the exec service
@@ -371,9 +440,34 @@ with a definition marked for deletion and no replacement. And when the thing
 being stopped is a Scheduled Task, stopping it ends the processes the agent
 supervises, so `install` prints the same warning `stop` does before it happens.
 
+**Which is why the agent comes back through a *start*, not a restart.** The stop
+above is what makes the definition `install` writes a freshly created one that
+has never run, and none of the three managers will restart that. `kardianos`'s
+Windows `Restart` is `ControlService(SERVICE_CONTROL_STOP)` followed by
+`StartService` and returns at the first failure, so the stop fails with
+`ERROR_SERVICE_NOT_ACTIVE` and `StartService` is never reached; launchd's
+unload-then-load has the same shape. `install` asks the registration what it is
+doing after the replacement lands and starts what is not running — which keeps
+systemd right too, since `systemctl disable` plus removing the unit file leaves
+the process up, so the replacement really is still running there and
+`systemctl restart` is what puts it on the new definition.
+
 If the write fails after the old registration is gone, the host has no agent
 registered on it at all, and the error says so rather than leaving "install
-failed" to be read as "nothing happened".
+failed" to be read as "nothing happened". A *removal* that fails says so too,
+and says something different: the daemon was stopped so the definition could be
+replaced, so the agent is down whatever the manager did with the definition.
+`service restart` under the task mechanism waits for the instance it ended
+before asking for a new one. Neither verb is what it looks like: `schtasks /End`
+asks the scheduler to terminate the instance and returns without waiting, and
+the definition sets `MultipleInstancesPolicy` `IgnoreNew` — deliberately, so a
+second logon does not start a second daemon — so a run requested while the
+previous instance is still on its way out is *dropped*, with `schtasks` printing
+"SUCCESS: Attempted to run the scheduled task" and exiting zero either way. The
+wait is against the daemon's own `runtime.json` rather than anything `schtasks`
+prints, for the reason `status` is: every human-readable field the scheduler
+prints is localised, and an exit code cannot say "still running".
+
 `start`, `stop`, `restart` and `uninstall` act on **every** registration the
 host carries, and keep going when one of them refuses — a `stop` that stops the
 service and returns before it reaches the task leaves the daemon an operator
@@ -550,9 +644,20 @@ sudo fleet-agent service uninstall
 
 Everything that decides *what* gets registered is unit-tested on every runner —
 the rendered Scheduled Task XML, the mechanism rule, the session-0 rule, the
-executable-access refusal, and the probe that decides `visible`/`hidden`. What
-cannot be tested anywhere is the registration itself and the session the daemon
-lands in. From an elevated PowerShell:
+executable-access refusal, the rule deciding whether `install` stops to ask for
+an account, the classification of what a service logon answered, and the probe
+that decides `visible`/`hidden`. The sequences built on those — the account
+prompt, the password retry, and each refusal leaving the host unregistered — are
+driven from the real argv on the Windows runner, with two calls replaced: the
+registration itself, and the service logon.
+
+**What is asserted versus what is invoked.** No CI runner can register a
+service, and none can perform a real service logon either: that needs a real
+LSA, a real account, and that account's real password, none of which a runner
+has or should have. So `LogonUser` is *invoked* only by hand, from the list
+below; every decision drawn from its answer is *asserted*, on every runner,
+against a supplied one. The rows that follow marked MUST are the ones only a
+real host can settle. From an elevated PowerShell:
 
 ```powershell
 fleet-agent service install --dry-run       # changes nothing; says which mechanism
@@ -566,6 +671,19 @@ fleet-agent service start
 fleet-agent service status                  # running; per-user toolchains: visible (ran ...)
 Get-ScheduledTask fleet-agent | Format-List TaskName, State
 Get-ScheduledTaskInfo fleet-agent
+
+# `runs as:` must be YOUR account. If this host makes you elevate with a
+# *different* administrator account — UAC's over-the-shoulder prompt, which is
+# what a standard user gets — then `install` defaulted to that administrator,
+# and a logon-triggered task for an account nobody signs in as never starts.
+# Re-run it with `--user <your account>`.
+
+fleet-agent service restart
+fleet-agent service status                  # running again, with a new pid
+#   `restart` ends the task and runs it again. Ending a task is asynchronous and
+#   the definition sets MultipleInstancesPolicy IgnoreNew, so a run asked for
+#   too early is dropped by the scheduler with schtasks still reporting success.
+#   If this ever reports `installed, stopped`, that is what happened.
 
 # The claim, checked from outside the agent: the daemon is in your session,
 # not in session 0.
@@ -595,9 +713,13 @@ fleet-agent service uninstall
 fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
 fleet-agent service start
 fleet-agent service status                  # MUST print "running, but unusable"; exits 1
-#   and MUST name the account: `runs as: NT AUTHORITY\NETWORK SERVICE`, which is
-#   how LookupAccountSid spells the identity CreateService took without a space.
-#   The verdict is drawn from that name, so the two have to agree.
+#   `runs as:` is whatever LookupAccountSid calls S-1-5-20 on this host: on an
+#   English install `NT AUTHORITY\NETWORK SERVICE`, spelled with a space that
+#   CreateService's own spelling does not have, and on a localised install a
+#   name in that language. The verdict must fire either way — it is drawn from
+#   `account_sid` in the record as well as from the name.
+Get-Content C:\ProgramData\fleet\state\runtime.json | ConvertFrom-Json |
+  Select-Object account, account_sid    # account_sid must be S-1-5-20
 Get-Service fleet-agent                     # Running, StartType Automatic
 sc.exe qfailure fleet-agent                 # restart action, 5s delay
 fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
@@ -605,18 +727,60 @@ fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkServ
 #   starts it again. DeleteService only marks a running service for deletion, so
 #   without the stop this is where the replacement fails and the host is left
 #   with no registration.
+fleet-agent service status                  # MUST be running, not "installed, stopped"
+#   The stop is what makes the definition it writes a freshly created one that
+#   has never run, and a restart there is ControlService(STOP) first: it fails
+#   with ERROR_SERVICE_NOT_ACTIVE and never reaches StartService. So the agent
+#   has to come back through a *start*, and this is the line that says it did.
 fleet-agent service uninstall
 
 # And a service under a named account, which is the headless answer. It needs an
-# account that exists and has the "Log on as a service" right — without the
-# right the install is clean and every start fails with error 1069.
-net user build /add                         # if this host does not have one
-#   grant SeServiceLogonRight: secedit, or Local Security Policy > User Rights
-#   Assignment > Log on as a service. `install` prints the commands.
+# account that exists and has the "Log on as a service" right.
+net user build * /add                       # if this host does not have one;
+#   the * prompts for a password, and the account needs one: the SCM will not
+#   log a service on with an empty one, and `install` refuses an empty answer at
+#   its own prompt.
+
+# 1. The account prompt. No --user, so install asks; type the account.
+fleet-agent service install --mechanism service
+#   MUST print "Account [...]" and MUST NOT register anything until answered.
+#   Answer with COMPUTERNAME\build.
+
+# 2. The credential check, against an account that has no SeServiceLogonRight
+#    yet. This is the case CI cannot reach at all: a real LSA saying no.
+#   MUST refuse naming SeServiceLogonRight, and MUST leave the host untouched —
+#   confirm with:
+Get-Service fleet-agent -ErrorAction SilentlyContinue     # nothing
+Get-ScheduledTask fleet-agent -ErrorAction SilentlyContinue
+Test-Path C:\ProgramData\fleet\state                     # False, if this is a fresh host
+
+# 3. Grant the right — secedit, or Local Security Policy > User Rights
+#    Assignment > Log on as a service; `install` prints the commands — and
+#    re-run. Now mistype the password deliberately:
 fleet-agent service install --mechanism service --user "$env:COMPUTERNAME\build"
-#   prompts for the password; the SCM stores it as an LSA secret
-fleet-agent service start                   # error 1069 here means the right is missing
+#   MUST say the password was not accepted and ask again, up to three times,
+#   MUST NOT echo what was typed, and MUST NOT have created anything when it
+#   gives up. Then type it correctly.
+fleet-agent service start                   # starts; no 1069, because it was checked
 fleet-agent service status                  # visible or hidden, depending on the profile
+
+# 4. The unattended form, with no console at all. Run it from a non-interactive
+#    session (a scheduled task, a remote PS session, or with stdin redirected):
+'the password' | fleet-agent service install `
+    --mechanism service --user "$env:COMPUTERNAME\build" --password-stdin
+#   MUST complete without prompting.
+'the password' | fleet-agent service install --mechanism service --password-stdin
+#   MUST refuse, naming --user: stdin is the password, so there is nothing to
+#   ask "which account" with.
+
+# 5. The password is nowhere. After a successful install under a named account:
+Get-CimInstance Win32_Process -Filter "Name='fleet-agent.exe'" |
+    Select-Object CommandLine                       # no password
+Get-WinEvent -LogName Application -MaxEvents 200 |
+    Where-Object { $_.Message -match 'the password' }   # nothing
+Select-String -Path C:\ProgramData\fleet\*,C:\ProgramData\fleet\logs\* `
+    -Pattern 'the password' -ErrorAction SilentlyContinue   # nothing
+sc.exe qc fleet-agent                       # the definition; no password in it
 
 Restart-Computer                               # survives a reboot
 fleet-agent service status

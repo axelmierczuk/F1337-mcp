@@ -221,6 +221,17 @@ that spawns a process takes a slot from one shared limiter, because a limit each
 service enforced from its own count would not be a limit on the agent: two
 services each allowing 32 is a host running 64.
 
+A slot stands for a process that is running, not for an RPC that is open. So
+`ExecService` gives its slot back as soon as the command has finished and been
+waited for — before it writes the audit record and before it puts the result on
+the stream. That last send is a plain gRPC `Send`, and grpc-go returns from one
+only when the flow-control window opens or the stream ends: a client that stays
+connected, stops reading and set no deadline parks the handler there for as long
+as it likes. Holding the slot across that would let such a caller take a piece of
+the agent's capacity permanently, one piece per call. It now costs a goroutine
+and its own stream, both of which end when its connection does, and the result
+is still delivered in full if it ever starts reading again.
+
 **Command execution.** Starting a supervised process runs a command, so
 `ProcessService` is refused on an agent configured with `exec.enabled: false` —
 the one configuration in which `allowed_roots` is a real boundary. See
@@ -235,6 +246,18 @@ the agent will later signal something it does not own. A mismatch produces
 while it was still being probed has its readiness probe resumed, because
 otherwise nothing would ever decide it: the probe was running in an agent that
 no longer exists.
+
+**Where the capture resumes.** A re-adopted process's logs pick up where the
+previous agent stopped reading, at a byte offset the record carries. That offset
+is the one piece of per-run state that changes continuously while nothing else
+about the process changes at all, so it is written back on a cadence rather than
+only when the process changes state. A stop rewrites the record on the way out
+and so hides the difference; after a *killed* agent the next one would resume
+from the position recorded when the process started, and replay a history that
+opens with a duplicate of itself, at the moment an operator is least able to
+afford distrusting the log (#71). The cadence bounds that duplication to what
+the process wrote in the last few seconds, and a process that is producing no
+output is not written at all.
 
 **Readiness is per run, not per process.** A `log_pattern` probe scans the lines
 already buffered before it starts following new ones — a process that announces
