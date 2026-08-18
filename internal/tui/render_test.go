@@ -299,7 +299,15 @@ func TestGoldenFrames(t *testing.T) {
 			}
 			want, err := os.ReadFile(path)
 			require.NoError(t, err, "missing golden frame; run `go test ./internal/tui -update`")
-			require.Equal(t, strings.TrimSuffix(string(want), "\n"), got)
+			// Carriage returns are stripped from the file rather than trusted
+			// to be absent. These are the first golden *text* files in this
+			// repository, and whether they arrive with LF or CRLF is a property
+			// of whoever checked them out — Git for Windows converts by default.
+			// A frame never contains one (SafeText drops control characters and
+			// the lines are joined with "\n"), so this normalises the file and
+			// compares the rendering exactly.
+			golden := strings.ReplaceAll(string(want), "\r\n", "\n")
+			require.Equal(t, strings.TrimSuffix(golden, "\n"), got)
 		})
 	}
 }
