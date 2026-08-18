@@ -31,7 +31,8 @@ Three binaries, one Go module:
 - **`fleet-agent`** — runs on every sandbox host. Listens over gRPC/mTLS,
   runs commands, and supervises background processes.
 - **`fleetctl`** — runs on your workstation. Sets up the CA, mints
-  enrollment tokens, and inspects the fleet.
+  enrollment tokens, inspects the fleet, and opens an interactive shell on a
+  host with `fleetctl shell`.
 
 The agent CLI (Claude Code, Cursor, etc.) calls `fleet_select` to pick a
 host, then uses the same exec/file/process tools it already knows — they

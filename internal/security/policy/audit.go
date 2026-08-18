@@ -37,18 +37,23 @@ const (
 // # What is deliberately absent
 //
 // There is no field for environment values, file contents, stdin, command
-// output, forwarded payload bytes, or the enrollment token, and none may be
+// output, what an interactive shell session carried, forwarded payload bytes,
+// or the enrollment token, and none may be
 // added. An audit log that captures secrets is a new place to steal them from,
 // and it is a place with weaker handling than the thing it copied them out of:
 // it is world-readable on some hosts by the time an operator has finished
 // debugging it, it is shipped off-box, and it is kept long after the
 // credential it captured was supposed to have been rotated.
 //
-// Forwarded traffic is the sharpest case. A tunnelled connection carries
-// whatever the caller sends through it — a database password, a bearer token,
-// a private key on its way to a deploy — so this record counts bytes and never
-// holds them. A log that captured them would be a credential store nobody
-// meant to build, sitting on the least protected host in the fleet.
+// Forwarded traffic and interactive sessions are the sharpest cases. A
+// tunnelled connection carries whatever the caller sends through it — a
+// database password, a bearer token, a private key on its way to a deploy — and
+// a shell session carries whatever the operator types and whatever the host
+// prints back, which is the same list plus a sudo prompt. So this record counts
+// bytes for one and records neither's contents. A log that captured them would
+// be a credential store nobody meant to build, sitting on the least protected
+// host in the fleet. internal/agent/shell is shaped so that the audit path
+// cannot see a session's bytes at all; see its package comment.
 //
 // The rule is about the record and not only about its field list, because an
 // error string is a field too and a caller chooses much of what goes into one.

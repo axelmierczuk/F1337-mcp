@@ -54,6 +54,16 @@ func MainContext(ctx context.Context, args []string, out io.Writer) int {
 	root := NewRootCommand(out)
 	root.SetArgs(args)
 	if err := root.ExecuteContext(ctx); err != nil {
+		// A command that ran something elsewhere reports what it got, rather
+		// than flattening every failure to 1. `fleetctl shell` is the first:
+		// `exit 3` in a remote shell has to be `exit 3` here, or a script
+		// wrapping it cannot tell a failed build from a failed connection. The
+		// command silences cobra's own printing for this error; everything else
+		// has already been printed by the time this runs.
+		var status *exitStatus
+		if errors.As(err, &status) {
+			return status.code
+		}
 		return 1
 	}
 	return 0
@@ -87,6 +97,8 @@ func NewRootCommand(out io.Writer) *cobra.Command {
 		newListCommand(out),
 		newInfoCommand(out),
 		newRemoveCommand(out),
+		newSelectCommand(out),
+		newShellCommand(out),
 		newSocksCommand(out),
 		newTUICommand(out),
 		newVersionCommand(out),

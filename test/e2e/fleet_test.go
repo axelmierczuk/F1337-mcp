@@ -87,7 +87,16 @@ func newFleet(t *testing.T) *fleet {
 // ctlEnv is the environment every fleetctl and fleet-mcp invocation runs with.
 // FLEET_CONFIG_DIR is what keeps the CA, the token store, the registry and the
 // control leaf in one directory across all three binaries.
+//
+// TERM is here for `fleetctl shell`, which forwards it to the session: a
+// terminal type is what decides which escape sequences a full-screen program on
+// the far end emits, and an operator's own shell always has one.
 func (f *fleet) ctlEnv() []string { return f.configEnv(f.ctlDir) }
+
+// operatorTerm is the terminal type the operator's own environment carries.
+// `fleetctl shell` forwards it, and TestShellCarriesTheOperatorsTerminalType
+// asserts that a remote session sees it.
+const operatorTerm = "xterm-256color"
 
 // configEnv is ctlEnv pointed at some other config directory — an operator's
 // second workstation, or one that is missing a credential on purpose.
@@ -97,6 +106,7 @@ func (f *fleet) configEnv(dir string) []string {
 		envEntry("PATH", os.Getenv("PATH")),
 		envEntry("HOME", f.root),
 		envEntry("TMPDIR", os.TempDir()),
+		envEntry("TERM", operatorTerm),
 	)
 }
 

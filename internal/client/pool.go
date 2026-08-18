@@ -248,6 +248,20 @@ func (p *Pool) Process(name, address string) (sandboxdv1.ProcessServiceClient, e
 	return sandboxdv1.NewProcessServiceClient(cc), nil
 }
 
+// Shell returns a ShellServiceClient bound to the named sandbox's pooled
+// channel.
+//
+// It has no MCP caller and is not expected to grow one: a model does not need
+// an interactive terminal, and streaming raw terminal bytes into a context
+// window is a bad trade in every direction. This is here for `fleetctl shell`.
+func (p *Pool) Shell(name, address string) (sandboxdv1.ShellServiceClient, error) {
+	cc, err := p.Conn(name, address)
+	if err != nil {
+		return nil, err
+	}
+	return sandboxdv1.NewShellServiceClient(cc), nil
+}
+
 // Forward returns a ForwardServiceClient bound to the named sandbox's
 // pooled channel.
 func (p *Pool) Forward(name, address string) (sandboxdv1.ForwardServiceClient, error) {

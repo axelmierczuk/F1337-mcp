@@ -303,6 +303,32 @@ func (g *ProcessGroup) ConfigurePTYCommand(cmd *pty.Cmd) {
 	g.Configure(cmd.SysProcAttr)
 }
 
+// ConfigureInteractivePTYCommand is ConfigurePTYCommand for a session whose
+// interrupts arrive through the terminal rather than from the agent.
+//
+// It deliberately does *not* set CREATE_NEW_PROCESS_GROUP, which is the only
+// thing Configure does on this platform. The flag's documented effect is that
+// "CTRL+C signals will be disabled for all processes within the new process
+// group" — it exists so an agent can aim a CTRL_BREAK_EVENT at a supervised
+// child without also hitting itself, and it pays for that by turning off the
+// one delivery path an interactive session needs. A shell attached to a ConPTY
+// receives Ctrl-C because the byte reaches the pseudo-console and the console
+// host raises a control event for the processes attached to it; starting that
+// shell with Ctrl-C disabled means the operator presses Ctrl-C and nothing
+// happens on the far end, which is an acceptance criterion of the feature
+// rather than a detail.
+//
+// Nothing is lost by omitting it. The flag is not what makes the tree killable
+// on Windows — the job object is, and Adopt still assigns the child to it — and
+// this service never sends a console control event of its own, because an
+// interrupt here is a byte on the wire rather than a signal the agent
+// synthesises.
+func (g *ProcessGroup) ConfigureInteractivePTYCommand(cmd *pty.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+}
+
 // Adopt takes the started child on: it opens the handle the group will hold for
 // the rest of its life, and assigns the child to the job object. See the type
 // comment for the assignment race this cannot close, and for why the handle is

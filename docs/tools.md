@@ -587,3 +587,25 @@ duration. Never the bytes themselves. A refused destination is recorded too.
 stays open across unrelated tool calls until `stop: true` or the MCP server
 exits, and `fleet_remove` closes the proxy reaching through a sandbox it
 deregisters.
+
+---
+
+## What is deliberately not a tool
+
+### An interactive shell
+
+There is no `fleet_shell`, and there should not be one. `fleetctl shell` opens a
+real terminal session on a sandbox, and it is an operator command only.
+
+A model does not need an interactive terminal: `fleet_exec` runs a command and
+returns its output, and `fleet_process_start` covers anything long-lived. What a
+terminal adds is a program that redraws a screen — and streaming raw terminal
+bytes into a context window is a bad trade in every direction. They are
+expensive, they are mostly escape sequences once anything full-screen is
+running, and there is no sensible way to bound them: the output cap that makes
+`fleet_exec` safe has no meaning for a session that never ends.
+
+It is also the most direct remote-code-execution surface in the product, which
+is the other half of why it sits behind a command a person runs rather than a
+tool a model calls. See
+[security.md](security.md#the-interactive-shell).

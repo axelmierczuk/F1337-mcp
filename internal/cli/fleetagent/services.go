@@ -19,4 +19,5 @@ import (
 	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/fs"      // #8–#10, FileService
 	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/host"    // #5, HostService
 	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/process" // #11–#15, ProcessService
+	_ "github.com/axelmierczuk/fleet-mcp/internal/agent/shell"   // #43, ShellService
 )

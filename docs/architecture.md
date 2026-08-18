@@ -21,6 +21,7 @@
    │   internal/agent/exec                │  ExecService
    │   internal/agent/fs                  │  FileService
    │   internal/agent/process             │  ProcessService
+   │   internal/agent/shell               │  ShellService
    │   internal/security/jail             │  path confinement
    │   internal/security/policy           │  command policy, caps, audit
    │   internal/platform                  │  OS-specific behaviour
@@ -132,6 +133,7 @@ Streaming is used where buffering would be wrong, not everywhere:
 | `FileService.Grep` | server stream | Results before the walk finishes. |
 | `ProcessService.GetProcessLogs` | server stream | Replay buffered output, then follow new output to a bounded deadline. |
 | `ForwardService.Forward` | bidirectional | One stream per carried TCP connection — a port forward's and a SOCKS proxy's alike. A proxy marks its connections with `ForwardOpen.socks`, which selects which of the agent's two policies applies; it needs no RPC of its own, and a second byte-pump would be a second place to leak a goroutine per connection. |
+| `ShellService.Shell` | bidirectional | One stream per interactive terminal session: keystrokes and resizes one way, terminal output the other, for as long as the operator holds it open. |
 
 Everything else is unary.
 

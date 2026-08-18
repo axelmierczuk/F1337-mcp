@@ -158,6 +158,8 @@ fleetctl list                     # the fleet, with health
 fleetctl list --json              # the same, for scripting
 fleetctl info build-box           # one host in full: resources, roots, uptime
 fleetctl tui                      # watch the whole fleet at once
+fleetctl select build-box         # the host later commands act on
+fleetctl shell                    # an interactive shell on it
 fleetctl remove build-box         # deregister locally; the host is untouched
 fleetctl version
 ```
@@ -204,6 +206,35 @@ data. `--refresh` sets how often health is re-probed (default 10s).
 `remove` is local only. The agent keeps running and keeps its certificate, so a
 removed sandbox can be re-registered without re-enrolling; to actually stop it
 serving, uninstall the agent on the host.
+
+### A shell on a host
+
+```sh
+fleetctl select build-box         # once; later commands use it
+fleetctl shell                    # a real terminal on build-box
+fleetctl shell gpu-01             # or name a host for this session only
+fleetctl shell -- /bin/zsh        # or choose the shell yourself
+```
+
+It is a full terminal: `top`, `vi` and anything that prompts for a password all
+work, the window reflows when you resize yours, and Ctrl-C interrupts what is
+running on the far end rather than the command carrying it. The remote shell's
+exit code becomes `fleetctl`'s, so `fleetctl shell -- make test` reports the
+build's own status.
+
+It needs a terminal, and refuses without one: a session driven by a pipe would
+sit at a prompt nobody can answer. To run a command from a script and collect
+its output, use the `fleet_exec` tool.
+
+A session ends when you exit it, when the connection drops, or when the agent's
+`shell.idle_timeout` reaps an abandoned one. Whichever it is, the session's
+whole process tree goes with it.
+
+This is the most direct remote-code-execution surface in the product, and every
+session is recorded on the host: who opened it, when, for how long, and how it
+ended — never what was typed or printed. Read
+[docs/security.md → The interactive shell](security.md#the-interactive-shell)
+before you hand the control certificate to somebody else.
 
 Replacing the CA without a flag day is
 [docs/security.md → Rotating the CA](security.md#rotating-the-ca).

@@ -78,6 +78,36 @@ exec:
   #   - "/usr/bin/make"
   #   - "/usr/local/go/bin/go"
 
+shell:
+  # Interactive terminals: `fleetctl shell`. On means an operator who holds a
+  # control certificate can get a real shell on this host, over the same mTLS
+  # transport everything else uses.
+  #
+  # This is the most direct remote-code-execution surface in the product. It
+  # grants nothing new — a caller who can reach exec above already runs whatever
+  # it likes here — but it is the most convenient path to it, so every session
+  # is recorded in the audit log below: who opened it, when, for how long, and
+  # how it ended. Never what was typed or printed. See docs/security.md.
+  #
+  # Turning this off leaves exec on, which is a real choice: an agent that runs
+  # commands for a model and hands nobody an interactive terminal. Turning off
+  # *execution* is exec.enabled above, and that turns this off too — a terminal
+  # is a way to run a command.
+  #
+  # There is deliberately no MCP tool for this. A model does not need an
+  # interactive terminal, and streaming raw terminal bytes into a context window
+  # is a bad trade in every direction.
+  enabled: true
+  # A session that carries no data in either direction for this long is ended
+  # and its process tree killed.
+  #
+  # Both directions, so a shell watching a two-hour build is not reaped for the
+  # crime of nobody typing. There is no value that disables it: an abandoned
+  # session holds a pseudo-terminal, a process tree and a concurrency slot on
+  # this machine, and "forever" is not a bound. Set it longer if you need
+  # longer.
+  idle_timeout: "30m"
+
 process:
   # Agent-wide, not per-service: every service that starts a process takes its
   # slots from this one number, so an agent set to 32 runs 32 processes in
@@ -159,16 +189,18 @@ forward:
   dial_timeout: "10s"
 
 audit:
-  # Append-only JSONL record of every exec, every write, and every forwarded
-  # connection that leaves this machine: timestamp, authenticated principal,
-  # this sandbox's name, RPC, outcome, duration, and then what the operation
-  # has — argv and resolved path and working directory for a command, the
-  # requested and dialed addresses and the byte counts for a connection.
+  # Append-only JSONL record of every exec, every shell session, every write,
+  # and every forwarded connection that leaves this machine: timestamp,
+  # authenticated principal, this sandbox's name, RPC, outcome, duration, and
+  # then what the operation has — argv and resolved path and working directory
+  # for a command or a session, the requested and dialed addresses and the byte
+  # counts for a connection.
   #
-  # Never the environment, file contents, stdin, command output, or the bytes
-  # a forward carried — a tunnel carries whatever the caller sends through it,
-  # and a log that captured that would be a credential store nobody meant to
-  # build. It is a forensic record, not an enforcement mechanism: a caller who
+  # Never the environment, file contents, stdin, command output, what a terminal
+  # session carried, or the bytes a forward carried — a tunnel and a shell both
+  # carry whatever the caller sends through them, and a log that captured that
+  # would be a credential store nobody meant to build. It is a forensic record,
+  # not an enforcement mechanism: a caller who
   # can run commands on this host can also reach this file. Ship it off-host if
   # it needs to survive the host.
   path: "/var/log/fleet/audit.jsonl"
