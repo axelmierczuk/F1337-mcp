@@ -104,18 +104,7 @@ func TestSweepAndCollect_DoesNotSweepAGroupItCouldNotGround(t *testing.T) {
 	require.Error(t, <-wait.waited,
 		"there is no such process to wait for, so the wait has nothing to report either")
 
-	// What the child ends up dying of is the recorded fact, and the only one
-	// that settles it: a process that has been sent SIGKILL is not
-	// distinguishable from a running one by asking whether its pid exists — the
-	// answer is yes either way until somebody reaps the zombie. So this kills it
-	// deliberately, with a different signal, and reads back which arrived. A
-	// sweep that went out first is already pending and wins.
-	require.NoError(t, child.Process.Signal(syscall.SIGTERM))
-	_ = child.Wait()
-	require.NotNil(t, child.ProcessState)
-	sig, signalled := terminatingSignal(child.ProcessState)
-	require.True(t, signalled)
-	require.Equal(t, "SIGTERM", sig,
+	requireDiedOfSIGTERM(t, child,
 		"the session's own process died of a SIGKILL: the group was swept even though nothing had established that it was still the session's")
 
 	require.Contains(t, logs.String(), "so it was not swept; a descendant may have outlived the session",
@@ -152,24 +141,21 @@ func TestKillGroup_EndsASessionWhoseLeaderIsStillRunning(t *testing.T) {
 // itself, so there is nothing this call can add and a whole process group it
 // could take away.
 //
-// A closed group is how the decision is read back rather than the scenario it
-// is read back from: it is the one state in which ProcessGroup.Signal reports
-// something at all — an emptied group answers ErrProcessNotFound, which
-// killGroup swallows either way — so a log with anything in it means the call
-// went out. The state that matters is the one above it, and the real wait is
-// what put the group in it.
+// So the group the kill is aimed at is a live one that the wait has nothing to
+// do with, standing in for the session that now holds the number. Its own
+// group could not stand in for it: that one has been emptied, so a signal to it
+// reaches nothing and "it went out" would be unobservable. What settles it is
+// what the stand-in dies of — see below, and see the Windows file, which is
+// this fixture with the opposite expectation.
 func TestKillGroup_DoesNotSignalAGroupIDTheWaitHasReleased(t *testing.T) {
 	group, cmd, _ := sessionCommand(t, "exit", "0")
-	logs := &syncBuffer{}
-
-	wait := startLeaderWait(cmd, group, testLogger(logs))
+	wait := startLeaderWait(cmd, group, testLogger(&syncBuffer{}))
 	require.NoError(t, <-wait.waited)
 
-	require.NoError(t, group.Close())
-	after := &syncBuffer{}
-	wait.killGroup(group, testLogger(after))
-	require.Empty(t, after.String(),
-		"the teardown signalled a process group after its id had been released; on a developer's machine that is whatever session holds the number now")
+	aimedAt, bystander, _ := sessionCommand(t, "sleep")
+	wait.killGroup(aimedAt, testLogger(&syncBuffer{}))
+	requireDiedOfSIGTERM(t, bystander,
+		"the teardown signalled a process group after its own id had been released; on a developer's machine that is whatever session holds the number now")
 }
 
 // And the teardown an operator's session actually goes through is what asks.
@@ -194,19 +180,34 @@ func TestReap_DoesNotSignalAGroupIDTheWaitHasReleased(t *testing.T) {
 		return false, "the wait has not finished with the session's command yet"
 	})
 
+	aimedAt, bystander, _ := sessionCommand(t, "sleep")
+
 	terminal, err := platform.OpenPTY()
 	require.NoError(t, err)
-	logs := &syncBuffer{}
-	svc := &Service{log: testLogger(logs)}
-	// Its own logger, and released on its own goroutine: what the terminal has
-	// to say about being closed is not what this assertion is reading.
+	svc := &Service{log: testLogger(&syncBuffer{})}
 	sess := &session{svc: svc, tty: newSessionTerminal(terminal, testLogger(&syncBuffer{}))}
 
-	// A closed group is how the decision is read back rather than the scenario
-	// it is read back from; see the test above.
-	require.NoError(t, group.Close())
-	require.True(t, svc.reap(sess, group, wait),
+	require.True(t, svc.reap(sess, aimedAt, wait),
 		"the wait had already reported, so the teardown must say the session was reaped")
-	require.Empty(t, logs.String(),
+	requireDiedOfSIGTERM(t, bystander,
 		"the teardown signalled the group itself rather than through the wait, which is the only thing that knows whether the id is still the session's")
+}
+
+// requireDiedOfSIGTERM kills a process the test expects to have been left
+// alone, and reads back which signal arrived.
+//
+// It is the only thing that settles it. A process that has been sent SIGKILL is
+// not distinguishable from a running one by asking whether its pid exists — the
+// answer is yes either way until somebody reaps the zombie — so this kills it
+// deliberately, with a different signal. A kill that went out first is already
+// pending and wins.
+func requireDiedOfSIGTERM(t *testing.T, cmd *pty.Cmd, whatItMeans string) {
+	t.Helper()
+
+	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	_ = cmd.Wait()
+	require.NotNil(t, cmd.ProcessState)
+	sig, signalled := terminatingSignal(cmd.ProcessState)
+	require.True(t, signalled)
+	require.Equal(t, "SIGTERM", sig, whatItMeans)
 }

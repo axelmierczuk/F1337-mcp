@@ -20,22 +20,32 @@ import (
 // PR #63 to establish, so it is asserted here rather than left to be
 // rediscovered by whoever ports the Unix guard across.
 //
-// A closed group is how the decision is read back: it is the one state in which
-// ProcessGroup.Signal reports something at all, so a log with the warning in it
-// means the call went out. The state that matters is the collection above it,
-// and the real wait is what put the group in it.
+// The group the kill is aimed at is deliberately not the collected session's:
+// that one has nothing left in it, so "the signal went out" would be
+// unobservable. This is a second, live session standing in for whatever the
+// teardown would reach — on Unix, for the stranger that now holds the released
+// id; here, for the tree the job object still holds. See the Unix file, which
+// is the same fixture with the opposite expectation.
 func TestKillGroup_StillSignalsAfterTheWaitHasCollectedTheLeader(t *testing.T) {
-	group, cmd, _ := sessionCommand(t, "exit", "0")
-	logs := &syncBuffer{}
-
-	wait := startLeaderWait(cmd, group, testLogger(logs))
+	_, collected, _ := sessionCommand(t, "exit", "0")
+	group, _, _ := sessionCommand(t, "exit", "0")
+	wait := startLeaderWait(collected, group, testLogger(&syncBuffer{}))
 	require.NoError(t, <-wait.waited)
 
-	require.NoError(t, group.Close())
-	after := &syncBuffer{}
-	wait.killGroup(group, testLogger(after))
-	require.Contains(t, after.String(), "could not kill the session's process group",
-		"the teardown declined to terminate the job because the leader had been collected; on Windows that is the only thing that reaches a grandchild which never attached to the console")
+	aimedAt, live, _ := sessionCommand(t, "sleep")
+	pid := live.Process.Pid
+
+	logs := &syncBuffer{}
+	wait.killGroup(aimedAt, testLogger(logs))
+	require.Empty(t, logs.String())
+
+	waitFor(t, "pid "+strconv.Itoa(pid)+" to be gone", func() (bool, string) {
+		if !processRunning(pid) {
+			return true, ""
+		}
+		return false, "pid " + strconv.Itoa(pid) + " survived the teardown's kill: it was declined because the wait had " +
+			"collected its own leader, and on Windows that is the only thing that reaches a grandchild which never attached to the console"
+	})
 }
 
 // A session that left nothing behind is torn down in silence.
