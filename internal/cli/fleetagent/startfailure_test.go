@@ -90,14 +90,28 @@ func accepting(addr string) bool {
 func TestServe_UnderAServiceManagerAFailureToStartIsReportedNotDiscarded(t *testing.T) {
 	configPath, stateDir := refusedConfig(t)
 
-	events, logged, _, restore := fleetagent.PinServiceManagerForTest()
+	events, logged, stop, restore := fleetagent.PinServiceManagerForTest()
 	defer restore()
+	// A manager whose daemon started waits to be told to stop, so a failure that
+	// is swallowed rather than returned parks this command there forever. Bounded
+	// below, and released here, so that regression is a legible failure rather
+	// than a package-wide timeout ten minutes later.
+	defer stop()
 
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
 	root := fleetagent.NewRootCommand(out)
 	root.SetArgs([]string{"serve", "--config", configPath})
 	root.SetErr(errOut)
-	err := root.Execute()
+
+	errs := make(chan error, 1)
+	go func() { errs <- root.Execute() }()
+	var err error
+	select {
+	case err = <-errs:
+	case <-time.After(30 * time.Second):
+		t.Fatal("`serve` did not return: a refusal inside the manager's Start has to come back out of its Run, " +
+			"which is what makes it a stopped service with an exit code instead of a start that never answers")
+	}
 	require.Error(t, err, "0.0.0.0 with no mTLS must not serve")
 
 	assert.Equal(t,
