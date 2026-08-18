@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -557,6 +558,316 @@ func TestSession_AChildIsReapedEvenWhenTheOpenCannotBeDelivered(t *testing.T) {
 		}
 		return false, "pid " + strconv.Itoa(pid) + " is still in the process table; the handler killed its child and never waited on it"
 	})
+}
+
+// TestSession_TheTerminalIsDrainedEvenWhenTheClientHasStoppedReading is the
+// fourth ConPTY lifetime hazard on this branch, and the one that does not
+// announce itself as a memory bug.
+//
+// Closing a pseudo-console asks the console host to flush what it is still
+// holding, and that flush needs a reader on the output pipe. The only reader is
+// [session.pumpOutput], and a pump that stopped the instant a send failed — one
+// dropped connection is all that takes — left [Service.reap] closing a terminal
+// nobody was draining. Close is the *first* statement of the teardown, so a
+// handler stuck there never reaches the group kill: the RPC never returns, its
+// process slot is never released, its record is never written, and the tree the
+// close was meant to end is still running.
+//
+// The assertion is platform-neutral and holds on every one of the three,
+// because the same undrained terminal stops the session's own program on Unix
+// too: a program whose writes block never exits, and the only way this session
+// can end with the status the flood helper chose is if something kept reading.
+func TestSession_TheTerminalIsDrainedEvenWhenTheClientHasStoppedReading(t *testing.T) {
+	requirePTY(t)
+
+	// Short, so that the failure is a session reaped for idleness within
+	// seconds rather than one that hangs until the suite's own timeout.
+	svc := newService(t, options{shell: agent.ShellConfig{IdleTimeout: agent.Duration(3 * time.Second)}})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	var rec sessionAudit
+	spec, err := svc.plan(openOptions("flood"), &rec)
+	require.NoError(t, err)
+
+	// A client that took the handshake and then stopped reading, which is what
+	// a dropped connection looks like from inside the handler.
+	stream := &refusingStream{
+		ctx:       ctx,
+		allowOpen: true,
+		sendFail:  errors.New("the caller stopped reading its session stream"),
+	}
+	// The RPC ends in error either way — there is nobody left to deliver the
+	// exit to — so it is the record that says how the session ended.
+	_ = svc.run(ctx, stream, spec, &rec)
+
+	require.NotNilf(t, rec.exitCode,
+		"the session never reported an exit status; it ended as %q (idle=%v), which means its program was still blocked writing to a terminal nobody was draining",
+		rec.outcome, rec.idle)
+	assert.Equal(t, int32(floodExit), *rec.exitCode,
+		"the session's program did not run to completion behind a client that had stopped reading")
+	assert.False(t, rec.idle, "the session was reaped for idleness rather than ending when its program did")
+	assert.Equal(t, policy.OutcomeOK, rec.outcome)
+}
+
+// TestSender_NothingFollowsTheSessionsExit pins the wire contract shell.proto
+// states and serialisation alone does not keep: a ShellExit is the last message
+// on the stream.
+//
+// The two senders take turns, which is what gRPC requires, and taking turns is
+// not ordering: the output pump is not joined before the exit is sent, and on
+// Windows it is still running by definition — a ConPTY's output pipe does not
+// end when the session's command does, so the wait before the exit is a bounded
+// drain rather than a join. Whatever the pump reads next would otherwise go out
+// behind the terminal message, to a client the contract entitles to have
+// stopped reading at it.
+//
+// Asserted against [sender] rather than through a session, and the reason is
+// the same as the reason the hazard is Windows-shaped: on Unix the terminal
+// stops producing when the session's command does, so the sequence cannot be
+// staged from a test that has to pass on all three. This is the only path to
+// Send in the package — [session.send] is one of these, built by
+// [Service.run] — so there is no second route for a message to take.
+func TestSender_NothingFollowsTheSessionsExit(t *testing.T) {
+	stream := &recordingStream{}
+	send := newSender(stream)
+
+	require.NoError(t, send.within(time.Second, data([]byte("before"))))
+	require.NoError(t, send.within(time.Second, exit(&sessionAudit{}, false)))
+
+	err := send.within(time.Second, data([]byte("after")))
+	require.ErrorIs(t, err, errAfterExit)
+
+	assert.Equal(t, []string{"data", "exit"}, stream.kinds(),
+		"a message reached the stream after the session had reported how it ended")
+}
+
+// recordingStream keeps the shape of everything sent on it, in order.
+//
+// Nothing receives on it: the sender is the send half and nothing else, and an
+// embedded nil ServerStream means anything this fake does not implement panics
+// with the method's name rather than standing in for more of gRPC than it is.
+type recordingStream struct {
+	grpc.ServerStream
+
+	mu   sync.Mutex
+	sent []string
+}
+
+func (s *recordingStream) Recv() (*sandboxdv1.ShellRequest, error) { return nil, io.EOF }
+
+func (s *recordingStream) Send(resp *sandboxdv1.ShellResponse) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case resp.GetOpened() != nil:
+		s.sent = append(s.sent, "opened")
+	case resp.GetExit() != nil:
+		s.sent = append(s.sent, "exit")
+	default:
+		s.sent = append(s.sent, "data")
+	}
+	return nil
+}
+
+func (s *recordingStream) kinds() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.sent...)
+}
+
+// TestSender_SerialisesTheHandlerAndTheOutputPump pins the property [sender]
+// exists for, and which nothing else in this package can observe.
+//
+// A session has two senders on one stream — the output pump continuously, and
+// the handler for the opened and exit messages — and gRPC is explicit that one
+// goroutine may send while another receives but that two may not send. The
+// client half of this session has the same shape and the same fix; this is the
+// agent's.
+//
+// The stream reports the overlap from inside Send rather than leaving it to be
+// counted afterwards: a tally read at the end cannot tell an interleaving that
+// happened from one that did not.
+func TestSender_SerialisesTheHandlerAndTheOutputPump(t *testing.T) {
+	stream := &overlappingStream{}
+	send := newSender(stream)
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				_ = send.within(30*time.Second, data([]byte("output")))
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Zero(t, stream.overlaps.Load(),
+		"two goroutines were inside Send on the same stream at once; gRPC does not permit that")
+}
+
+// TestSender_GivesUpOnAStreamNobodyIsReading is the liveness half, and it is
+// the reason the lock is a channel with a deadline rather than a mutex.
+//
+// A client that is still connected but has stopped reading parks the output
+// pump inside Send. A handler queued behind a plain mutex would then wait there
+// forever with a session that has already ended — no exit message, no audit
+// record, no released process slot, and an RPC that only ends when the process
+// does.
+func TestSender_GivesUpOnAStreamNobodyIsReading(t *testing.T) {
+	stream := &stallingStream{blocked: make(chan struct{})}
+	t.Cleanup(func() { close(stream.blocked) })
+	send := newSender(stream)
+
+	parked := make(chan struct{})
+	go func() {
+		close(parked)
+		_ = send.within(30*time.Second, data([]byte("output")))
+	}()
+	<-parked
+
+	waitFor(t, "the stalled send to be holding the stream", func() (bool, string) {
+		if stream.inFlight.Load() > 0 {
+			return true, ""
+		}
+		return false, "nothing is inside Send yet"
+	})
+
+	// In a goroutine with a bound of its own, so that the failure is a test
+	// saying what went wrong rather than a suite hitting its timeout — which is
+	// exactly the shape the bug has in production.
+	result := make(chan error, 1)
+	go func() { result <- send.within(250*time.Millisecond, exit(&sessionAudit{}, false)) }()
+
+	select {
+	case err := <-result:
+		require.Error(t, err, "a send behind a parked one reported success on a stream it never reached")
+		assert.Equal(t, codes.Aborted, status.Code(err),
+			"a caller has to be able to tell a stream nobody is reading from a session that failed")
+	case <-time.After(30 * time.Second):
+		t.Fatal("a send queued behind a parked one never gave up; the handler's exit message would wait there " +
+			"for as long as the client stayed connected and silent, holding the RPC and its process slot open")
+	}
+}
+
+// overlappingStream notices two senders at once. Send holds the stream for a
+// moment rather than returning immediately, which is what makes the overlap
+// observable: a real gRPC send marshals, takes the transport's write path and
+// can block on flow control, so an unserialised pair overlaps in production for
+// far longer than this.
+type overlappingStream struct {
+	grpc.ServerStream
+
+	inFlight atomic.Int32
+	overlaps atomic.Int32
+}
+
+func (s *overlappingStream) Recv() (*sandboxdv1.ShellRequest, error) { return nil, io.EOF }
+
+func (s *overlappingStream) Send(*sandboxdv1.ShellResponse) error {
+	if s.inFlight.Add(1) > 1 {
+		s.overlaps.Add(1)
+	}
+	time.Sleep(100 * time.Microsecond)
+	s.inFlight.Add(-1)
+	return nil
+}
+
+// stallingStream is a client that is still connected and has stopped reading:
+// its Send never returns until the test lets it.
+type stallingStream struct {
+	grpc.ServerStream
+
+	blocked  chan struct{}
+	inFlight atomic.Int32
+}
+
+func (s *stallingStream) Recv() (*sandboxdv1.ShellRequest, error) { return nil, io.EOF }
+
+func (s *stallingStream) Send(*sandboxdv1.ShellResponse) error {
+	s.inFlight.Add(1)
+	defer s.inFlight.Add(-1)
+	<-s.blocked
+	return nil
+}
+
+// ------------------------------------------------------------- the limit
+
+// TestSession_WaitsForASlotInTheAgentWideProcessLimit covers the cap this
+// service shares with every other way the agent starts a process.
+//
+// A session is one process by the agent's accounting and any number by the
+// host's, and the slot is held for the whole session rather than for the moment
+// it starts — a terminal that has been open for an hour is still a process this
+// agent started. Without it a fleet of operators could start more shells than
+// the agent's own limit allows and the cap would apply to everything except the
+// service most able to exhaust the machine.
+//
+// The assertion is that the second session never opens, which is the fact an
+// operator would notice: the first holds the only slot, and the second waits
+// for it until its caller gives up.
+func TestSession_WaitsForASlotInTheAgentWideProcessLimit(t *testing.T) {
+	requirePTY(t)
+
+	svc := newService(t, options{maxConcurrent: 1})
+	client := serve(t, svc)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	held, err := openSession(ctx, t, client, openOptions("sleep"))
+	require.NoError(t, err)
+	require.NotNil(t, held.opened, "the session holding the slot never started")
+
+	// The second caller waits rather than being refused: a slot may come free,
+	// and acquireTimeout is what bounds the wait. This one gives up first,
+	// which is the shape a person pressing Ctrl-C on a hung command produces.
+	waitingCtx, giveUp := context.WithCancel(ctx)
+	time.AfterFunc(time.Second, giveUp)
+	defer giveUp()
+
+	_, err = openSession(waitingCtx, t, client, openOptions("sleep"))
+	require.Error(t, err, "a second session started while the agent's only process slot was held")
+
+	// And the reason is recorded as what it was, rather than as a session that
+	// ran and was cancelled.
+	var waited *policy.Record
+	waitFor(t, "the refused session to reach the audit log", func() (bool, string) {
+		for _, rec := range records(t, svc) {
+			if strings.Contains(rec.Error, "free process slot") {
+				waited = &rec
+				return true, ""
+			}
+		}
+		return false, "no record of a session that waited for a slot yet"
+	})
+	assert.Equal(t, policy.OutcomeCancelled, waited.Outcome)
+}
+
+// -------------------------------------------------------------- the size
+
+// TestSizeOf_FillsInTheDefaultAndClampsTheExaggerated covers both halves of a
+// window size a client got wrong, neither of which is an error.
+//
+// The default matters because a terminal told it has no rows draws nothing at
+// all, so a client that cannot read its own size is better served by 80x24 it
+// can resize than by a refusal. The clamp matters because the ioctl underneath
+// takes unsigned 16-bit fields: an unclamped 70000 columns is not a wide
+// terminal, it is a four-column one, arrived at silently inside a conversion.
+func TestSizeOf_FillsInTheDefaultAndClampsTheExaggerated(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, windowSize{columns: defaultColumns, rows: defaultRows}, sizeOf(nil),
+		"a client that sent no size has to get a usable terminal rather than a zero-sized one")
+	assert.Equal(t, windowSize{columns: defaultColumns, rows: 50},
+		sizeOf(&sandboxdv1.ShellSize{Rows: 50}), "each dimension defaults on its own")
+	assert.Equal(t, windowSize{columns: 120, rows: 40},
+		sizeOf(&sandboxdv1.ShellSize{Columns: 120, Rows: 40}))
+
+	huge := sizeOf(&sandboxdv1.ShellSize{Columns: 70000, Rows: 1 << 20})
+	assert.Equal(t, windowSize{columns: maxDimension, rows: maxDimension}, huge,
+		"an exaggerated size was passed through to an ioctl that takes 16 bits, where it wraps into a small one")
 }
 
 // ---------------------------------------------------------------- leaks

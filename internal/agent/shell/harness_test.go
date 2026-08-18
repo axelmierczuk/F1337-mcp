@@ -33,13 +33,16 @@ import (
 
 // options are the per-test decisions about the service under test.
 type options struct {
-	shell   agent.ShellConfig
-	exec    agent.ExecConfig
-	deny    []string
-	allow   []string
-	audit   func(*policy.AuditConfig)
-	logs    *syncBuffer
-	loginTo []string
+	shell agent.ShellConfig
+	exec  agent.ExecConfig
+	deny  []string
+	allow []string
+	audit func(*policy.AuditConfig)
+	logs  *syncBuffer
+	// maxConcurrent is the agent-wide process limit, zero meaning enough that
+	// no test hits it by accident.
+	maxConcurrent int
+	loginTo       []string
 }
 
 // enabled is the address of a bool, for the config fields whose default is
@@ -80,10 +83,14 @@ func newService(t *testing.T, opts options) *Service {
 	// an open handle does not delete.
 	t.Cleanup(func() { _ = auditLog.Close() })
 
+	concurrent := opts.maxConcurrent
+	if concurrent <= 0 {
+		concurrent = 8
+	}
 	pol, err := policy.New(policy.Config{
 		Allow: opts.allow,
 		Deny:  opts.deny,
-		Caps:  policy.Caps{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, MaxConcurrent: 8},
+		Caps:  policy.Caps{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, MaxConcurrent: concurrent},
 	})
 	require.NoError(t, err)
 
@@ -366,6 +373,12 @@ type refusingStream struct {
 
 	ctx      context.Context
 	sendFail error
+	// allowOpen lets the ShellOpened through and refuses everything after it,
+	// which is the other client that cannot be built out of a real one: one
+	// that took the session's handshake and then stopped reading. The handler
+	// carries on with a session it can no longer talk to, which is exactly the
+	// state the output pump has to leave the terminal drained in.
+	allowOpen bool
 
 	mu   sync.Mutex
 	sent []*sandboxdv1.ShellResponse
@@ -382,6 +395,9 @@ func (s *refusingStream) Send(resp *sandboxdv1.ShellResponse) error {
 	s.mu.Lock()
 	s.sent = append(s.sent, resp)
 	s.mu.Unlock()
+	if s.allowOpen && resp.GetOpened() != nil {
+		return nil
+	}
 	return s.sendFail
 }
 

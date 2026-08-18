@@ -76,6 +76,13 @@ func helperMain(mode string, args []string) int {
 		// both sleep until something kills them.
 		return helperTree(args)
 
+	case "flood":
+		// Prints far more than a terminal will hold and then exits with a
+		// distinctive status. What it is for is the case where nobody is
+		// draining: the writes block, so a session whose output pump stopped
+		// reading never sees this program exit at all.
+		return helperFlood()
+
 	case "sleep":
 		return blockUntilKilled()
 
@@ -176,6 +183,34 @@ func helperWinsize() int {
 		fmt.Printf("size %dx%d\n", columns, rows)
 	})
 	return 0
+}
+
+// floodExit is the status the flood helper exits with, chosen so that a test
+// asserting on it cannot be satisfied by a session that ended some other way.
+const floodExit = 5
+
+// floodBytes is how much the flood helper prints.
+//
+// Comfortably more than any of the three platforms will buffer between a
+// program and a reader that has stopped: a Unix pty holds single-digit
+// kilobytes, and a ConPTY's output pipe holds sixty-four. A megabyte is not a
+// stress test, it is the smallest amount that makes "nobody is reading" show up
+// as this program never finishing.
+const floodBytes = 1 << 20
+
+// helperFlood prints floodBytes and exits.
+//
+// In blocks rather than one write, because a terminal is not a pipe: the write
+// is what blocks when the far side stops draining, and a test wants that to
+// happen partway through rather than all at once.
+func helperFlood() int {
+	block := strings.Repeat("x", 4096)
+	for written := 0; written < floodBytes; written += len(block) {
+		if _, err := os.Stdout.WriteString(block); err != nil {
+			return 1
+		}
+	}
+	return floodExit
 }
 
 // helperTree spawns one child and prints both pids, then waits to be killed.

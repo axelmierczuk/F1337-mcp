@@ -448,6 +448,13 @@ func (s *Service) await(ctx context.Context, sess *session, waited <-chan error)
 // A job the operator deliberately detached — `nohup`, `disown`, `setsid` —
 // survives, exactly as it does over ssh. That is a property of what they asked
 // for rather than a gap in this teardown.
+//
+// What makes the close safe as the *first* step is that something is still
+// draining the terminal while it runs: on Windows it does not return until the
+// console host's remaining output has somewhere to go, and on macOS a process
+// with output queued is held inside exit for the same reason. The only reader
+// is [session.pumpOutput], which is why a failed send there stops the sending
+// and not the reading. Read its comment before changing either.
 func (s *Service) reap(sess *session, group *platform.ProcessGroup, waited <-chan error) bool {
 	if err := sess.tty.Close(); err != nil {
 		s.log.Debug("closing the session terminal reported an error; the session is being killed anyway", "error", err)
@@ -527,14 +534,46 @@ func (s *session) pumpInput(stream grpc.BidiStreamingServer[sandboxdv1.ShellRequ
 // One stream, not two: a pseudo-terminal has already merged stdout and stderr,
 // and there is nothing left to label. See pumpInput for what this function is
 // deliberately not given.
+//
+// # A send that fails stops the sending and not the reading
+//
+// That difference is what keeps a Windows teardown from wedging, and it is the
+// fourth thing on this branch to come out of go-pty's ConPTY wrapper not
+// defending its own lifetime.
+//
+// Closing a pseudo-console is not a handle release: ClosePseudoConsole asks the
+// console host to flush what it still holds, and it does not return until that
+// flush has somewhere to go. The only reader of that pipe is this loop. So a
+// pump that returned the moment a send failed — which is what a caller hanging
+// up mid-output produces, since the very next Send fails — left the teardown in
+// [Service.reap] calling Close on a pseudo-console nobody was draining, with
+// the session's own output still queued behind it. That call is the *first*
+// statement of the teardown, so a handler parked in it never reaches the group
+// kill either: the RPC never returns, its process-limit slot is never released,
+// its audit record is never written, and the process tree the close was
+// supposed to end is still running. One session per occurrence, for the life of
+// the daemon.
+//
+// So the loop keeps reading until the terminal itself ends the read, which is
+// the close, and the close can now complete. Nothing more is sent: the session
+// is over for the caller either way, and [sender] refuses anything after the
+// exit in any case.
+//
+// It cannot spin: once sending has stopped nothing calls touch, so a session
+// whose client is merely wedged rather than gone goes idle and is reaped on
+// shell.idle_timeout, and every other ending closes the terminal directly.
 func (s *session) pumpOutput() {
 	buf := make([]byte, readBuffer)
+	sending := true
 	for {
 		n, readErr := s.tty.Read(buf)
-		if n > 0 {
+		if n > 0 && sending {
 			s.touch()
 			if err := s.send.within(sendStall, data(buf[:n])); err != nil {
-				return
+				// Nobody to send to any more — the stream is gone, or the exit
+				// has already been reported. Stop sending; keep reading. See
+				// the doc comment.
+				sending = false
 			}
 		}
 		if readErr != nil {
@@ -554,10 +593,29 @@ func (s *session) pumpOutput() {
 // ended. So the lock is a channel, taken with a deadline, and a send that
 // cannot get in gives up rather than wedging the RPC. Ending the RPC is what
 // tears the stream down and releases whoever is parked.
+//
+// It is also where "a ShellExit is always the last message on the stream" — the
+// wire contract, stated in shell.proto — is actually enforced. Serialising the
+// two senders is not enough on its own: the output pump is not joined before
+// the exit is sent, and on Windows it is still running by definition, because a
+// ConPTY's output pipe does not end when the session's command does and the
+// drain before the exit is therefore a bounded wait rather than a join. A
+// terminal message with a data message behind it is a stream a conforming
+// client is entitled to have stopped reading at.
 type sender struct {
 	stream grpc.BidiStreamingServer[sandboxdv1.ShellRequest, sandboxdv1.ShellResponse]
 	lock   chan struct{}
+
+	// finished records that the terminal message has gone out. Read and
+	// written only while holding the token, which is what makes it safe
+	// without a second lock.
+	finished bool
 }
+
+// errAfterExit is what a send gets once the session has reported how it ended.
+// It is not a failure: the message simply has nowhere to go, because the stream
+// is finished as far as the contract is concerned.
+var errAfterExit = errors.New("shell: the session has already reported its exit")
 
 func newSender(stream grpc.BidiStreamingServer[sandboxdv1.ShellRequest, sandboxdv1.ShellResponse]) *sender {
 	s := &sender{stream: stream, lock: make(chan struct{}, 1)}
@@ -566,6 +624,9 @@ func newSender(stream grpc.BidiStreamingServer[sandboxdv1.ShellRequest, sandboxd
 }
 
 // within sends msg, waiting no longer than timeout for the stream to be free.
+//
+// A message that arrives after the session's ShellExit is refused rather than
+// sent. See [sender].
 func (s *sender) within(timeout time.Duration, msg *sandboxdv1.ShellResponse) error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -576,6 +637,16 @@ func (s *sender) within(timeout time.Duration, msg *sandboxdv1.ShellResponse) er
 	case <-timer.C:
 		return status.Error(codes.Aborted,
 			"the caller stopped reading its session stream, so the session was ended and its result could not be delivered")
+	}
+
+	if s.finished {
+		return errAfterExit
+	}
+	// Set whether or not the send succeeds: a terminal message that could not
+	// be delivered still ends the stream, and following it with output would
+	// be the same contract break with a worse excuse.
+	if msg.GetExit() != nil {
+		s.finished = true
 	}
 	return s.stream.Send(msg)
 }

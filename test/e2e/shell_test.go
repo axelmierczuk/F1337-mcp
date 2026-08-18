@@ -84,6 +84,12 @@ func (f *fleet) openShell(t *testing.T, size [2]int, args ...string) *shellClien
 
 	t.Cleanup(func() {
 		c.kill()
+		// Unconditionally, and not inside kill: a scenario whose client exited
+		// on its own has nothing to kill and still allocated a terminal, and a
+		// pseudo-terminal per scenario that nothing releases is a leak in the
+		// harness rather than in the product. Closing twice is safe here — this
+		// is the test's own pty, and go-pty guards the second Unix close.
+		_ = c.tty.Close()
 		if t.Failed() {
 			t.Logf("fleetctl shell terminal:\n%s", c.printed())
 		}
@@ -156,7 +162,8 @@ func (c *shellClient) running() bool {
 }
 
 // kill ends the client the way closing a terminal window does, without letting
-// it shut the session down cleanly.
+// it shut the session down cleanly. The terminal is released by the caller's
+// cleanup, which runs whether or not there was anything left to kill.
 func (c *shellClient) kill() {
 	if !c.running() {
 		return
@@ -168,7 +175,6 @@ func (c *shellClient) kill() {
 	case <-c.done:
 	case <-time.After(30 * time.Second):
 	}
-	_ = c.tty.Close()
 }
 
 // TestShellRunsOnTheSelectedSandboxAndReturnsItsExitCode is the whole feature in
