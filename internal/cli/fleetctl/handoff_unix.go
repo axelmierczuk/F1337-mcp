@@ -18,12 +18,13 @@ import (
 // it kills by pid, which with a wrapper in the way would kill the wrapper and
 // read the terminal state of a view still running.
 func execHelper(path string, args []string) error {
-	argv := append([]string{path}, args...)
 	// The path is not operator input: findHelper resolves it to a file named
 	// fleet-tui in this binary's own directory, or on PATH, and there is
 	// deliberately no environment variable that can redirect it. args is this
-	// process's own command line, passed as argv rather than through a shell.
-	if err := syscall.Exec(path, argv, os.Environ()); err != nil { //nolint:gosec // see above
+	// process's own command line, passed as argv rather than through a shell —
+	// behind the resolved path, which is what lets the far side recognise
+	// itself on a host that cannot. See [helperArgv].
+	if err := syscall.Exec(path, helperArgv(path, args), os.Environ()); err != nil { //nolint:gosec // see above
 		return fmt.Errorf("run %s: %w", path, err)
 	}
 	// Unreachable: a successful Exec does not return.

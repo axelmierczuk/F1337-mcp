@@ -370,24 +370,47 @@ func TestAHostThatCannotSayWhatIsRunningStillRefusesToExecItself(t *testing.T) {
 	require.Contains(t, err.Error(), "this same binary")
 }
 
-// TestWhatIsRunningFallsBackToArgvZeroOnlyWhenItIsAbsolute.
+// TestWhatIsRunningFallsBackToArgvZeroOnlyWhenItNamesAPath.
 //
-// A bare `fleetctl` off PATH, or a relative path from a working directory this
-// process may since have left, names a file that need not be the one running —
-// and an identity that is wrong is worse than none, because it is compared
-// against candidates and could reject the real helper. Not knowing is an
-// answer, and [findHelperVia] still consults PATH after it.
-func TestWhatIsRunningFallsBackToArgvZeroOnlyWhenItIsAbsolute(t *testing.T) {
-	t.Parallel()
-
+// A bare `fleetctl` is not a path. It is a name somebody else looked up on
+// PATH, and resolving it against this process's working directory would make
+// whatever the operator happens to be standing next to this binary's identity —
+// an identity that is wrong is worse than none, because it is compared against
+// candidates and could reject the real helper. Not knowing is an answer, and
+// [findHelperVia] still consults PATH after it.
+//
+// A separator is the difference, which is execve's own rule rather than one
+// invented here: `./fleetctl` was resolved as a path, against the directory
+// this process is still standing in, because the hand-off happens before
+// anything else `tui` does. Refusing that one too is not caution — it switches
+// off the "beside fleetctl" half of the lookup as well as the guard, so the
+// case below would be told its helper is not next to fleetctl while it is.
+func TestWhatIsRunningFallsBackToArgvZeroOnlyWhenItNamesAPath(t *testing.T) {
+	// Not parallel: the relative cases are resolved against a working
+	// directory, so this test sets one.
 	cannotSay := func() (string, error) { return "", errors.New("no /proc on this host") }
-	absolute := filepath.Join(t.TempDir(), exeName("fleetctl"))
+	dir := t.TempDir()
+	absolute := filepath.Join(dir, exeName("fleetctl"))
+	// A real file, so that the two spellings of it below can be compared with
+	// the symlinks on them resolved: macOS puts the temporary directory itself
+	// behind one (/var -> /private/var), and os.Getwd answers with the resolved
+	// spelling while t.TempDir answers with the other.
+	require.NoError(t, os.WriteFile(absolute, []byte("#!/bin/sh\n"), 0o755)) //nolint:gosec // as above
 
 	got, err := binaryFrom(cannotSay, []string{absolute})
 	require.NoError(t, err)
 	require.Equal(t, absolute, got)
 
-	for _, argv := range [][]string{{"fleetctl"}, {filepath.Join(".", "fleetctl")}, {}, nil} {
+	// A relative path is a path, and this is the directory it is relative to.
+	t.Chdir(dir)
+	for _, argv0 := range []string{"." + string(filepath.Separator) + exeName("fleetctl"), filepath.Join("..", filepath.Base(dir), exeName("fleetctl"))} {
+		got, err := binaryFrom(cannotSay, []string{argv0})
+		require.NoErrorf(t, err, "argv[0] %q names a path and was answered with \"I do not know\"", argv0)
+		require.Equalf(t, evaluated(t, absolute), evaluated(t, got),
+			"argv[0] %q was not resolved against the directory execve resolved it against", argv0)
+	}
+
+	for _, argv := range [][]string{{"fleetctl"}, {""}, {}, nil} {
 		_, err := binaryFrom(cannotSay, argv)
 		require.Errorf(t, err, "argv %q was taken for this binary's own path", argv)
 	}
@@ -397,6 +420,125 @@ func TestWhatIsRunningFallsBackToArgvZeroOnlyWhenItIsAbsolute(t *testing.T) {
 	got, err = binaryFrom(func() (string, error) { return "/from/executable", nil }, []string{absolute})
 	require.NoError(t, err)
 	require.Equal(t, "/from/executable", got)
+}
+
+// TestTheHelperBesideFleetctlIsFoundOnAHostThatCannotSayWhatIsRunning.
+//
+// The other half of what not knowing costs, and the half nothing measured. The
+// guard is the loud one, but [findHelperVia] needs a directory before it can
+// look in one at all: with no answer, the whole "beside fleetctl" branch is
+// skipped and an install whose two binaries sit side by side in a directory
+// that is not on PATH — an unpacked archive, run as `./fleetctl tui` — is told
+// its helper "is not next to fleetctl or on PATH", about a file in the same
+// directory the operator is standing in.
+func TestTheHelperBesideFleetctlIsFoundOnAHostThatCannotSayWhatIsRunning(t *testing.T) {
+	// Not parallel: it runs from the install directory, as the operator does.
+	dir := t.TempDir()
+	want := writeHelper(t, dir)
+	t.Chdir(dir)
+
+	cannotSay := func() (string, error) { return "", errors.New("no /proc on this host") }
+	got, err := findHelperVia(
+		func() (string, error) {
+			return binaryFrom(cannotSay, []string{"." + string(filepath.Separator) + exeName("fleetctl")})
+		},
+		noPath)
+	require.NoError(t, err,
+		"a helper sitting beside fleetctl was not found on a host where os.Executable has no answer")
+	require.Equal(t, evaluated(t, want), evaluated(t, got))
+}
+
+// TestTheHandOffHandsTheFarSideAnIdentityItCanUse is the join between the two
+// halves of the guard that has no answer on a host without /proc.
+//
+// [binaryFrom] falls back to argv[0], and [helperArgv] decides what argv[0] is.
+// Each half has a test; the join between them had none, and it is invisible
+// from every host this suite runs on — os.Executable answers there, before
+// argv[0] is ever consulted, so handing the helper its own bare name instead of
+// the resolved path left this repository green, unit *and* end-to-end, while
+// switching the guard back off on every host that has no /proc. What that looks
+// like there is not a wrong value: it is `fleetctl tui` exec'ing itself for
+// ever, which is the failure this command was split out to stop.
+func TestTheHandOffHandsTheFarSideAnIdentityItCanUse(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	helper := writeHelper(t, dir) // this binary, installed under the helper's name
+
+	cannotSay := func() (string, error) { return "", errors.New("no /proc on this host") }
+	// Exactly what the process on the far side of one hand-off is: a host that
+	// cannot say what is running, and the argv this one handed over.
+	farSide := func() (string, error) { return binaryFrom(cannotSay, helperArgv(helper, []string{"tui"})) }
+
+	self, err := farSide()
+	require.NoError(t, err,
+		"the helper is handed an argv[0] it cannot name itself from, so on a host without /proc the guard is off")
+	require.Equal(t, helper, self, "argv[0] does not name the file the hand-off chose")
+
+	// And with that identity, the second attempt refuses rather than making a
+	// third.
+	_, err = findHelperVia(farSide, func(string) (string, error) { return helper, nil })
+	require.ErrorIs(t, err, errNoHelper,
+		"the far side of a hand-off exec'd itself again, which is the loop with nothing to stop it")
+	require.Contains(t, err.Error(), "this same binary")
+}
+
+// TestTheRefusalNamesTheHelperTheOperatorCanSee pins the last order this lookup
+// decides and the only one nothing covered: which of several wrong files the
+// refusal names.
+//
+// Every other test of the guard arranges exactly one candidate to be this
+// binary, so all of them stay green whichever one is kept — and the two ways of
+// getting it wrong are not symmetric. The sentence exists to name a file to
+// delete, and naming the wrong one sends an operator into a directory they
+// never installed anything into.
+func TestTheRefusalNamesTheHelperTheOperatorCanSee(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the directory the invocation named, not the one it resolves to", func(t *testing.T) {
+		t.Parallel()
+
+		unpacked := t.TempDir()
+		target := filepath.Join(unpacked, exeName("fleetctl"))
+		require.NoError(t, os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755)) //nolint:gosec // as above
+		if err := os.Symlink(target, filepath.Join(unpacked, exeName(helperName))); err != nil {
+			t.Skipf("this host does not allow symlinks: %v", err)
+		}
+
+		bin := t.TempDir()
+		link := filepath.Join(bin, exeName("fleetctl"))
+		require.NoError(t, os.Symlink(target, link))
+		seen := filepath.Join(bin, exeName(helperName))
+		require.NoError(t, os.Symlink(target, seen))
+
+		_, err := findHelperVia(func() (string, error) { return link, nil }, noPath)
+		require.ErrorIs(t, err, errNoHelper)
+		require.Contains(t, err.Error(), seen,
+			"the refusal named the helper beside the resolved target; the operator installed, and can see, the one beside the fleetctl they ran")
+		require.NotContains(t, err.Error(), filepath.Join(evaluated(t, unpacked), exeName(helperName)))
+	})
+
+	t.Run("the one beside fleetctl, not the one further out on PATH", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		self := filepath.Join(dir, exeName("fleetctl"))
+		require.NoError(t, os.WriteFile(self, []byte("#!/bin/sh\n"), 0o755)) //nolint:gosec // as above
+		beside := filepath.Join(dir, exeName(helperName))
+		if err := os.Symlink(self, beside); err != nil {
+			t.Skipf("this host does not allow symlinks: %v", err)
+		}
+		onPath := filepath.Join(t.TempDir(), exeName(helperName))
+		require.NoError(t, os.Symlink(self, onPath))
+
+		_, err := findHelperVia(
+			func() (string, error) { return self, nil },
+			func(string) (string, error) { return onPath, nil })
+		require.ErrorIs(t, err, errNoHelper)
+		require.Contains(t, err.Error(), beside,
+			"the refusal named the fleet-tui on PATH; the one beside fleetctl is the install the operator is likelier to have made")
+		require.NotContains(t, err.Error(), onPath)
+	})
 }
 
 // TestAHelperFoundThroughARelativePathEntryIsNotRun.

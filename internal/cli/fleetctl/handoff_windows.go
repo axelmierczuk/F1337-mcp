@@ -24,6 +24,11 @@ import (
 // has.
 func execHelper(path string, args []string) error {
 	cmd := exec.Command(path, args...) //nolint:gosec // path is fleetctl's own helper, located by findHelper
+	// The same argv the exec on every other platform hands over, spelled out
+	// rather than left to exec.Command's default so that there is one answer to
+	// "what does the helper see as argv[0]" and one place it is stated. See
+	// [helperArgv].
+	cmd.Args = helperArgv(path, args)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 
 	signal.Ignore(os.Interrupt)

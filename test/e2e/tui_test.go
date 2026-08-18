@@ -481,7 +481,7 @@ func TestTheHandOffKeepsTheCommandLineAndTheProcess(t *testing.T) {
 	record := t.TempDir()
 	install := t.TempDir()
 	installFleetctl(t, install)
-	installStubHelper(t, install)
+	helper := installStubHelper(t, install)
 
 	// $0 then the operator's flags, which is what makes them "$@" inside the
 	// script rather than a string it has to split.
@@ -524,6 +524,20 @@ func TestTheHandOffKeepsTheCommandLineAndTheProcess(t *testing.T) {
 			"the command line is forwarded unchanged so that there is one implementation of every flag "+
 			"— including the credential paths — rather than a second one on the far side (#44)",
 			got, want)
+	}
+
+	// And argv[0] is the file the lookup resolved, not the helper's bare name.
+	// This is the identity the far side of a hand-off has on a host where
+	// os.Executable cannot answer — a chroot, a container image without /proc —
+	// and it is the only thing that stops a fleetctl installed under the
+	// helper's name from exec'ing itself for ever there. Invisible from any host
+	// with a /proc, which is every host this suite runs on: os.Executable
+	// answers there before argv[0] is ever consulted, so handing over the bare
+	// name left the whole repository green.
+	if got := recorded(t, record, "argv0"); got != helper {
+		t.Errorf("the helper was handed argv[0] %q; the hand-off resolved it to %q.\n"+
+			"On a host that cannot say what binary is running, argv[0] is the only thing the far side "+
+			"can name itself from — and a helper that cannot name itself execs itself again", got, helper)
 	}
 
 	// One process, and it is the one the operator's shell will signal.
@@ -591,34 +605,35 @@ func copyFleetctlAs(t *testing.T, dir, name string) string {
 	return path
 }
 
-// installStubHelper writes a fleet-tui that reports what it was handed.
+// installStubHelper puts a fleet-tui into dir that reports what it was handed.
 //
-// It records its own pid and argv and exits with a known status, which is the
-// whole of what this scenario needs to know about the far side.
+// It is a copy of the suite's own helpers binary, whose `tui` mode records the
+// far side's argv, argument count, pid and argv[0] and exits with a known
+// status. `tui` is the subcommand `fleetctl tui` forwards, so nothing has to be
+// arranged for it to be the mode that runs.
 //
-// One bracketed argument per line, never "$*": the shell joins that with a
-// space, so an argv taken apart and put back together as a single argument —
-// or one that lost an empty value — reads back exactly like the list that was
-// forwarded. See [bracketed].
-//
-// And "$#" beside it, because the bracketing is not quite injective on its own:
-// one argument holding "]\n[" renders exactly as two arguments holding "]" and
-// "[". Nothing a re-serialiser does produces that by accident, but the argv
-// this scenario types now contains those very characters — deliberately, since
-// a recording that cannot be misread is worth more than one that is only never
-// asked to be — and the count settles it in one number.
-func installStubHelper(t *testing.T, dir string) {
+// A compiled program rather than the `#!/bin/sh` script this was, and that is
+// the whole reason it changed: a script cannot observe argv[0]. The kernel
+// drops the caller's argv[0] when it runs one and substitutes the script's own
+// path, so a scenario written with a script could not see what the hand-off put
+// there — which is the identity the far side falls back on when the host cannot
+// say what is running, and the only thing standing between a mis-installed
+// fleetctl and an exec loop on such a host.
+func installStubHelper(t *testing.T, dir string) string {
 	t.Helper()
 
-	script := "#!/bin/sh\n" +
-		`printf '%s' "$$" > "$FLEET_HANDOFF_DIR/helper-pid"` + "\n" +
-		`printf '%s' "$#" > "$FLEET_HANDOFF_DIR/argc"` + "\n" +
-		`: > "$FLEET_HANDOFF_DIR/argv"` + "\n" +
-		`for a in "$@"; do printf '[%s]\n' "$a" >> "$FLEET_HANDOFF_DIR/argv"; done` + "\n" +
-		"exit " + stubHelperStatus + "\n"
-	if err := os.WriteFile(filepath.Join(dir, exeName("fleet-tui")), []byte(script), 0o755); err != nil { //nolint:gosec // a stub standing in for an installed binary
+	path := filepath.Join(dir, exeName("fleet-tui"))
+	if err := os.Link(bins.helpers, path); err == nil {
+		return path
+	}
+	source, err := os.ReadFile(bins.helpers)
+	if err != nil {
+		t.Fatalf("read the helpers binary: %v", err)
+	}
+	if err := os.WriteFile(path, source, 0o755); err != nil { //nolint:gosec // a stand-in for an installed binary
 		t.Fatalf("install the stub helper into %s: %v", dir, err)
 	}
+	return path
 }
 
 // bracketed renders an argv the way the stub helper records one: one argument
