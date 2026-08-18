@@ -315,10 +315,11 @@ func TestEnrollMint_RefusesAnEndpointTheInstallerWouldReadAsAFlag(t *testing.T) 
 // --name and --address are the two inputs that reach the certificate rather
 // than the installer, and nothing checked either. Both become subject
 // alternative names, and the CA refuses names it will not sign — in Enroll,
-// which redeems the token before it signs anything, so the operator pays a
-// single-use secret and reads the refusal on a host they have walked away from.
-// Verified against the enrollment service: a token reserving "build box" comes
-// back marked used with an InvalidArgument beside it.
+// which now refuses them with the token still spendable (#58), so the cost has
+// come down from a spent secret to a re-mint. It has not come down to nothing:
+// the operator is in front of the command at mint time and nowhere near the
+// host at redemption, so a token minted for a name the CA will not sign is
+// still a trip to a machine to find that out.
 //
 // A port is the milder version and fails more quietly still: one
 // net.SplitHostPort accepts and strconv does not sends the generated --listen

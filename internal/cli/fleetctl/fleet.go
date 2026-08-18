@@ -58,13 +58,20 @@ func (f *controlFlags) register(cmd *cobra.Command) {
 		"how long to wait for each sandbox before reporting it unreachable")
 }
 
-// oneShotHealthInterval is what a command that probes once and prints asks the
-// pool's background health loop for: longer than the process lives.
+// oneShotHealthInterval is what a command that does not read the health cache
+// asks the pool's background health loop for: as close to never as a duration
+// can say.
 //
 // The pool starts a health loop per channel and Close waits for it, so a
-// default-length background probe against a black-holed host would keep the
-// process alive well past the listing it was printing. `fleetctl tui` is the
-// opposite case and passes what --refresh chose; see newTUICommand.
+// default-length background probe against a black-holed host would keep a
+// listing alive well past the line it was printing — for `list` and `info`,
+// longer than the process lives is the whole requirement. `fleetctl socks`
+// runs for hours rather than seconds and wants the same value for the other
+// reason: it reaches a sandbox through pool.Forward and never asks what the
+// cache thinks, so every probe that loop makes is traffic nobody reads.
+//
+// `fleetctl tui` is the one command on the other side of this — the cache is
+// its health source — and it passes what --refresh chose; see newTUICommand.
 const oneShotHealthInterval = time.Hour
 
 // pool builds the gRPC client pool this workstation dials agents with.

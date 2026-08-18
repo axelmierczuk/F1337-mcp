@@ -19,51 +19,21 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
 
-// The half-close contract, asserted on the pump rather than through a live
-// forward.
-//
-// TestForward_ClientCanStillSendAfterTheRemoteHalfCloses in the mcpserver suite
-// asserts the same property end to end, but it cannot fail reliably: the bug it
-// is named for is a race between this pump ending and the other one's last
-// Send being consumed, so on an unloaded machine the wrong implementation wins
-// the race and the test passes. These drive streamToLocal directly, through the
-// narrowed forwardReceiver the file already defines, so the invariant is pinned
-// by something that fails every time.
+// The pump these tests drive lives in internal/tunnel, shared with the SOCKS
+// proxy, and its own half-close contract is pinned there. What is left here is
+// what belongs to fleet_forward: the accept loop, the listing, and the
+// connection lifetimes carry has to end.
 
-// scriptedForward replays a fixed sequence of responses and then blocks until
-// released, standing in for an agent handler that has not returned yet.
-type scriptedForward struct {
-	events   []*sandboxdv1.ForwardResponse
-	next     int
-	released chan struct{}
-}
-
-func (s *scriptedForward) Recv() (*sandboxdv1.ForwardResponse, error) {
-	if s.next < len(s.events) {
-		event := s.events[s.next]
-		s.next++
-		return event, nil
-	}
-	if s.released != nil {
-		<-s.released
-	}
-	return nil, io.EOF
-}
-
-func forwardData(b string) *sandboxdv1.ForwardResponse {
-	return &sandboxdv1.ForwardResponse{Event: &sandboxdv1.ForwardResponse_Data{Data: []byte(b)}}
-}
-
-func forwardCloseEvent() *sandboxdv1.ForwardResponse {
-	return &sandboxdv1.ForwardResponse{
-		Event: &sandboxdv1.ForwardResponse_Close{Close: &sandboxdv1.ForwardClose{Reason: "the sandbox-side connection closed"}},
-	}
-}
-
-// tcpPair returns two ends of a real loopback connection. A net.Pipe would not
-// do: closeLocalWrite half-closes a *net.TCPConn and closes anything else
+// tcpPair returns the server end of a real loopback connection. A net.Pipe
+// would not do: the pump half-closes a *net.TCPConn and closes anything else
 // outright, and the difference is the whole subject here.
-func tcpPair(t *testing.T) (client, server net.Conn) {
+//
+// The client end is not returned because no test here speaks on it — the point
+// of every one of them is a client that says nothing. It is held open by the
+// cleanup that closes it, which is what makes "the peer is still there and
+// still silent" the state under test rather than a socket the runtime happened
+// not to have collected.
+func tcpPair(t *testing.T) net.Conn {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -79,80 +49,14 @@ func tcpPair(t *testing.T) (client, server net.Conn) {
 		done <- accepted{conn: conn, err: err}
 	}()
 
-	client, err = net.DialTimeout("tcp", lis.Addr().String(), 5*time.Second)
+	client, err := net.DialTimeout("tcp", lis.Addr().String(), 5*time.Second)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 
 	got := <-done
 	require.NoError(t, got.err)
 	t.Cleanup(func() { _ = got.conn.Close() })
-	return client, got.conn
-}
-
-// A ForwardClose is a half-close, and the pump that receives it must keep
-// receiving.
-//
-// Ending here ends carry, which cancels the gRPC stream — and CloseSend does
-// not wait for the agent to have consumed what the other pump already sent, so
-// the client's last bytes are dropped and the request is silently truncated.
-func TestStreamToLocal_KeepsReceivingAfterARemoteHalfClose(t *testing.T) {
-	client, server := tcpPair(t)
-
-	released := make(chan struct{})
-	stream := &scriptedForward{
-		events:   []*sandboxdv1.ForwardResponse{forwardData("greeting"), forwardCloseEvent()},
-		released: released,
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- streamToLocal(stream, server) }()
-
-	// Reading to EOF proves both that the data arrived and that the close was
-	// processed: the write half of the local socket is shut and no more can
-	// come. Anything the pump does after this it has already had the chance to
-	// do.
-	require.NoError(t, client.SetReadDeadline(time.Now().Add(20*time.Second)))
-	got, err := io.ReadAll(client)
-	require.NoError(t, err)
-	require.Equal(t, "greeting", string(got), "the local client must see a clean EOF, not a reset")
-
-	select {
-	case err := <-done:
-		t.Fatalf("streamToLocal returned at the sandbox-side half-close (%v); doing that cancels the stream and drops whatever the client sent after it", err)
-	case <-time.After(250 * time.Millisecond):
-	}
-
-	// The agent's handler returns, which is the point at which there is
-	// genuinely nothing left in flight.
-	close(released)
-	select {
-	case err := <-done:
-		assert.NoError(t, err)
-	case <-time.After(20 * time.Second):
-		t.Fatal("streamToLocal did not return once the stream ended")
-	}
-}
-
-// And the end of the stream is what ends the pump, cleanly.
-func TestStreamToLocal_EndsOnStreamEOF(t *testing.T) {
-	client, server := tcpPair(t)
-
-	stream := &scriptedForward{events: []*sandboxdv1.ForwardResponse{forwardData("body")}}
-
-	done := make(chan error, 1)
-	go func() { done <- streamToLocal(stream, server) }()
-
-	require.NoError(t, client.SetReadDeadline(time.Now().Add(20*time.Second)))
-	got, err := io.ReadAll(client)
-	require.NoError(t, err)
-	assert.Equal(t, "body", string(got))
-
-	select {
-	case err := <-done:
-		assert.NoError(t, err)
-	case <-time.After(20 * time.Second):
-		t.Fatal("streamToLocal did not return at the end of the stream")
-	}
+	return got.conn
 }
 
 // ------------------------------------------------- the end of a connection
@@ -208,8 +112,7 @@ func TestCarry_ReleasesAConnectionWhoseStreamEnded(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// The local client end is held open and read from by nobody: the
 			// point is that this side gives up without it.
-			client, server := tcpPair(t)
-			_ = client
+			server := tcpPair(t)
 
 			r := NewRegistrar(nil, Deps{})
 			f := &activeForward{key: forwardKey{sandbox: "build-box", remotePort: 3000}, localAddr: "127.0.0.1:1"}
@@ -280,7 +183,7 @@ func (c *resetConn) Read([]byte) (int, error) {
 // writes nor closes when its peer half-closes — anything waiting for the rest
 // of a message — never gets there at all.
 func TestCarry_ReleasesAConnectionWhoseLocalClientDied(t *testing.T) {
-	_, server := tcpPair(t)
+	server := tcpPair(t)
 
 	r := NewRegistrar(nil, Deps{})
 	f := &activeForward{key: forwardKey{sandbox: "build-box", remotePort: 3000}, localAddr: "127.0.0.1:1"}

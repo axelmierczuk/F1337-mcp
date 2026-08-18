@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -182,13 +183,55 @@ type ForwardConfig struct {
 	// genuinely bad default, and it is bad in a way nobody notices until it is
 	// used, because forwarding to loopback works perfectly without it.
 	//
-	// Entries are matched literally against the requested host, case-
-	// insensitively. Anything not listed must resolve entirely to loopback
-	// addresses or the forward is refused.
+	// An entry is a hostname, an IP address, or a CIDR block. A hostname is
+	// matched literally against the requested host, case-insensitively. An
+	// address or a block is matched against the addresses the target resolves
+	// to, so listing 10.0.4.7 permits it under any name it answers to — the
+	// packets reach the same machine either way, which is the thing the
+	// operator actually decided.
+	//
+	// Anything not matched must resolve entirely to loopback addresses or the
+	// connection is refused. "Entirely" is the whole check: a name resolving to
+	// both a permitted address and one outside the list is refused, because
+	// passing on the strength of whichever came back first is not a decision
+	// anyone made.
+	//
+	// This is the `allow_hosts` of #45, under the name #26 shipped it as. One
+	// list, not two: an operator deciding which network this agent may reach is
+	// making one decision, and a second list would let a host be reachable one
+	// way and not the other for no reason a reader could recover.
 	AllowedHosts []string `yaml:"allowed_hosts,omitempty"`
 
-	// MaxConnections bounds the concurrent forwarded connections this agent
-	// will carry. Zero means the default.
+	// SocksEnabled permits SOCKS5-proxied connections through this agent —
+	// `fleetctl socks` and fleet_socks. It defaults to false, and that default
+	// is the security posture of the whole feature.
+	//
+	// A port forward reaches a host and port the caller named up front. A proxy
+	// reaches whatever a client asks for, connection by connection, which makes
+	// the agent a general-purpose route into its network rather than a route to
+	// one service on it. Those are different grants, so they are different
+	// settings: an agent with AllowedHosts set still forwards to exactly the
+	// hosts it always did, and serves no proxy at all, until an operator turns
+	// this on.
+	//
+	// With it on and AllowedHosts empty, a proxied connection may reach any host
+	// this machine can. That is a legitimate choice for a throwaway lab box and
+	// a bad one everywhere else, so the agent says so in its log at every start.
+	//
+	// A plain bool, unlike Enabled above: the default is false, so a key nobody
+	// wrote and a key written as false mean the same thing and there is nothing
+	// for a pointer to distinguish.
+	SocksEnabled bool `yaml:"socks_enabled,omitempty"`
+
+	// MaxConnections bounds the concurrent connections this agent will carry
+	// over ForwardService — a port forward's and a SOCKS proxy's alike, since
+	// both are one stream per connection. Zero means the default.
+	//
+	// A proxy is what makes this number visible: a forward carries one client's
+	// connections to one port, and a proxy carries whatever is pointed at it, so
+	// a browser or a parallel fetch reaches a bound a forward never would. The
+	// connection past it is refused, not queued, and the caller is told which
+	// setting refused it.
 	MaxConnections int `yaml:"max_connections,omitempty"`
 
 	// DialTimeout bounds the connection to the sandbox-side port. Zero means
@@ -199,11 +242,12 @@ type ForwardConfig struct {
 // IsEnabled reports whether ForwardService is on. An unset field means yes.
 func (f ForwardConfig) IsEnabled() bool { return f.Enabled == nil || *f.Enabled }
 
-// HostAllowed reports whether host is on the explicit non-loopback allow list.
+// HostAllowed reports whether host is named literally on the allow list.
 //
 // It answers only that question. A host that is not listed is not thereby
-// refused — it is refused unless it resolves entirely to loopback, which is
-// the caller's check, because it needs a resolver and a context.
+// refused — it is refused unless it resolves entirely to loopback or to
+// addresses [ForwardConfig.AddressAllowed] accepts, which is the caller's
+// check, because it needs a resolver and a context.
 func (f ForwardConfig) HostAllowed(host string) bool {
 	for _, allowed := range f.AllowedHosts {
 		if strings.EqualFold(strings.TrimSpace(allowed), strings.TrimSpace(host)) {
@@ -211,6 +255,179 @@ func (f ForwardConfig) HostAllowed(host string) bool {
 		}
 	}
 	return false
+}
+
+// AddressAllowed reports whether ip is covered by an address or CIDR entry on
+// the allow list.
+//
+// Hostname entries are ignored here on purpose. Resolving them to compare
+// addresses would make the answer depend on what DNS said at this instant, for
+// a name the operator wrote precisely because the name is the stable part —
+// and it would turn one allow-list lookup into a resolver call per entry per
+// connection. A name is matched as a name, by [ForwardConfig.HostAllowed]; an
+// address is matched as an address, here.
+//
+// A malformed entry matches nothing. It cannot be rejected at load time
+// without turning a typo in one line into a daemon that will not start, and
+// failing open on an allow-list entry nobody can parse is the one direction
+// that must not happen — so it is dropped here and reported at startup by
+// [ForwardConfig.MalformedAllowedHosts].
+func (f ForwardConfig) AddressAllowed(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, allowed := range f.AllowedHosts {
+		entry := strings.TrimSpace(allowed)
+		if _, block, err := net.ParseCIDR(entry); err == nil {
+			if block.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		if listed := net.ParseIP(entry); listed != nil && listed.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// MalformedAllowedHosts returns the allow-list entries that are neither a
+// usable CIDR block nor anything a hostname may legally be.
+//
+// An entry like "10.0.0.0/33" or "10.0.0.0 /8" parses as neither a block nor an
+// address, so it silently becomes a hostname that no request will ever match —
+// an allow list that reads as permitting a subnet and permits nothing. That is
+// a configuration worth a line in the log, and it is not worth refusing to
+// start over: the failure is closed, and an agent that will not boot because of
+// a stray character in a setting it may never use is a worse outcome than one
+// that boots and says so.
+func (f ForwardConfig) MalformedAllowedHosts() []string {
+	var bad []string
+	for _, allowed := range f.AllowedHosts {
+		entry := strings.TrimSpace(allowed)
+		if entry == "" {
+			bad = append(bad, allowed)
+			continue
+		}
+		// Only entries that look like an attempt at a block or an address are
+		// judged. Anything else is a hostname, and this package does not get to
+		// have an opinion about what names an operator's resolver knows.
+		if strings.ContainsAny(entry, "/ ") || looksNumeric(entry) {
+			if _, _, err := net.ParseCIDR(entry); err == nil {
+				continue
+			}
+			if net.ParseIP(entry) != nil {
+				continue
+			}
+			bad = append(bad, allowed)
+		}
+	}
+	return bad
+}
+
+// WidenedAllowedHosts returns the allow-list entries whose CIDR block covers
+// more than the address written in front of the mask, each rendered as the
+// block it actually permits.
+//
+// "10.0.4.7/24" is a valid block and a plausible way to write "this one host",
+// and it permits two hundred and fifty-four others. Nothing in
+// [ForwardConfig.MalformedAllowedHosts] can see it — net.ParseCIDR succeeds,
+// because the entry is not malformed, only wider than it reads. The cost of
+// getting it wrong is an operator who believes they narrowed the pivot to one
+// machine and narrowed it to a subnet, which is exactly the mistake this whole
+// setting exists to prevent.
+//
+// So it is a line in the log rather than a refusal to start: the semantics are
+// the ones every other tool applies to a CIDR, and an agent that would not boot
+// over a mask an operator meant is worse than one that boots and says what the
+// mask means.
+func (f ForwardConfig) WidenedAllowedHosts() []string {
+	var widened []string
+	for _, allowed := range f.AllowedHosts {
+		entry := strings.TrimSpace(allowed)
+		ip, block, err := net.ParseCIDR(entry)
+		if err != nil || ip.Equal(block.IP) {
+			continue
+		}
+		widened = append(widened, fmt.Sprintf("%s permits all of %s", entry, block.String()))
+	}
+	return widened
+}
+
+// looksNumeric reports whether an entry is made only of the characters an IP
+// address is spelled with, which is what makes "10.0.4.256" a broken address
+// rather than an unusual hostname.
+func looksNumeric(entry string) bool {
+	for _, r := range entry {
+		if (r < '0' || r > '9') && r != '.' && r != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// SocksAllowsAnyHost reports the configuration in which a proxied connection is
+// dialed with no check at all: proxying on, with an empty allow list.
+//
+// It is the *dialing* question, not the posture question, and the two are not
+// the same — see [ForwardConfig.SocksReachesAnyHost], which is what anything
+// describing this agent should ask. An allow list of ["0.0.0.0/0"] permits
+// every IPv4 host and still goes through the resolve-and-check path, which is
+// what keeps it from also permitting IPv6.
+func (f ForwardConfig) SocksAllowsAnyHost() bool {
+	return f.SocksEnabled && len(f.AllowedHosts) == 0
+}
+
+// FullCoverAllowedHosts returns the allow-list entries that cover their whole
+// address family, each rendered with what it permits.
+//
+// A /0 block is a valid, deliberate-looking way to write "everywhere", and it
+// is what an operator reaches for when they want to unblock something quickly —
+// including when fleet_socks refuses and tells them, in as many words, to
+// "list the hosts, addresses or CIDR blocks the proxy should reach". An allow
+// list holding one is not narrowed by any reading; it just does not look like
+// an empty one, which is the only shape [ForwardConfig.SocksAllowsAnyHost]
+// could see. So the agent's loudest line went unsaid for the configuration it
+// exists to say it about, and the tool that refuses "any host" served it.
+//
+// Only a mask of length zero counts. Two half-blocks that add up to everything,
+// or a /1, are not caught, and that is deliberate: this is the same shape as
+// [ForwardConfig.WidenedAllowedHosts] — a rule that names the plausible mistake
+// rather than one that pretends to do CIDR arithmetic and would still miss the
+// next spelling. The boundary does not rest on it either way; it is what the
+// agent says about itself.
+func (f ForwardConfig) FullCoverAllowedHosts() []string {
+	var covering []string
+	for _, allowed := range f.AllowedHosts {
+		entry := strings.TrimSpace(allowed)
+		_, block, err := net.ParseCIDR(entry)
+		if err != nil {
+			continue
+		}
+		if ones, _ := block.Mask.Size(); ones != 0 {
+			continue
+		}
+		family := "IPv4"
+		if block.IP.To4() == nil {
+			family = "IPv6"
+		}
+		covering = append(covering, fmt.Sprintf("%s permits every %s host this machine can reach", entry, family))
+	}
+	return covering
+}
+
+// SocksReachesAnyHost reports that a proxy through this agent is bounded by
+// nothing but the machine's own network.
+//
+// It is what the startup banner, GetHostInfo.forward_policy and fleet_socks's
+// refusal all mean by "unrestricted", and it is one question with two spellings
+// in the configuration: an empty allow list, or one holding a block that covers
+// everything.
+func (f ForwardConfig) SocksReachesAnyHost() bool {
+	if !f.SocksEnabled {
+		return false
+	}
+	return len(f.AllowedHosts) == 0 || len(f.FullCoverAllowedHosts()) > 0
 }
 
 // AuditConfig configures the forensic record written by #17.

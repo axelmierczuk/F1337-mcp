@@ -2,6 +2,8 @@ package process
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -264,6 +266,71 @@ func TestAlwaysRestartsACleanExitToo(t *testing.T) {
 	waitFor(t, 20*time.Second, "a clean exit to be restarted under the always policy", func() bool {
 		return r.status().GetRestartCount() >= 1
 	})
+}
+
+// TestACrashLoopingProcessDoesNotReportReadyOnEveryRestart is the damaging half
+// of #57.
+//
+// An explicit restart is where the defect was *observable*; restart_policy:
+// always is where it did harm. The supervisor keeps a process's log buffer
+// across every run, so the automatic restart path reached the same pre-scan
+// with the same stale announcement in front of it, and a service crash-looping
+// at three in the morning reported READY on every restart without ever having
+// come up. Readiness became a latch: satisfied once, satisfied for good.
+//
+// The loop here is stepped rather than watched. Each run waits for a file
+// before it dies, so every crash is one the test caused, and each restarted run
+// is still alive while its readiness is being asserted. Nothing is timed: the
+// verdict asserted on is the one the supervisor writes into the process's own
+// log when the probe gives up.
+func TestACrashLoopingProcessDoesNotReportReadyOnEveryRestart(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t)
+
+	probe := testProbe(probeLogPattern, 300*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	work := t.TempDir()
+	marker, die := filepath.Join(work, "announced"), filepath.Join(work, "die")
+	spec := ts.helperSpec("crash-loops", "announce-once", marker, "listening on 3000", die)
+	spec.probe = probe
+	spec.restartPolicy = sandboxdv1.RestartPolicy_RESTART_POLICY_ALWAYS
+	spec.maxRestarts = 5
+
+	r, err := ts.start(spec, false)
+	require.NoError(t, err)
+
+	// The first run comes up for real: it announces itself, and READY is the
+	// truth about it. That announcement is the poison in the buffer for every
+	// run after it.
+	require.NoError(t, ts.waitForReady(context.Background(), r))
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_READY, r.currentState())
+	firstPID := int(r.status().GetPid())
+
+	// Two automatic restarts, because "on every restart" is the claim. Neither
+	// of them announces anything, so neither of them is ready.
+	for crash := 1; crash <= 2; crash++ {
+		require.NoError(t, os.WriteFile(die, []byte("now"), 0o600))
+
+		waitFor(t, 30*time.Second, fmt.Sprintf("restart %d to be up and silent", crash), func() bool {
+			return countLines(r, "restarted without announcing") >= crash
+		})
+		// The supervisor's own verdict on this run, in the process's log: the
+		// probe watched the restarted run and found nothing. Under the defect
+		// this line never appears, because the probe passes on the first run's
+		// announcement before it watches anything.
+		waitFor(t, 30*time.Second, fmt.Sprintf("the probe for restart %d to give up", crash), func() bool {
+			return countLines(r, "did not pass within") >= crash
+		})
+
+		require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_STARTING, r.currentState(),
+			"restart %d has not announced itself, so it is not ready", crash)
+		require.NotEqual(t, firstPID, int(r.status().GetPid()),
+			"restart %d is still reporting the pid of the run that announced itself", crash)
+		require.Equal(t, 1, countLines(r, "listening on 3000"),
+			"the announcement is the first run's and there is only ever one of it")
+	}
 }
 
 // TestBackoffGrowsBetweenRestarts asserts that each delay the supervisor waits

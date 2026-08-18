@@ -106,13 +106,54 @@ forward:
   #
   #   allowed_hosts: ["db.internal", "10.0.4.7"]
   #
-  # Every connection to a host that is not this machine's loopback is written
-  # to the audit log below — successful, refused, or failed — with the host
-  # asked for, the address dialed, and how many bytes went each way. Never the
-  # bytes themselves. Loopback forwards are not recorded: they reach a port on
-  # a machine the caller already has exec on.
+  # An entry is a hostname, an address, or a CIDR block:
+  #
+  #   allowed_hosts: ["db.internal", "10.0.4.7", "10.9.0.0/16"]
+  #
+  # A hostname is matched literally and dialed by name — you listed a name
+  # because the name is what routes. An address or block is matched against
+  # whatever the target resolves to, and every address it resolves to has to
+  # pass, so a name answering with one permitted and one unpermitted address is
+  # refused rather than allowed on whichever came back first.
+  #
+  # Every connection is written to the audit log below — successful, refused,
+  # or failed — with the host asked for, the address dialed, and how many bytes
+  # went each way. Never the bytes themselves. A *forward* to this machine's own
+  # loopback is the one exception: it reaches a port on a machine the caller
+  # already has exec on. A proxied connection is recorded wherever it went,
+  # because a proxy's destination is chosen per connection and the log is the
+  # only place it exists.
   allowed_hosts: []
-  # Concurrent forwarded connections this agent will carry.
+  # SOCKS5 proxying: the `ssh -D` equivalent, used by `fleetctl socks` and the
+  # fleet_socks tool. Off by default, and separate from allowed_hosts above
+  # because they are different grants.
+  #
+  # A forward reaches a host and port the caller named up front. A proxy reaches
+  # whatever a client asks for, connection by connection, which makes this agent
+  # a general-purpose route into its network rather than a route to one service
+  # on it. So an agent with allowed_hosts set still forwards to exactly those
+  # hosts and serves no proxy at all until this is turned on.
+  #
+  # With this on and allowed_hosts empty, a proxied connection may reach ANY
+  # host this machine can. That is a reasonable choice for a throwaway lab box
+  # and a poor one anywhere else — the agent warns about it at every start, and
+  # the fleet_socks tool refuses to open a proxy on those terms at all, because
+  # "any host" is a decision an operator makes for themselves rather than one a
+  # model inherits.
+  #
+  # An allowed_hosts of ["0.0.0.0/0"] is that same posture written so that it
+  # looks like a narrowing, and it is treated as the same thing: the warning
+  # fires, and fleet_socks refuses. A block that covers its whole address family
+  # narrows nothing, whatever the length of the list says.
+  socks_enabled: false
+  # Concurrent connections this agent will carry over ForwardService — a port
+  # forward's and a proxy's alike, since both are one stream per connection.
+  #
+  # A proxy is what makes this number visible: a forward carries one client's
+  # connections to one port, and a proxy carries whatever is pointed at it, so a
+  # browser or a parallel fetch reaches this bound where a forward never would.
+  # The connection past it is refused rather than queued, and the caller is told
+  # which setting refused it.
   max_connections: 64
   # How long to wait for the sandbox-side port to accept.
   dial_timeout: "10s"

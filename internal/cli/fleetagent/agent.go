@@ -125,6 +125,22 @@ func newEnrollCommand(out io.Writer) *cobra.Command {
 	return cmd
 }
 
+// enrollRequest is the enrollment message this host sends about itself.
+//
+// It is a function rather than a literal inline so that the version it carries
+// can be compared against the one the daemon reports without running an
+// enrollment; the two used to disagree. See reportedVersion and #61.
+func enrollRequest(token string, csrDER []byte, requestedName string, addresses []string) *sandboxdv1.EnrollRequest {
+	return &sandboxdv1.EnrollRequest{
+		Token:           token,
+		CsrDer:          csrDER,
+		RequestedName:   requestedName,
+		Platform:        localPlatform(),
+		ListenAddresses: addresses,
+		AgentVersion:    reportedVersion(),
+	}
+}
+
 func runEnroll(out io.Writer, f enrollFlags) error {
 	server, token, fingerprint := f.control, f.token, f.fingerprint
 	if server == "" {
@@ -183,14 +199,8 @@ func runEnroll(out io.Writer, f enrollFlags) error {
 	ctx, cancel := context.WithTimeout(context.Background(), enrollTimeout)
 	defer cancel()
 
-	resp, err := sandboxdv1.NewEnrollmentServiceClient(cc).Enroll(ctx, &sandboxdv1.EnrollRequest{
-		Token:           token,
-		CsrDer:          csrDER,
-		RequestedName:   requestedName,
-		Platform:        localPlatform(),
-		ListenAddresses: addresses,
-		AgentVersion:    version.String(),
-	})
+	resp, err := sandboxdv1.NewEnrollmentServiceClient(cc).Enroll(ctx,
+		enrollRequest(token, csrDER, requestedName, addresses))
 	if err != nil {
 		return fmt.Errorf("enroll against %s: %w", server, err)
 	}

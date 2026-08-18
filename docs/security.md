@@ -54,6 +54,19 @@ operator                control plane              new host
 ```
 
 - Tokens are **single-use** and short-lived.
+- **The token is spent last, not first.** Everything that can refuse an
+  enrollment — the name, the addresses, the CSR, the SAN set the CA is asked to
+  sign — is checked before the token is redeemed, so a request refused for a
+  mistyped `--address` leaves the token spendable and the operator's corrected
+  retry works. Redemption is still a single atomic check-and-mark under the
+  store's lock, and it is still the only thing that grants the right to proceed:
+  of any number of enrollments holding one token, exactly one wins it and the
+  rest are refused as replays. The read that runs first claims nothing and is
+  advisory — a token revoked or expired inside that window is refused by the
+  redemption, not admitted on the strength of the earlier read. The redemption
+  comes before the fleet registry write, because that write is the first thing
+  that cannot be taken back: the loser of a race must be refused without leaving
+  a fleet member behind.
 - **A token authorizes an identity, not just admission.** The name and addresses
   given to `enroll mint` are the only ones the issued certificate carries — in
   its subject as much as in its subject alternative names, because an attacker
@@ -344,15 +357,21 @@ anywhere else is different in kind: it makes the agent a relay into whatever
 network it sits in, usable by anyone who can reach the agent. On a fleet
 spanning a laptop, a home lab and a cloud VPC, "anywhere else" spans all three.
 
+`fleetctl socks` and `fleet_socks` are `ssh -D`, and they are that relay in its
+general form: a SOCKS5 proxy whose destination is chosen by the client, one
+connection at a time. Everything below applies to both, and the two settings
+that gate them are separate on purpose.
+
 So the pivot is off by default, and when an operator turns it on, it is
 recorded.
 
 ### The default
 
-- **The local listener binds `127.0.0.1` only.** Binding every interface would
-  publish a tunnel into the sandbox to everyone on the workstation's network,
-  with no authentication in front of it — including on a network the user did
-  not choose.
+- **The local listener binds `127.0.0.1` only**, for a forward and for a proxy
+  alike. Binding every interface would publish a tunnel into the sandbox — or,
+  for a proxy, an unauthenticated route into the sandbox's whole network — to
+  everyone on the workstation's network, with nothing in front of it, including
+  on a network the user did not choose. There is no flag to change it.
 - **`remote_host` defaults to the sandbox's own loopback**, and a non-loopback
   target is refused unless the operator listed it in `forward.allowed_hosts`.
   Forwarding a dev server works identically without that capability, so an
@@ -360,30 +379,156 @@ recorded.
   the permissive version would go unnoticed too.
 
   The check resolves the requested host and requires **every** address it
-  resolves to to be loopback, then dials the address that passed. Judging the
-  string would be defeated by a name that resolves outward; judging one address
-  would be defeated by a name that resolves to several; re-resolving at dial
-  time would leave a window between the check and the connection.
+  resolves to to be loopback or covered by the allow list, then dials the
+  addresses that passed. Judging the string would be defeated by a name that
+  resolves outward; judging one address would be defeated by a name that
+  resolves to several; re-resolving at dial time would leave a window between
+  the check and the connection.
+
+  An entry is a hostname, an address, or a CIDR block. A hostname is matched
+  literally, case-insensitively, and dialed **by name** — the operator listed a
+  name because the name is what routes, and has already accepted wherever it
+  points. An address or a block is matched against what the target resolves to.
+- **`forward.socks_enabled` defaults to `false`**, and an agent that has not
+  opted in refuses a proxied connection outright, naming the setting — including
+  a proxied connection to a host its allow list permits, and including one to
+  its own loopback. The refusal is about the capability, not the destination.
+
+  It is a second setting rather than a wider reading of the first because they
+  are different grants. A forward reaches a host and port the caller named up
+  front; a proxy reaches whatever a client asks for. An agent with
+  `allowed_hosts` set still forwards to exactly the hosts it always did, and
+  serves no proxy at all, until this is turned on.
+- **`socks_enabled: true` with an empty `allowed_hosts` means any host the
+  machine can reach.** That is a legitimate choice for a throwaway lab box and
+  the wrong one everywhere else, so the agent warns about it in its log at
+  every start, `fleetctl socks` prints it in a banner an operator cannot miss,
+  and `fleet_socks` refuses to open a proxy on those terms at all. See
+  [the model's proxy](#the-models-proxy).
+
+  **"Unrestricted" has a second spelling, and it is treated as the same thing.**
+  An `allowed_hosts` of `["0.0.0.0/0"]` — or `["::/0"]` — has entries, reads as
+  a narrowing, and permits every host of that family the machine can reach. It
+  is also what an operator writes when they want the lab-box posture and have
+  been told to list CIDR blocks, which is exactly what `fleet_socks`'s refusal
+  tells them. So the agent judges the two together: a block covering its whole
+  address family raises the same warning as an empty list, and is refused by
+  `fleet_socks` the same way.
+
+  The judgement is the agent's, reported as `ForwardPolicy.unrestricted` rather
+  than re-derived on the workstation from the list — a caller re-deriving it
+  would carry a copy of the rule, and the copy is what drifts. Blocks that add
+  up to everything without any one of them covering everything (`0.0.0.0/1`
+  and `128.0.0.0/1`) are not caught, deliberately: this names the plausible
+  mistake rather than doing CIDR arithmetic that would still miss the next
+  spelling. It is a description either way — what the agent will actually reach
+  is decided per connection, from the same configuration.
 
 An operator who lists a host has accepted that the agent will connect to it on
 any caller's request. The agent says so in its log at every start, and warns
 separately if it was told to do that with the audit log switched off — the two
 settings are only dangerous together.
 
+### How the agent tells the two apart
+
+A proxied connection is marked as one on the wire: `ForwardOpen.socks`, on the
+stream that already carries every forwarded connection. There is no second RPC
+and no second byte-pump — a second one would be a second place to leak a
+goroutine per connection — so the difference between the two features on the
+agent is which policy applies.
+
+That field is **not** a security boundary and does not need to be. Declaring it
+can only ever make the policy applied to a connection *stricter*: a caller that
+clears it gets the forward rules, which permit loopback and the explicit allow
+list and nothing else. There is no value a caller can put there that reaches a
+host the configuration does not already permit it to reach. What the field buys
+is that an operator can grant "reach these three hosts" without also granting
+"be a proxy", which no property of the destination alone could express.
+
+### The model's proxy
+
+`fleetctl socks` gives an operator a pivot they could have built with
+`fleet_exec` and `curl`. `fleet_socks` gives a **model** one — and a model with
+a SOCKS proxy can reach every host the sandbox's network reaches, which is a
+larger blast radius than every other tool in the set combined. Every other tool
+is bounded by the sandbox: its filesystem, its processes, its ports. A proxy is
+bounded by the sandbox's *network*, which on a fleet spanning a laptop, a home
+lab and a cloud VPC is a set nobody has enumerated.
+
+`forward.allowed_hosts` is what makes it defensible: the operator decides the
+reachable network once, and the model works inside it. So the two callers are
+deliberately not symmetric:
+
+| | `socks_enabled: false` | on, `allowed_hosts` narrows something | on, `allowed_hosts` empty or covering everything |
+| --- | --- | --- | --- |
+| `fleetctl socks` | refused, naming the setting | serves, listing the hosts | serves, with an unmissable banner |
+| `fleet_socks` | refused, naming the setting | serves, reporting the hosts in its result | **refused** |
+
+An operator running the CLI made the "any host" decision themselves, about a
+machine they chose, at a moment they were thinking about it. A model reaching
+the tool inherits that decision without anyone having made it about a model —
+the config was very likely written for a lab box months earlier, and nothing
+since has asked whether the same box should hand a general-purpose network
+pivot to something that will use it autonomously. So `fleet_socks` requires the
+operator to have narrowed it, and narrowing it is one line in the agent's
+config, which the refusal quotes.
+
+This is a guardrail on a model, not a boundary. It is enforced on the
+workstation, from what the agent reports about its own configuration through
+`GetHostInfo`. The boundary is the agent's, applied per connection on the far
+side, where no caller can skip it.
+
+### What a proxy does not implement
+
+CONNECT only. BIND and UDP ASSOCIATE are refused with the code RFC 1928 has for
+it. UDP would need a datagram path the transport does not have — `ForwardService`
+carries a TCP connection — and half-implementing it would be worse than
+refusing: a client whose UDP association appears to be accepted and then
+silently carries nothing is a client debugging the wrong layer.
+
+The proxy offers no authentication, because there is nobody to authenticate:
+the listener is on loopback, so its reachable population is processes on this
+machine, and a username and password in a file beside it would add a step
+without adding a boundary.
+
+Destination names are resolved **on the agent**, never on the workstation. That
+is the whole point — `curl --socks5-hostname`, not `--socks5` — because a
+private name means nothing to the workstation's resolver, and resolving it there
+reaches the wrong host or fails outright. `fleetctl socks --allow` narrows
+destinations on the workstation side as a convenience; it is not a boundary and
+does not replace the agent's list, which is checked on every connection
+regardless.
+
 ### The record
 
-Every connection to a target that is **not** this machine's loopback appends a
-line to the [audit log](#audit), whether it succeeded, was refused, or failed.
-Loopback forwards are not recorded: they add volume without adding an answer,
-and volume is what makes the lines that matter hard to find.
+Every connection appends a line to the [audit log](#audit), whether it
+succeeded, was refused, or failed — forwarded and proxied connections alike, in
+the same fields. An operator asking "what did this machine reach, for whom, and
+how much went through it" is asking one question, not two.
 
-One line per connection, not per forward — a forward is a listener that carries
-many connections over hours, and "a forward was opened" answers nothing about
-what went through it. Each line carries the time, the authenticated principal
-from the client certificate, the sandbox's own name, the requested
-`remote_host` and `remote_port`, the address actually dialed, the local end of
-the agent's outbound socket, bytes in each direction, the duration, and how it
-ended.
+A **forward** to this machine's own loopback is the one exception: it reaches a
+port on a host the caller already has command execution on, so it adds volume
+without adding an answer, and volume is what makes the lines that matter hard to
+find. **Every proxied connection is recorded, wherever it went**, including to
+loopback. The two are not the same question: a forward's destination is in the
+configuration, named up front and fixed for the life of the listener, while a
+proxy's is chosen per connection by whoever holds the proxy. Dropping a proxy's
+loopback connections would answer "where did this go" wrongly rather than
+incompletely — an operator counting a proxy's connections would find three
+hundred where there were five hundred, with nothing saying so.
+
+One line per connection, not per listener — a forward or a proxy is a listener
+that carries many connections over hours, and "a proxy was opened" answers
+nothing about what went through it. Each line carries the time, the
+authenticated principal from the client certificate, the sandbox's own name, the
+requested `remote_host` and `remote_port`, the address actually dialed, the local
+end of the agent's outbound socket, bytes in each direction, the duration, and
+how it ended.
+
+A pivot with no record of where it went is what turns an incident into an
+unanswerable question, and that is sharpest for a proxy: the destination is
+chosen per connection by whoever is using it, so the configuration alone cannot
+tell anyone afterwards where it went.
 
 Two of those are worth stating on their own:
 

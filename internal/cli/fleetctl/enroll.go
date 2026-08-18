@@ -268,19 +268,20 @@ func checkEndpoint(flag, value string, requireHost bool) error {
 // These two are the same argument one step further along: --name and --address
 // are what the *certificate* is built from, and the CA's rules for a subject
 // alternative name are stricter than anything this command checked before.
-// Enrollment applies them in `certifiable` — which runs after Redeem has marked
-// the token used — so a name the CA will not sign costs a single-use secret and
-// is discovered on a host the operator has already walked away from, with only
-// a re-mint to show for it. `--name "build box"` and `--address host:https` both
-// did exactly that.
+// Enrollment applies them in `certifiable`, which since #58 runs with the token
+// still unspent — so a name the CA will not sign now costs a re-mint rather than
+// a single-use secret. It does not cost nothing: the operator is in front of
+// this command at mint time and nowhere near the host at redemption, so a token
+// minted for a name the CA will not sign is still a trip to a machine to find
+// that out. `--name "build box"` and `--address host:https` both were exactly
+// that trip.
 //
 // The question is asked through [enroll.CheckCertifiable] rather than assembled
 // here, so that mint refuses exactly what redemption would refuse. Assembling it
 // here is what let the two drift: this function ran the name through
 // net.SplitHostPort as if it were an address, so `--name build:box` was checked
-// as "build" and minted, and redemption then refused "build:box" after Redeem
-// had spent the token — the failure the check exists to prevent, on the flag it
-// was added for.
+// as "build" and minted, and redemption then refused "build:box" — the failure
+// the check exists to prevent, on the flag it was added for.
 func checkCertifiable(name string, addresses []string) error {
 	for _, value := range addresses {
 		if err := checkAuthorizedAddress(value); err != nil {

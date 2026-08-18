@@ -97,14 +97,14 @@ Done. `fleet_list` should show `build-box`.
 
 ## Tools
 
-Nineteen tools across five groups — see [docs/tools.md](docs/tools.md) for
+Twenty tools across five groups — see [docs/tools.md](docs/tools.md) for
 full schemas.
 
 - **Fleet** — `fleet_list`, `fleet_select`, `fleet_add`, `fleet_remove`, `fleet_info`
 - **Execute** — `fleet_exec`
 - **Background processes** — `fleet_process_start`, `fleet_process_list`, `fleet_process_logs`, `fleet_process_signal`, `fleet_process_restart`
 - **Files** — `fleet_read`, `fleet_write`, `fleet_edit`, `fleet_ls`, `fleet_glob`, `fleet_grep`
-- **Bridge** — `fleet_transfer`, `fleet_forward`
+- **Bridge** — `fleet_transfer`, `fleet_forward`, `fleet_socks`
 
 `fleet_select` sets a sticky default sandbox (persisted per client), and
 every targeted tool can override it with an optional `sandbox` argument.
@@ -126,10 +126,11 @@ dedicated machine). Full threat model in [docs/security.md](docs/security.md).
 ## Development
 
 ```sh
-make tools     # pinned buf, protoc plugins, golangci-lint into .tools/
-make proto     # regenerate Go from proto/
-make build     # all three binaries
-make check     # everything CI runs
+make tools        # pinned buf, protoc plugins, golangci-lint into .tools/
+make proto        # regenerate Go from proto/
+make build        # all three binaries
+make check        # the gate: proto, vet and lint per GOOS, tests under -race
+make test-norace  # the unit tests without -race, as CI and the release gate run them
 ```
 
 Go 1.25, [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk),

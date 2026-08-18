@@ -131,7 +131,7 @@ Streaming is used where buffering would be wrong, not everywhere:
 | `FileService.WriteFile` | client stream | Same, in reverse. Written to a temp file and renamed, so a failed transfer cannot leave a truncated file. |
 | `FileService.Grep` | server stream | Results before the walk finishes. |
 | `ProcessService.GetProcessLogs` | server stream | Replay buffered output, then follow new output to a bounded deadline. |
-| `ForwardService.Forward` | bidirectional | One stream per forwarded TCP connection. |
+| `ForwardService.Forward` | bidirectional | One stream per carried TCP connection — a port forward's and a SOCKS proxy's alike. A proxy marks its connections with `ForwardOpen.socks`, which selects which of the agent's two policies applies; it needs no RPC of its own, and a second byte-pump would be a second place to leak a goroutine per connection. |
 
 Everything else is unary.
 
@@ -191,7 +191,21 @@ the one configuration in which `allowed_roots` is a real boundary. See
 only when the PID exists *and* its start time matches the record. PID reuse is
 not a theoretical concern on a busy box, and adopting the wrong process means
 the agent will later signal something it does not own. A mismatch produces
-`ORPHANED` with an `adoption_note` explaining the decision.
+`ORPHANED` with an `adoption_note` explaining the decision. A process re-adopted
+while it was still being probed has its readiness probe resumed, because
+otherwise nothing would ever decide it: the probe was running in an agent that
+no longer exists.
+
+**Readiness is per run, not per process.** A `log_pattern` probe scans the lines
+already buffered before it starts following new ones — a process that announces
+itself before the probe is set up would otherwise never be seen. The buffer
+outlives a run, though: a restart keeps the whole log history, which is what
+makes the output of the run that died readable afterwards. So each run records
+the log sequence its output starts at, and the scan is bounded to it. Without
+that bound a restarted process matched the *previous* run's announcement, and a
+crash-looping service under `restart_policy: always` reported healthy on every
+restart (#57). The bound is persisted with the record, so a resumed probe reads
+the run's own history and not the history of the runs before it.
 
 **Log buffering.** A bounded in-memory ring buffer serves fast tailing; a
 size-capped rotating file on disk keeps history past a crash. A process that

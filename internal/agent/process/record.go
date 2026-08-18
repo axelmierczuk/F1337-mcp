@@ -52,9 +52,31 @@ type record struct {
 	maxLogBytes    int64
 
 	// State machine and its observable consequences.
-	state        sandboxdv1.ProcessState
-	pid          int
-	startID      string
+	state sandboxdv1.ProcessState
+	pid   int
+	// startID answers "is the process behind this pid still the run this record
+	// names"; runFirstSeq answers "which captured lines does that run own". Both
+	// are recorded at spawn, because neither can be recovered afterwards, and
+	// both are persisted, because the next agent needs them for the same
+	// reasons this one did.
+	startID string
+	// runFirstSeq is the log sequence at which the current run's output begins:
+	// the buffer's next sequence, taken at spawn before the run could write
+	// anything.
+	//
+	// The buffer is deliberately kept across a restart — whoever is diagnosing
+	// why a process was restarted needs the output of the run that died — so
+	// "what has this process printed" and "what has this run printed" are
+	// different questions. A readiness probe is asking the second one, and
+	// without this mark it cannot tell them apart: it would match the previous
+	// run's announcement and report a process ready before its new run had
+	// printed anything (#57).
+	//
+	// Zero means "everything retained counts", which is what a record written
+	// before this field existed reads as. That is the honest answer for a run
+	// whose boundary was never recorded, and it is also correct for a first
+	// spawn, where there is nothing in the buffer to wrongly match.
+	runFirstSeq  uint64
 	startedAt    time.Time
 	exitedAt     time.Time
 	exitCode     int32
@@ -339,6 +361,7 @@ func (r *record) snapshotPersisted() persisted {
 		Shell:            r.shell,
 		PID:              r.pid,
 		StartID:          r.startID,
+		RunFirstSeq:      r.runFirstSeq,
 		JobName:          r.jobName,
 		State:            stateName(r.state),
 		ExitCode:         r.exitCode,

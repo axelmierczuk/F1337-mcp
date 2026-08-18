@@ -74,24 +74,7 @@ func New(deps agent.Deps) (agent.Service, error) {
 
 	cfg := deps.Config.Forward
 	log := deps.Log.With("service", "forward")
-	if len(cfg.AllowedHosts) > 0 {
-		// Worth a line at every start. It is the setting that turns this agent
-		// from "reaches its own loopback" into "reaches part of its network",
-		// and an operator should be able to see it in the log rather than only
-		// in a file.
-		log.Info("forwarding to non-loopback hosts is permitted",
-			"allowed_hosts", strings.Join(cfg.AllowedHosts, ","),
-			"audited", deps.Audit.Enabled())
-		if !deps.Audit.Enabled() {
-			// The two settings are only dangerous together. Reaching the
-			// network on request is a decision an operator may reasonably
-			// make; making it with no record of what was reached is one they
-			// should have to have made on purpose.
-			log.Warn("NON-LOOPBACK FORWARDING IS PERMITTED WITH NO AUDIT LOG",
-				"reason", "forward.allowed_hosts is set and audit.enabled is false",
-				"consequence", "this agent will connect to other hosts on a caller's behalf and record nothing about it")
-		}
-	}
+	logPosture(log, cfg, deps.Audit.Enabled())
 	return &Service{
 		cfg:   cfg,
 		log:   log,
@@ -109,6 +92,93 @@ func New(deps agent.Deps) (agent.Service, error) {
 // Register attaches ForwardService to the daemon's gRPC server.
 func (s *Service) Register(r grpc.ServiceRegistrar) {
 	sandboxdv1.RegisterForwardServiceServer(r, s)
+}
+
+// logPosture says at every start what this agent will connect to on a caller's
+// behalf.
+//
+// Every line here is about a setting whose effect is invisible in ordinary use:
+// forwarding a dev server works identically whether or not the agent is also a
+// route into a private subnet, so an operator who turned something on months
+// ago, or inherited a config, has nothing to notice. The log is where they can
+// see it without reading the file.
+func logPosture(log *slog.Logger, cfg agent.ForwardConfig, audited bool) {
+	if bad := cfg.MalformedAllowedHosts(); len(bad) > 0 {
+		// Neither an address nor a block, so it is being treated as a hostname
+		// that nothing will ever match. The list reads as permitting something
+		// and permits nothing, which is a safe failure and a confusing one.
+		log.Warn("forward.allowed_hosts has entries that are not a valid address or CIDR block",
+			"entries", strings.Join(bad, ","),
+			"consequence", "each is matched as a hostname, so it permits nothing unless a caller asks for that exact name")
+	}
+
+	if widened := cfg.WidenedAllowedHosts(); len(widened) > 0 {
+		// A block whose host bits are set is not malformed, so the check above
+		// cannot see it — and "10.0.4.7/24" is a plausible way to write "this
+		// one host" that permits two hundred and fifty-four others. This is the
+		// one direction the allow list fails in that is wider than the operator
+		// wrote, so it is said out loud rather than left to be discovered.
+		log.Warn("forward.allowed_hosts has entries wider than the address they name",
+			"entries", strings.Join(widened, "; "),
+			"consequence", "a mask covers the whole block, not the address in front of it",
+			"remedy", "write the block's own address, or drop the mask to permit only that host")
+	}
+
+	switch {
+	case cfg.SocksReachesAnyHost():
+		// The loudest thing this agent has to say about itself. An unrestricted
+		// proxy reaches every host its network reaches, for anyone who can call
+		// it, and unlike every other capability here that is not bounded by
+		// what is installed on this machine.
+		//
+		// Said for both spellings of it. An empty allow list is the obvious
+		// one; a list holding a block that covers its whole address family is
+		// the one that reads as narrowing, and it is what an operator writes
+		// when they want the lab-box posture and have been told to list CIDR
+		// blocks. A warning that only fired for the first would go quiet for
+		// exactly the configuration somebody arrived at on purpose.
+		log.Warn("THIS AGENT WILL PROXY TO ANY HOST IT CAN REACH",
+			"reason", unrestrictedReason(cfg),
+			"consequence", "any caller can reach anything this machine's network reaches, through this agent",
+			"remedy", "list the hosts, addresses or CIDR blocks it should reach in forward.allowed_hosts",
+			"audited", audited)
+	case cfg.SocksEnabled:
+		log.Info("SOCKS proxying is permitted, narrowed by the allow list",
+			"allowed_hosts", strings.Join(cfg.AllowedHosts, ","),
+			"audited", audited)
+	}
+
+	if len(cfg.AllowedHosts) > 0 {
+		// Worth a line at every start. It is the setting that turns this agent
+		// from "reaches its own loopback" into "reaches part of its network",
+		// and an operator should be able to see it in the log rather than only
+		// in a file.
+		log.Info("forwarding to non-loopback hosts is permitted",
+			"allowed_hosts", strings.Join(cfg.AllowedHosts, ","),
+			"socks_enabled", cfg.SocksEnabled,
+			"audited", audited)
+	}
+
+	if !audited && (len(cfg.AllowedHosts) > 0 || cfg.SocksEnabled) {
+		// The two settings are only dangerous together. Reaching the network on
+		// request is a decision an operator may reasonably make; making it with
+		// no record of what was reached is one they should have to have made on
+		// purpose.
+		log.Warn("THIS AGENT WILL CONNECT OFF THIS MACHINE WITH NO AUDIT LOG",
+			"reason", "forward.allowed_hosts or forward.socks_enabled is set, and audit.enabled is false",
+			"consequence", "this agent will connect to other hosts on a caller's behalf and record nothing about it")
+	}
+}
+
+// unrestrictedReason names which spelling of "unrestricted" this agent is in,
+// because the remedy is not the same sentence for both: one operator has
+// written nothing and the other has written something that looks like a
+// narrowing.
+func unrestrictedReason(cfg agent.ForwardConfig) string {
+	if covering := cfg.FullCoverAllowedHosts(); len(covering) > 0 {
+		return "forward.socks_enabled is true and forward.allowed_hosts narrows nothing: " + strings.Join(covering, "; ")
+	}
+	return "forward.socks_enabled is true and forward.allowed_hosts is empty"
 }
 
 // Forward carries one TCP connection.
@@ -138,6 +208,7 @@ func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequ
 		return status.Error(codes.InvalidArgument, "the first message on a Forward stream must be a ForwardOpen")
 	}
 	call.requested, call.port = strings.TrimSpace(open.GetRemoteHost()), open.GetRemotePort()
+	call.socks = open.GetSocks()
 	// Until the host is resolved, the only thing known about the target is how
 	// it was spelled. That is enough to decide whether a refusal below is a
 	// refusal to reach off this machine, which is the class of event the
@@ -147,6 +218,20 @@ func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequ
 	if !s.cfg.IsEnabled() {
 		return s.deny(call, "forward.enabled: false", status.Error(codes.FailedPrecondition,
 			"port forwarding is disabled on this agent (forward.enabled is false in its configuration)"))
+	}
+	// Before the target is examined, because this refusal is about the
+	// capability rather than about where this particular connection was going:
+	// an agent that does not proxy refuses a proxied connection to its own
+	// loopback too, and the answer a caller needs is the setting, not the
+	// destination. Recorded as a denial with the target it named, which is what
+	// makes "somebody pointed a proxy at this agent" a line an operator can
+	// find.
+	if call.socks && !s.cfg.SocksEnabled {
+		return s.deny(call, ruleSocksEnabled, status.Error(codes.PermissionDenied,
+			"this agent does not serve SOCKS proxying (forward.socks_enabled is false in its configuration). "+
+				"A proxy would let any caller reach every host this machine's network reaches, so it is off unless "+
+				"an operator turns it on — and an operator turning it on should also list the hosts, addresses or "+
+				"CIDR blocks it may reach in forward.allowed_hosts"))
 	}
 	if call.port == 0 || call.port > 65535 {
 		return s.errored(call, status.Errorf(codes.InvalidArgument,
@@ -251,9 +336,13 @@ type call struct {
 	resolved  string
 	local     string
 
-	// offBox reports that the target is not this machine's own loopback, which
-	// is the whole test for whether this connection is recorded. See
-	// [Service.record].
+	// socks reports that the caller declared this connection as one a SOCKS
+	// proxy asked for. See the field's contract in forward.proto: it selects
+	// which policy applies and can only ever make it stricter.
+	socks bool
+	// offBox reports that the target is not this machine's own loopback. With
+	// socks, it is what decides whether this connection is recorded. See
+	// [Service.record] and [call.recordable].
 	offBox bool
 	// rule names the configuration that refused the connection, when one did.
 	rule string
@@ -274,6 +363,28 @@ func (c *call) reportedHost() string {
 	return c.requested
 }
 
+// recordable reports whether this connection belongs in the audit log.
+//
+// A forward to the sandbox's own loopback does not. It reaches a port on a host
+// the caller already has full command execution on, so recording it would add
+// volume without adding an answer — and volume is not free: it is what makes
+// the interesting lines hard to find.
+//
+// A *proxied* connection does, wherever it went. The two are not the same
+// question. A forward's destination is in the configuration, named up front and
+// fixed for the life of the listener; a proxy's is chosen per connection by
+// whoever holds the proxy, so "what did this reach" is answerable only from the
+// log. A record that dropped the loopback ones would answer it wrongly rather
+// than incompletely: an operator counting a proxy's connections would find
+// three hundred where there were five hundred, with nothing saying so.
+//
+// It is also the only reading that makes the two postures agree. An agent with
+// an empty allow list resolves nothing and treats every proxied target as
+// off-box, so it already recorded these; without this, whether a proxy's
+// connection to loopback appeared in the log turned on a setting that had
+// nothing to do with it.
+func (c *call) recordable() bool { return c.offBox || c.socks }
+
 // deny records a refusal by configuration and returns the caller's error.
 func (s *Service) deny(c *call, rule string, err error) error {
 	c.rule = rule
@@ -290,19 +401,17 @@ func (s *Service) errored(c *call, err error) error {
 // record writes the connection's audit record and returns the error this RPC
 // ends with.
 //
-// Only a connection whose target is off this machine is recorded. A forward to
-// the sandbox's own loopback reaches a port on a host the caller already has
-// full command execution on, so recording it would add volume without adding
-// an answer — and volume is not free: it is what makes the interesting lines
-// hard to find. A forward to anywhere else is the agent acting as a pivot into
-// the network it sits in, and that is the event this log exists for.
+// Which connections are recorded is [call.recordable]'s decision: a forward to
+// anywhere but this machine's own loopback, and every proxied connection. Both
+// are the agent acting as a pivot into the network it sits in, and that is the
+// event this log exists for.
 //
 // audit.required is honoured on the same terms as the exec path: with it set, a
 // record that could not be written fails the call. Here that means a connection
 // which has already happened ends in an error rather than a clean close, which
 // is the honest report — the agent could not record what it did.
 func (s *Service) record(c *call, outcome policy.Outcome, rpcErr error) error {
-	if !c.offBox || !s.audit.Enabled() {
+	if !c.recordable() || !s.audit.Enabled() {
 		return rpcErr
 	}
 
@@ -624,6 +733,17 @@ func (s *Service) resolveTarget(ctx context.Context, c *call) (addresses []strin
 		}, nil
 	}
 
+	// A proxy on an agent that has narrowed nothing reaches whatever this
+	// machine can. There is no check to make: the operator's choice was "any
+	// host", it is warned about at every start, and every connection made under
+	// it is recorded. Dialed by name for the same reason an allow-listed host
+	// is — and because resolving on the agent is the entire point of a proxy,
+	// which is asked for names the client's own resolver has never heard of.
+	if c.socks && s.cfg.SocksAllowsAnyHost() {
+		c.offBox = true
+		return []string{net.JoinHostPort(host, portStr)}, nil
+	}
+
 	// An explicitly allowed host is dialed by name, because that is what the
 	// operator listed and the name may be the only thing that routes. There is
 	// no window to close here: the operator has already accepted wherever this
@@ -637,9 +757,17 @@ func (s *Service) resolveTarget(ctx context.Context, c *call) (addresses []strin
 	}
 
 	if ip := net.ParseIP(host); ip != nil {
+		// An address the operator listed, or one inside a block they listed.
+		// Checked before the loopback test so that a listed address is recorded
+		// as the off-box connection it is even in the odd case of an operator
+		// listing a loopback block.
+		if s.cfg.AddressAllowed(ip) {
+			c.offBox = true
+			return []string{net.JoinHostPort(ip.String(), portStr)}, nil
+		}
 		if !ip.IsLoopback() {
 			c.rule = ruleAllowedHosts
-			return nil, s.refuse(host)
+			return nil, s.refuse(c, host)
 		}
 		c.offBox = false
 		return []string{net.JoinHostPort(ip.String(), portStr)}, nil
@@ -657,18 +785,28 @@ func (s *Service) resolveTarget(ctx context.Context, c *call) (addresses []strin
 	if len(addrs) == 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "remote_host %q resolved to no addresses on the sandbox", host)
 	}
-	// Every address, not the first one. A name resolving to both a loopback
-	// and a routable address must not pass on the strength of whichever came
-	// back first.
+	// Every address, not the first one. A name resolving to both a permitted
+	// and an unpermitted address must not pass on the strength of whichever
+	// came back first.
 	// IPv4 first. "localhost" resolves to both families on most hosts, in
 	// whichever order the resolver feels like, and a server bound to
 	// 127.0.0.1 is not reachable on ::1 — so an order that is not chosen here
 	// is a forward that works on one machine and fails on the next.
-	var v4, v6 []string
+	var (
+		v4, v6 []string
+		offBox bool
+	)
 	for _, addr := range addrs {
-		if !addr.IP.IsLoopback() {
+		switch {
+		case s.cfg.AddressAllowed(addr.IP):
+			// A name resolving into a listed block. Recorded as off-box even if
+			// some other address it answers to is loopback: the connection may
+			// go to the listed one, and that is the fact a record is for.
+			offBox = true
+		case addr.IP.IsLoopback():
+		default:
 			c.rule = ruleAllowedHosts
-			return nil, s.refuse(host)
+			return nil, s.refuse(c, host)
 		}
 		address := net.JoinHostPort(addr.IP.String(), portStr)
 		if addr.IP.To4() != nil {
@@ -677,21 +815,42 @@ func (s *Service) resolveTarget(ctx context.Context, c *call) (addresses []strin
 			v6 = append(v6, address)
 		}
 	}
-	// Every address resolved to loopback, so this reaches nothing but the
-	// sandbox itself after all — whatever the name looked like.
-	c.offBox = false
+	c.offBox = offBox
 	return append(v4, v6...), nil
 }
 
-// ruleAllowedHosts is the configuration a refused non-loopback target is
-// recorded against.
-const ruleAllowedHosts = "forward.allowed_hosts"
+// The configuration a refusal is recorded against.
+const (
+	// ruleAllowedHosts is a target the allow list does not cover.
+	ruleAllowedHosts = "forward.allowed_hosts"
+	// ruleSocksEnabled is a proxy on an agent that does not serve one.
+	ruleSocksEnabled = "forward.socks_enabled"
+)
 
-// refuse is the one message a denied non-loopback target gets. It names the
-// setting that would permit it, because an operator who genuinely wants this
-// should not have to find the knob by reading source.
-func (s *Service) refuse(host string) error {
+// refuse is the message a denied non-loopback target gets. It names the setting
+// that would permit it, because an operator who genuinely wants this should not
+// have to find the knob by reading source — and it names the setting that
+// applies to the connection in front of it, which for a proxied one is not
+// quite the same sentence.
+func (s *Service) refuse(c *call, host string) error {
+	if c.socks {
+		return status.Errorf(codes.PermissionDenied,
+			"this agent will not proxy to %q: it is not covered by forward.allowed_hosts in the agent configuration, which lists %s. An operator decides once which network this agent may reach, and a proxy works inside that",
+			host, describeAllowed(s.cfg.AllowedHosts))
+	}
 	return status.Errorf(codes.PermissionDenied,
 		"this agent only forwards to its own loopback interface, and %q is not on it. Forwarding elsewhere would let any caller reach this machine's whole network through the agent, so it is off unless an operator lists the host in forward.allowed_hosts in the agent configuration",
 		host)
+}
+
+// describeAllowed renders the allow list for a refusal.
+//
+// The refusal says what *is* permitted rather than only what is not, because
+// the caller of a proxy is choosing destinations one connection at a time and
+// "not that one" without "these ones" costs a round trip per guess.
+func describeAllowed(hosts []string) string {
+	if len(hosts) == 0 {
+		return "nothing"
+	}
+	return strings.Join(hosts, ", ")
 }

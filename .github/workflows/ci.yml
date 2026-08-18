@@ -22,11 +22,78 @@ jobs:
         with:
           fetch-depth: 0
       - uses: actions/setup-go@v6
+        id: go
         with:
           go-version-file: go.mod
           cache: true
+      # `make tools` is four `go install`s of exactly-pinned versions: 95s of
+      # compiling on this runner, 58s of it buf and 33s golangci-lint, on every
+      # run, to produce the same four binaries it produced last time. Nothing
+      # about it varies unless a pin does, so key a cache on the pins and let
+      # an unchanged set be restored instead of rebuilt: 3s to restore 145MB
+      # of binaries, and the job goes from 137s to 23s.
+      #
+      # `make tools-key` prints those pinned values, and fails if the Makefile
+      # has gained a pin it does not cover. That check is the point: a cache
+      # key that quietly stops changing is the one way this is worse than the
+      # 117 seconds, because it would serve the pre-bump binary to every run
+      # until a human noticed by hand.
+      - name: Compute the tooling cache key
+        id: tools
+        run: |
+          set -euo pipefail
+          pins="$(make tools-key)"
+          echo "$pins"
+          hash="$(printf '%s\n' "$pins" | shasum -a 256 | cut -c1-16)"
+          key="tools-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-$hash"
+          echo "$key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      # restore + save rather than actions/cache, so nothing is written back
+      # until the tools are both installed and verified: an entry holding a
+      # half-installed .tools/ would be handed to every later run on this key.
+      #
+      # No restore-keys. A prefix fallback is exactly the tempting mistake — it
+      # would restore the previous pins' binaries on the one run that must not
+      # be served from cache, the bump.
+      - uses: actions/cache/restore@v4
+        id: tools-cache
+        with:
+          path: .tools
+          key: ${{ steps.tools.outputs.key }}
       - name: Install tooling
+        if: steps.tools-cache.outputs.cache-hit != 'true'
         run: make tools
+      # Unconditional, and four execs with no compiling. It asks each binary
+      # what it is (`go version -m` reads the module version and the building
+      # toolchain out of the binary itself) rather than trusting the key that
+      # fetched it, so a restore that is stale, partial, or not a Go binary at
+      # all fails here instead of quietly deciding what `buf lint` accepts.
+      - name: Verify tooling matches the pins
+        run: make tools-verify
+      - uses: actions/cache/save@v4
+        if: success() && steps.tools-cache.outputs.cache-hit != 'true'
+        with:
+          path: .tools
+          key: ${{ steps.tools.outputs.key }}
+      # The step above is only as good as the checks in front of it, and a
+      # check that has quietly stopped firing is indistinguishable from one
+      # with nothing to report. This hands each of them the input it exists to
+      # reject — a pin the key would miss, an installed binary tools-verify
+      # does not look at, a partial restore, a binary left behind by a bump,
+      # one built for another machine — and fails if any of them accepts it.
+      # Two seconds, and it runs here rather than in `make check` because what
+      # it is protecting is this job's cache.
+      - name: Self-test the tooling gates
+        run: make tools-selftest
+      # The Lint job below downloads its own golangci-lint through the action
+      # instead of using .tools/, so its version is spelled out three times in
+      # this file with nothing holding it to GOLANGCI_VERSION. Bumping the pin
+      # moves the cache key, rebuilds .tools/, and changes what `make lint`
+      # runs — while the job that blocks the merge carries on with the old
+      # linter. `make check` runs this too, but not here, so this is the only
+      # place the two can be held together before a merge.
+      - name: Check CI's pins against the Makefile's
+        run: make check-ci-pins
       - name: Lint and format
         run: make proto-lint
       - name: Verify committed codegen is current
@@ -64,6 +131,32 @@ jobs:
       # macOS only.
       - run: go vet -tags integration ./... ./test/e2e/testdata/helpers
       - run: go test -race -count=1 ./...
+
+  # Every job above passes -race, and until this one existed, so did every
+  # other test run in CI. That is how #56 sat green on main: a test that failed
+  # 5/5 without the detector and passed 100% with it, because the detector's
+  # slowdown was what made its assertion true. Twelve green jobs reported
+  # nothing while `go test ./...` — the first command anyone runs locally, and
+  # the one the release workflow gates on before publishing — failed for
+  # everyone who ran it.
+  #
+  # One pass, on the x1 runner, in parallel with the 3m test matrix: it is the
+  # cheapest job in this file and it costs no wall clock.
+  test-norace:
+    name: Test (ubuntu-latest, no race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Unit tests without the race detector
+        run: |
+          if ! make test-norace; then
+            echo "::error title=Failed without -race::This job runs 'go test ./...' with no race detector. A failure here while the -race jobs are green is not a flake and not a reason to re-run: it means an assertion only holds when the detector slows the machine down, and 'go test ./...' is broken for everyone who runs it locally and for the release workflow. Fix the assumption about timing rather than relying on -race to make it true."
+            exit 1
+          fi
 
   integration:
     name: Integration (${{ matrix.os }})
@@ -106,50 +199,62 @@ jobs:
       # runners; only the linters were host-only, and cross-linting needs no
       # runner of that OS. Kept as three steps in one job rather than a matrix
       # so the required check stays named "Lint".
+      #
+      # The args mirror `make lint`, and for the reason CHECK_EXTRA_PKGS in the
+      # Makefile gives: the implicit `./...` a bare run uses skips everything
+      # under testdata, so test/e2e/testdata/helpers was outside this gate too.
+      # Naming any package at all replaces the implicit default, so `./...` has
+      # to be spelled out alongside it. The vet step above already does this.
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.6.2
+          args: ./... ./test/e2e/testdata/helpers
         env:
           GOOS: linux
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.6.2
+          args: ./... ./test/e2e/testdata/helpers
         env:
           GOOS: darwin
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.6.2
+          args: ./... ./test/e2e/testdata/helpers
         env:
           GOOS: windows
 
+  # One job looping the platforms, not a six-way matrix. The builds are ~20s
+  # each; the matrix paid a checkout and a setup-go — about 15s — six times to
+  # run them, and they never drove wall clock anyway because they finish long
+  # before the test jobs do. Six runners' worth of setup for two minutes of
+  # compiling.
+  #
+  # The platform list lives in the Makefile, so this is the same command a
+  # laptop runs, and it builds with the release ldflags rather than a bare
+  # build. build-agent-all attempts every platform and names all the failures
+  # together, which is what the matrix's fail-fast: false bought.
   cross-compile:
     name: Cross-compile agent
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        goos: [linux, darwin, windows]
-        goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build agent for ${{ matrix.goos }}/${{ matrix.goarch }}
+      - name: Build the agent for every supported platform
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go build -trimpath -o /dev/null ./cmd/fleet-agent
+        run: make build-agent-all
 
   installer:
     name: Shellcheck installers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Shellcheck install.sh
-        run: shellcheck --severity=warning install.sh
+      - name: Shellcheck the shell scripts
+        run: shellcheck --severity=warning install.sh scripts/tools-selftest.sh
       - name: Lint install.ps1
         shell: pwsh
         run: |

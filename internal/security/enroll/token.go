@@ -60,6 +60,25 @@ var (
 	ErrTokenIDAmbiguous = errors.New("enroll: that token id matches more than one token")
 )
 
+// isTokenRejection reports whether err is the store refusing a token, as
+// opposed to the store itself having failed.
+//
+// The distinction is what an operator is told. A refused token means "this
+// credential is no good, mint another"; an unreadable or unwritable store means
+// the control plane is broken and a second token will not help. Enrollment
+// reports the first as Unauthenticated and the second as Internal, and without
+// this a corrupt token store would send every enrolling host chasing its own
+// perfectly good token.
+//
+// Every sentinel above that means "not redeemable" belongs here. A new one that
+// does not is reported to operators as a control plane failure.
+func isTokenRejection(err error) bool {
+	return errors.Is(err, ErrTokenInvalid) ||
+		errors.Is(err, ErrTokenExpired) ||
+		errors.Is(err, ErrTokenUsed) ||
+		errors.Is(err, ErrTokenRevoked)
+}
+
 // TokenIDLength is how many hex characters of a token's stored hash identify it
 // to `fleetctl enroll list` and `fleetctl enroll revoke`.
 //
@@ -132,6 +151,22 @@ type TokenRecord struct {
 // Expired reports whether the token's TTL had elapsed as of now.
 func (r TokenRecord) Expired(now time.Time) bool { return now.After(r.ExpiresAt) }
 
+// clone returns a TokenRecord that shares no memory with r.
+//
+// Labels and Addresses are reference types, so the plain struct copy that
+// returning a record from the store amounts to hands the caller a live view of
+// the store's own entry. Two of the fields enrollment validates a request
+// against live in there — Addresses is one of them — and validating before
+// redeeming is only sound because nothing can change them between the two. That
+// is an invariant of what a token authorizes, so the store is what has to keep
+// it, rather than every caller that ever holds a record remembering not to
+// write through it.
+func (r TokenRecord) clone() TokenRecord {
+	r.Labels = copyLabels(r.Labels)
+	r.Addresses = append([]string(nil), r.Addresses...)
+	return r
+}
+
 // State renders the token's state as of now, in the vocabulary `fleetctl
 // enroll list` prints. It lives here rather than in the CLI so a token's state
 // has one definition and the order of the checks — revoked before used before
@@ -175,6 +210,21 @@ type tokenState struct {
 // Redeem marks a token used before returning success, under the same lock
 // that checked its validity, so two concurrent redemptions of the same token
 // can never both succeed.
+//
+// What a token authorizes is fixed at mint time and never rewritten: Name,
+// Labels, Addresses, IssuedAt and ExpiresAt are written once by Mint, and the
+// only fields any later operation touches are Used/UsedAt and
+// Revoked/RevokedAt. Enrollment relies on that. It validates a request against
+// the record [TokenStore.Inspect] returned and commits with Redeem afterwards,
+// which is only sound because the authorization it validated cannot have
+// changed in between — and because the fields that *can* change are exactly the
+// ones Redeem re-checks under the lock.
+//
+// Every record leaves the store as a deep copy, so that invariant is one the
+// store keeps rather than one every caller has to remember not to break: Labels
+// and Addresses are reference types, and handing out the entry's own would make
+// any holder of a record able to rewrite what a token authorizes — from another
+// goroutine, outside this lock, in the window enrollment validates in.
 type TokenStore struct {
 	mu   sync.Mutex
 	path string        // empty for a memory-only store
@@ -237,14 +287,15 @@ func (s *TokenStore) Mint(opts MintOptions) (string, TokenRecord, error) {
 	}
 	sum := sha256.Sum256([]byte(token))
 	entry := &tokenEntry{Hash: hex.EncodeToString(sum[:]), Record: rec}
-	rec.ID = entry.id()
+	out := entry.Record.clone()
+	out.ID = entry.id()
 
 	if err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
 		return append(entries, entry), true, nil
 	}); err != nil {
 		return "", TokenRecord{}, err
 	}
-	return token, rec, nil
+	return token, out, nil
 }
 
 // id returns the operator-facing identifier for this entry.
@@ -255,39 +306,115 @@ func (e *tokenEntry) id() string {
 	return e.Hash[:TokenIDLength]
 }
 
-// Redeem validates token and, if it is unexpired and unused, atomically
-// marks it used and returns the record that was minted with it. The mark
-// happens inside the same critical section as the validity check, so
-// concurrent callers redeeming the same token race for the lock, not for
-// the certificate: exactly one wins, and it wins before any signing begins.
-func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
+// redeemable finds the entry token names and reports why it could not be
+// redeemed as of now, or nil if it could be.
+//
+// It is the single definition of "redeemable", shared by [TokenStore.Inspect],
+// which only asks, and [TokenStore.Redeem], which asks and then marks. Two
+// copies of this would be two chances for the question enrollment validates
+// against and the question redemption commits against to drift apart, and a
+// token that passed one and failed the other is the whole defect the split
+// exists to fix.
+func redeemable(entries []*tokenEntry, token string, now time.Time) (*tokenEntry, error) {
 	sum := sha256.Sum256([]byte(token))
 	want := []byte(hex.EncodeToString(sum[:]))
+
+	for _, e := range entries {
+		if subtle.ConstantTimeCompare(want, []byte(e.Hash)) != 1 {
+			continue
+		}
+		switch {
+		case e.Record.Revoked:
+			return e, ErrTokenRevoked
+		case e.Record.Used:
+			return e, ErrTokenUsed
+		case e.Record.Expired(now):
+			return e, ErrTokenExpired
+		}
+		return e, nil
+	}
+	return nil, ErrTokenInvalid
+}
+
+// Inspect returns the record behind token if it could be redeemed right now,
+// without redeeming it.
+//
+// It is what lets enrollment check a request against the identity a token
+// authorizes before spending the token. Redemption used to be the first thing
+// [Service.Enroll] did, so a request refused afterwards for a mistyped address
+// or a name the CA will not sign had already burned the operator's single-use
+// secret, and the corrected retry then failed naming the token rather than the
+// mistake.
+//
+// The record is a copy: writing to its Labels or Addresses changes nothing
+// about what the token authorizes.
+//
+// The answer is advisory and may be stale the instant it is returned: another
+// enrollment may redeem the token, or the operator may revoke it. Redeem is the
+// authority. It re-asks, under the lock, everything asked here — that is what
+// keeps the window this opens a window in which two callers may both *validate*,
+// which is harmless, rather than one in which two may both redeem. Nothing may
+// treat a successful Inspect as a claim on the token.
+func (s *TokenStore) Inspect(token string) (TokenRecord, error) {
 	now := time.Now().UTC()
 
 	var (
 		out    TokenRecord
-		outErr = ErrTokenInvalid
+		outErr error
 	)
 	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
-		for _, e := range entries {
-			if subtle.ConstantTimeCompare(want, []byte(e.Hash)) != 1 {
-				continue
-			}
-			switch {
-			case e.Record.Revoked:
-				outErr = ErrTokenRevoked
-			case e.Record.Used:
-				outErr = ErrTokenUsed
-			case e.Record.Expired(now):
-				outErr = ErrTokenExpired
-			default:
-				e.Record.Used = true
-				e.Record.UsedAt = now
-				out, outErr = e.Record, nil
-				out.ID = e.id()
-			}
-			break
+		e, lookupErr := redeemable(entries, token, now)
+		outErr = lookupErr
+		if outErr == nil {
+			out = e.Record.clone()
+			out.ID = e.id()
+		}
+		// Nothing was spent, so fn reports no change. Inspect runs on every
+		// enrollment attempt, including the ones anyone on the network can
+		// start, and a read that asked for a write each time would hand them
+		// the control plane's disk and the lock `enroll mint` needs. (update
+		// still persists a pruning that dropped a long-spent entry, as it does
+		// for Redeem: that is bounded by the entries there are to drop, and one
+		// call drains them.)
+		return entries, false, nil
+	})
+	if err != nil {
+		return TokenRecord{}, err
+	}
+	if outErr != nil {
+		return TokenRecord{}, outErr
+	}
+	return out, nil
+}
+
+// Redeem validates token and, if it is unexpired and unused, atomically
+// marks it used and returns the record that was minted with it. The mark
+// happens inside the same critical section as the validity check, so
+// concurrent callers redeeming the same token race for the lock, not for
+// the certificate: exactly one wins, and it wins before anything irreversible
+// is done on its behalf.
+//
+// This is the compare-and-swap enrollment's replay protection rests on, and it
+// is the only thing that grants the right to proceed. It compares the stored
+// entry's state — revoked, used, expired — and swaps Used to true in the same
+// held lock, so the loser of a race observes the winner's mark and is refused
+// with ErrTokenUsed. A caller that inspected the token beforehand has claimed
+// nothing by doing so; it still has to win here.
+func (s *TokenStore) Redeem(token string) (TokenRecord, error) {
+	now := time.Now().UTC()
+
+	var (
+		out    TokenRecord
+		outErr error
+	)
+	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
+		e, lookupErr := redeemable(entries, token, now)
+		outErr = lookupErr
+		if outErr == nil {
+			e.Record.Used = true
+			e.Record.UsedAt = now
+			out = e.Record.clone()
+			out.ID = e.id()
 		}
 		// Only a redemption that actually spent a token changed anything. A
 		// token that matched nothing is the ordinary case for this endpoint —
@@ -312,7 +439,7 @@ func (s *TokenStore) List() ([]TokenRecord, error) {
 	err := s.update(func(entries []*tokenEntry) ([]*tokenEntry, bool, error) {
 		out = make([]TokenRecord, 0, len(entries))
 		for _, e := range entries {
-			rec := e.Record
+			rec := e.Record.clone()
 			rec.ID = e.id()
 			out = append(out, rec)
 		}
@@ -370,7 +497,7 @@ func (s *TokenStore) Revoke(id string) (TokenRecord, error) {
 		}
 		e.Record.Revoked = true
 		e.Record.RevokedAt = now
-		out = e.Record
+		out = e.Record.clone()
 		out.ID = e.id()
 		return entries, true, nil
 	})

@@ -33,6 +33,14 @@ import (
 //     turns a 30-second readiness budget into an indefinite one, and the
 //     StartProcess call the model is waiting on never returns.
 
+// probeIntervalFloor is the retry interval a probe falls back to when the one
+// it was handed is not a positive duration.
+//
+// It matches the agent's own default (supervisorConfig.probeInterval), because
+// the case it covers is a probe whose interval was never chosen by anybody: a
+// record hand-edited or corrupted into naming no interval at all.
+const probeIntervalFloor = 250 * time.Millisecond
+
 type probeKind int
 
 const (
@@ -164,7 +172,17 @@ func (p *probeSpec) persisted() *persistedProbe {
 // probeFromPersisted rebuilds a probe read off disk. A pattern that no longer
 // compiles — it cannot, unless the record was hand-edited — drops the probe
 // rather than failing the whole re-adoption.
-func probeFromPersisted(p *persistedProbe) *probeSpec {
+//
+// The defaults are applied to the timings for the same reason probeFromProto
+// applies them: a probe runs a ticker, and a ticker of zero panics. A record
+// that names a probe but no interval cannot be written by this agent, so it
+// arrives only from an edit or a corruption — and re-adoption is now the path
+// that runs it, on startup, on a goroutine whose panic takes the daemon with
+// it. An agent that dies while re-adopting comes back and re-adopts the same
+// record, so the failure mode is not one crash but a crash loop nothing on the
+// host can break. A number the operator did not choose is a far better answer
+// than that.
+func probeFromPersisted(p *persistedProbe, defTimeout, defInterval time.Duration) *probeSpec {
 	if p == nil {
 		return nil
 	}
@@ -175,6 +193,12 @@ func probeFromPersisted(p *persistedProbe) *probeSpec {
 		uptime:     time.Duration(p.UptimeMS) * time.Millisecond,
 		timeout:    time.Duration(p.TimeoutMS) * time.Millisecond,
 		interval:   time.Duration(p.IntervalMS) * time.Millisecond,
+	}
+	if spec.interval <= 0 {
+		spec.interval = defInterval
+	}
+	if spec.timeout <= 0 {
+		spec.timeout = defTimeout
 	}
 	switch p.Kind {
 	case "log_pattern":
@@ -232,22 +256,41 @@ func (e *probeTimeoutError) Error() string {
 // run blocks until the probe passes, the process exits, the timeout elapses, or
 // ctx is cancelled.
 //
+// fromSeq is the log sequence at which the run being probed begins. Everything
+// below it belongs to some earlier run of the same process and is not evidence
+// about this one; see the pre-scan below and record.runFirstSeq.
+//
 // ctx here is the caller's, not the supervisor's: a StartProcess whose client
 // disconnects stops waiting. It never stops the process, and the probe keeps
 // running on the supervisor's own goroutine — see supervisor.superviseProbe.
-func (p *probeSpec) run(ctx context.Context, r *record, httpTimeout, dialTimeout time.Duration) error {
+func (p *probeSpec) run(ctx context.Context, r *record, fromSeq uint64, httpTimeout, dialTimeout time.Duration) error {
 	started := time.Now()
 
 	// The subscription is taken before the first attempt, and it carries the
 	// lines already buffered. Subscribing after reading the buffer would leave
 	// a gap exactly wide enough to miss the "listening on :3000" that a fast
 	// process prints before the probe is set up.
+	//
+	// The pre-scan is bounded to this run because the buffer is not. A restart
+	// keeps the process's whole log history — that is what makes the output of
+	// the run that died readable afterwards — so an unbounded pre-scan matches
+	// the *previous* run's announcement and reports READY before the new run
+	// has printed a byte (#57). Under restart_policy: always that made
+	// readiness a latch: once satisfied, satisfied for every automatic restart
+	// of a service that was crash-looping.
+	//
+	// Only the pre-scan needs the bound. Everything arriving on the
+	// subscription was appended after the snapshot, which is after the mark,
+	// so it is this run's by construction.
 	var subCh <-chan delivery
 	if p.kind == probeLogPattern {
 		existing, sub := r.buf.snapshot()
 		defer r.buf.unsubscribe(sub)
 		for _, line := range existing {
-			if p.pattern.MatchString(line.Text) {
+			if line.Seq < fromSeq {
+				continue
+			}
+			if p.matches(line) {
 				return nil
 			}
 		}
@@ -256,7 +299,20 @@ func (p *probeSpec) run(ctx context.Context, r *record, httpTimeout, dialTimeout
 
 	timeout := time.NewTimer(p.timeout)
 	defer timeout.Stop()
-	ticker := time.NewTicker(p.interval)
+	// The floor is applied here, at the one call that panics on a bad value,
+	// rather than only where the value is chosen. Both constructors already
+	// refuse a non-positive interval — probeFromProto for a request, and
+	// probeFromPersisted for a record read off disk — so this is unreachable
+	// from either, and that is exactly why it is here: this goroutine runs on
+	// the startup path for every re-adopted process, and a panic on it takes
+	// the daemon down, after which the service manager restarts it, it re-reads
+	// the same record and it goes down again. Every other consequence of a bad
+	// interval is recoverable by an operator; this one is not.
+	interval := p.interval
+	if interval <= 0 {
+		interval = probeIntervalFloor
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -284,13 +340,30 @@ func (p *probeSpec) run(ctx context.Context, r *record, httpTimeout, dialTimeout
 				// The buffer closed: the record is being removed.
 				return fmt.Errorf("readiness probe (%s) stopped: the process record was removed", p.describe())
 			}
-			if p.pattern.MatchString(d.line.Text) {
+			if p.matches(d.line) {
 				return nil
 			}
 		case <-ticker.C:
 		case <-changed:
 		}
 	}
+}
+
+// matches reports whether a captured line is the announcement the probe is
+// waiting for.
+//
+// Only what the process itself said counts. The supervisor writes its own
+// decisions into the same log — restarts, backoff, giving up — tagged as
+// neither stdout nor stderr, and log_pattern is documented as matching a line
+// on stdout or stderr. Left in, they are not merely off-contract: the note the
+// supervisor writes when a probe gives up quotes the pattern that gave up, so a
+// probe resumed on that process afterwards would find its own failure in the
+// history and read it as success.
+func (p *probeSpec) matches(line logLine) bool {
+	if line.Stream == sandboxdv1.Stream_STREAM_UNSPECIFIED {
+		return false
+	}
+	return p.pattern.MatchString(line.Text)
 }
 
 // probeExit builds the error for a process that died mid-probe.
