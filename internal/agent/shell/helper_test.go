@@ -95,6 +95,14 @@ func helperMain(mode string, args []string) int {
 		fmt.Println("foreground-running")
 		return blockUntilKilled()
 
+	case "interrupt":
+		// Registers a handler for the interrupt, says it is ready, and says so
+		// again when one arrives. It exists for Windows, where an interrupt is
+		// a console control event raised by the pseudo-console rather than a
+		// signal from a line discipline, and where "the operator pressed
+		// Ctrl-C and the far end noticed" is otherwise unasserted.
+		return helperInterrupt()
+
 	case "ignore-hup":
 		// Ignores the hangup a closing terminal sends, so a test can prove the
 		// kill that follows it is what ends the session rather than the polite
@@ -183,6 +191,39 @@ func helperWinsize() int {
 		fmt.Printf("size %dx%d\n", columns, rows)
 	})
 	return 0
+}
+
+// interruptReady is what the interrupt helper prints once it is listening, and
+// interruptSeen once it has been interrupted.
+//
+// Both are printed by the program rather than typed at it, which is what makes
+// them assertable: a terminal echoes its input, so a session's output holds
+// everything sent to it and matching typed text would prove nothing.
+const (
+	interruptReady = "interrupt-listening"
+	interruptSeen  = "interrupt-received"
+)
+
+// helperInterrupt reports the interrupt it was sent.
+//
+// The handler is registered before the ready line, and the ready line is what
+// the test waits for: an interrupt that arrives before a process is listening
+// for one takes the process down instead, and a test that sent one anyway would
+// be asserting on a race.
+func helperInterrupt() int {
+	interrupted := make(chan os.Signal, 1)
+	signal.Notify(interrupted, os.Interrupt)
+	defer signal.Stop(interrupted)
+
+	fmt.Println(interruptReady)
+	select {
+	case <-interrupted:
+		fmt.Println(interruptSeen)
+		return 0
+	case <-time.After(2 * time.Minute):
+		fmt.Println("no interrupt arrived")
+		return 1
+	}
 }
 
 // floodExit is the status the flood helper exits with, chosen so that a test

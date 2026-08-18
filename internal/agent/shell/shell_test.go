@@ -196,6 +196,46 @@ func TestSession_InterruptByteReachesTheProgramRatherThanTheStream(t *testing.T)
 	assert.Equal(t, int32(4), exit.GetExitCode(), "the shell should have exited on its own, after the interrupt reached only the program it was running")
 }
 
+// TestSession_AnInterruptByteReachesAConsoleProgram is the Windows half of the
+// criterion above, and the platform where nothing else asserts it.
+//
+// The mechanics are not the Unix ones and the difference is the whole reason
+// this exists. There is no line discipline: the byte reaches the pseudo-console,
+// the console host raises a control event for the processes attached to it, and
+// a process started with CREATE_NEW_PROCESS_GROUP has Ctrl-C disabled and never
+// sees it. That flag is what
+// [platform.ProcessGroup.ConfigureInteractivePTYCommand] exists to leave off,
+// and the two configurations are identical on Unix — so a session started
+// through the supervised one instead is a change no Unix test can see and this
+// is the only thing that fails when it happens.
+func TestSession_AnInterruptByteReachesAConsoleProgram(t *testing.T) {
+	requirePTY(t)
+	if runtime.GOOS != "windows" {
+		t.Skip("a Unix session's interrupt is a SIGINT from the terminal's line discipline; TestSession_InterruptByteReachesTheProgramRatherThanTheStream covers it")
+	}
+
+	client := serve(t, newService(t, options{}))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sess, err := openSession(ctx, t, client, openOptions("interrupt"))
+	require.NoError(t, err)
+
+	// Only once the program is listening. An interrupt that arrives first ends
+	// it by default, and this test would then be asserting on a race.
+	sess.awaitOutput(interruptReady)
+
+	require.NoError(t, sess.typed("\x03"))
+	sess.awaitOutput(interruptSeen)
+
+	// And the session survived it: an interrupt is something that happens
+	// inside a session rather than something that ends one.
+	exit := sess.awaitEnd()
+	require.NotNil(t, exit)
+	assert.Equal(t, int32(0), exit.GetExitCode())
+	assert.False(t, exit.GetIdleTimeout())
+}
+
 // ------------------------------------------------------------- reaping
 
 // TestSession_IdleTimeoutReapsAnAbandonedSession covers the bound that stops a
