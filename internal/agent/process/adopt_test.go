@@ -729,6 +729,197 @@ func closeMidDrain(t *testing.T, seq int) (persistedOffset, captured int64) {
 	return p.CaptureOffsets[0], captured
 }
 
+// TestCaptureOffsetsAreWrittenBackWhileTheRunIsLive is #71.
+//
+// capture_offsets used to be written by the same persist as everything else,
+// which is exactly right for every other field on the record: they change on a
+// transition and are written by it. This one changes continuously while nothing
+// about the process changes at all, so a process that reached RUNNING and then
+// simply ran had [0, 0] on disk for the rest of its life while its tailer was
+// thousands of bytes into the file.
+//
+// The helper goes quiet after its last line rather than exiting, so the tailer
+// stops somewhere definite and "the record caught up" is an equality this test
+// can wait for rather than a race against a process that is still writing.
+func TestCaptureOffsetsAreWrittenBackWhileTheRunIsLive(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ts := newTestSupervisorIn(t, dir)
+
+	// The helper writes nothing until released, so the record the spawn and the
+	// RUNNING transition wrote is provably [0, 0] rather than probably: with a
+	// process that starts printing immediately, a tailer that got in before the
+	// RUNNING transition would have that transition record the offsets in
+	// passing, and this test would pass with no cadence at all.
+	marker := filepath.Join(t.TempDir(), "go-ahead")
+	r := ts.startHelper("offsets-while-live", "echo-batch", marker, "0", "50", "tick")
+
+	// Nothing is going to move the state machine again — the process is running
+	// and nothing has asked it to stop — so anything that reaches the record
+	// from here is the cadence and not a transition writing it in passing.
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, r.currentState())
+	require.Equal(t, [2]int64{}, readRecord(t, dir, r.id).CaptureOffsets,
+		"the spawn wrote the record before the process had produced anything")
+
+	writeMarker(t, marker, "go")
+	waitForLine(t, r, 20*time.Second, "tick 49")
+
+	waitFor(t, 20*time.Second, "the persisted capture offsets to catch up with the live tailer", func() bool {
+		live := liveOffsets(r)
+		return live[0] > 0 && readRecord(t, dir, r.id).CaptureOffsets == live
+	})
+}
+
+// TestAKilledAgentDoesNotHandOverAHistoryThatRepeatsItself is what #71 costs an
+// operator, driven the way it actually breaks.
+//
+// A stop rewrites every record on the way out, so the graceful path hides this
+// entirely: a record that was wrong for the whole life of a run still looks
+// right to the agent that reads it afterwards. The crash path is the one that
+// matters, and it is the one an operator is on when they go looking at the log.
+func TestAKilledAgentDoesNotHandOverAHistoryThatRepeatsItself(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Nothing is written until this test releases it, so the [0, 0] the spawn
+	// recorded cannot have been overwritten by the RUNNING transition catching
+	// a tailer that had already started reading.
+	marker := filepath.Join(t.TempDir(), "go-ahead")
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv:          helperArgv(t, "echo-batch", marker, "0", "50", "tick"),
+		name:          "no-duplicate-history",
+		env:           helperEnviron(),
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+	id, pid := r.id, int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+	require.Equal(t, [2]int64{}, readRecord(t, dir, id).CaptureOffsets)
+
+	writeMarker(t, marker, "go")
+	waitForLine(t, r, 20*time.Second, "tick 49")
+	require.Equal(t, 1, countLines(r, "tick 0"), "the agent that captured it read it once")
+
+	// The record has to have caught up before the copy, or what is handed over
+	// is a record that was never going to be right and this proves nothing.
+	waitFor(t, 20*time.Second, "the agent to write down how far it has read", func() bool {
+		live := liveOffsets(r)
+		return live[0] > 0 && readRecord(t, dir, id).CaptureOffsets == live
+	})
+
+	// The kill: the state directory as it stands, with the process still
+	// running and the agent given no chance to tidy anything up.
+	crashed := snapshotStateDir(t, dir)
+	require.True(t, pidAlive(pid), "the process has to survive the agent, or there is nothing to re-adopt")
+
+	second := newRawSupervisor(t, crashed)
+	adopted, ok := second.lookup(id)
+	require.True(t, ok, "the next agent has to know about the process at all")
+	require.Contains(t, adopted.status().GetAdoptionNote(), "re-adopted")
+
+	// Wait for the inherited tailer to reach the end of the capture it was
+	// handed, so that whatever it was going to replay, it has replayed. Without
+	// this the count below is taken before the duplicate could have arrived,
+	// and would pass whether or not the offsets were stale.
+	inherited, _ := rawPaths(mustStoreDir(t, second, id))
+	waitFor(t, 20*time.Second, "the re-adopted tailer to reach the end of the capture it inherited", func() bool {
+		info, err := os.Stat(inherited)
+		return err == nil && liveOffsets(adopted)[0] == info.Size()
+	})
+
+	require.Equal(t, 1, countLines(adopted, "tick 0"),
+		"a re-adopted process's history must not open with a duplicate of itself")
+	require.Equal(t, 1, countLines(adopted, "tick 49"),
+		"and must not repeat the rest of it either")
+}
+
+// TestAnAgentWithNoOffsetCadenceConfiguredStillStarts covers the guard rather
+// than the cadence: zero reaches time.NewTicker, which panics, and the ticker
+// is started on the path every agent takes at startup.
+func TestAnAgentWithNoOffsetCadenceConfiguredStillStarts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	cfg.captureOffsetInterval = 0
+
+	sup, err := newSupervisor(cfg, testPolicy(t, 16), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sup.Close() })
+	require.Equal(t, defaultCaptureOffsetInterval, sup.cfg.captureOffsetInterval)
+}
+
+// TestAQuietProcessDoesNotPayForTheOffsetCadence is the other half of #71's
+// trade.
+//
+// The cadence rewrites a record every interval for as long as the process is
+// producing output, and a fleet of idle dev servers is the deployment this
+// agent is for — so a tick that rewrote every record whether or not anything
+// had moved would fsync once per process per interval, for ever, to write down
+// a number that had not changed. A process that has gone quiet must cost
+// nothing.
+//
+// "Nothing" is asserted against ticks that demonstrably fired rather than
+// against a duration: a second, still-chatty process is watched until the
+// cadence has rewritten its record three times, and the quiet one's record is
+// compared either side of that.
+func TestAQuietProcessDoesNotPayForTheOffsetCadence(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ts := newTestSupervisorIn(t, dir)
+
+	marker := filepath.Join(t.TempDir(), "go-ahead")
+	quiet := ts.startHelper("gone-quiet", "echo-batch", marker, "0", "50", "tick")
+	noisy := ts.startHelper("still-talking", "echo", "100000", "5", "chatter", staysUp)
+	require.Equal(t, [2]int64{}, readRecord(t, dir, quiet.id).CaptureOffsets)
+
+	writeMarker(t, marker, "go")
+	waitForLine(t, quiet, 20*time.Second, "tick 49")
+	waitFor(t, 20*time.Second, "the quiet process's record to catch up with its tailer", func() bool {
+		live := liveOffsets(quiet)
+		return live[0] > 0 && readRecord(t, dir, quiet.id).CaptureOffsets == live
+	})
+	settled := recordWrittenAt(t, dir, quiet.id)
+
+	ticks, seen := 0, recordWrittenAt(t, dir, noisy.id)
+	waitFor(t, 60*time.Second, "three cadence ticks to rewrite the chatty process's record", func() bool {
+		if now := recordWrittenAt(t, dir, noisy.id); !now.Equal(seen) {
+			seen, ticks = now, ticks+1
+		}
+		return ticks >= 3
+	})
+
+	require.Equal(t, settled.UnixNano(), recordWrittenAt(t, dir, quiet.id).UnixNano(),
+		"the record of a process that had stopped producing output was rewritten by the cadence anyway")
+}
+
+// recordWrittenAt is when a process's record was last written. Every write of
+// it renames a freshly created file into place, so its modification time moves
+// on every write and on nothing else.
+func recordWrittenAt(t *testing.T, stateDir, id string) time.Time {
+	t.Helper()
+	info, err := os.Stat(filepath.Join(stateDir, "processes", id, recordFileName))
+	require.NoError(t, err)
+	return info.ModTime()
+}
+
+// liveOffsets is where the record's tailers have actually read to.
+func liveOffsets(r *record) [2]int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.currentOffsetsLocked()
+}
+
+// mustStoreDir is a process's own directory under a supervisor's state
+// directory.
+func mustStoreDir(t *testing.T, s *Supervisor, id string) string {
+	t.Helper()
+	dir, err := s.store.dir(id)
+	require.NoError(t, err)
+	return dir
+}
+
 // TestPIDReuseProducesOrphanedAndNoSignal is the test #15 exists for.
 //
 // The record names a pid that now belongs to an unrelated process. Adopting it

@@ -815,6 +815,7 @@ func testConfig(dir string) supervisorConfig {
 		tailPollMin:           2 * time.Millisecond,
 		tailPollMax:           20 * time.Millisecond,
 		drainWindow:           200 * time.Millisecond,
+		captureOffsetInterval: 100 * time.Millisecond,
 		probeTimeout:          2 * time.Second,
 		probeInterval:         20 * time.Millisecond,
 		httpProbeTimeout:      500 * time.Millisecond,

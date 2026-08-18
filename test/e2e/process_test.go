@@ -443,6 +443,25 @@ func TestSupervisedProcessSurvivesAndIsReadoptedAfterAnAgentCrash(t *testing.T) 
 	})
 	before := highestLineNumber(t, readLogs(t, s, started.Process.ProcessID).Logs)
 
+	// And wait for the agent to have written down how far it has read, because
+	// that is what the next one resumes from.
+	//
+	// capture_offsets used to be written only when something else about the
+	// process changed, so a process that simply ran had [0, 0] on disk for its
+	// whole life and the agent that inherited it re-read the capture from the
+	// beginning — handing an operator a history that opens with a duplicate of
+	// itself, at the moment they are trying to work out what happened and can
+	// least afford to distrust the log (#71). Waiting for the recorded position
+	// to cover the first line is what makes the count after the restart exact:
+	// a line wholly behind that position cannot be replayed by a capture that
+	// resumes from it.
+	firstLine := "before-and-after 1\n"
+	waitFor(t, 60*time.Second, "the agent to record how far it has read the capture", func() (bool, string) {
+		recorded := recordedCaptureOffset(t, a, started.Process.ProcessID)
+		return recorded >= int64(len(firstLine)),
+			fmt.Sprintf("recorded stdout offset is %d, want at least %d", recorded, len(firstLine))
+	})
+
 	// SIGKILL, not a drain: a supervised process must survive an agent that
 	// died, not only one that shut down politely.
 	a.kill()
@@ -493,6 +512,13 @@ func TestSupervisedProcessSurvivesAndIsReadoptedAfterAnAgentCrash(t *testing.T) 
 	after := readLogs(t, s, started.Process.ProcessID)
 	if !contains(after.Logs, "before-and-after 1") {
 		t.Fatalf("the logs from before the crash did not survive it:\n%s", after.Logs)
+	}
+
+	// ...once, and not twice. A capture resumed from a stale offset re-reads
+	// output the previous agent had already turned into log lines, so the
+	// inherited history opens with a duplicate of itself (#71).
+	if n := countRenderedLine(after.Logs, "before-and-after 1"); n != 1 {
+		t.Fatalf("the first line appears %d times in the re-adopted history, want exactly once:\n%s", n, after.Logs)
 	}
 
 	// ...and capture resumed rather than stopped, which is the half that a
@@ -682,6 +708,39 @@ func highestLineNumber(t *testing.T, logs string) int {
 		}
 	}
 	return highest
+}
+
+// recordedCaptureOffset is how far the agent has written down that it has read
+// a process's stdout capture. It is the field a re-adopting agent resumes from.
+func recordedCaptureOffset(t *testing.T, a *agent, processID string) int64 {
+	t.Helper()
+
+	record := readRecord(t, processRecordPath(t, a, processID))
+	offsets, ok := record["capture_offsets"].([]any)
+	if !ok || len(offsets) == 0 {
+		t.Fatalf("the record for %s has no capture_offsets: %v", processID, record)
+	}
+	stdout, ok := offsets[0].(float64)
+	if !ok {
+		t.Fatalf("capture_offsets[0] is %T rather than a number: %v", offsets[0], record)
+	}
+	return int64(stdout)
+}
+
+// countRenderedLine counts whole lines of rendered log output equal to text.
+//
+// Whole lines, because "before-and-after 1" is a prefix of "before-and-after
+// 10" and a substring count would report a duplicate that is not there — which
+// is the wrong answer in the direction that would make a broken agent look
+// fine.
+func countRenderedLine(logs, text string) int {
+	n := 0
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.TrimSpace(line) == text {
+			n++
+		}
+	}
+	return n
 }
 
 // processRecordPath is where the supervisor persisted one process's record.

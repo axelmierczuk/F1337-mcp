@@ -138,6 +138,28 @@ func helperMain() {
 		}
 		time.Sleep(durationArg(args, 4, 0))
 
+	case "echo-batch":
+		// echo-batch <markerPath> <first> <count> <text> — prints text 0 to
+		// first-1, waits for the marker, prints the rest, and stays up.
+		//
+		// The agent stamps a log line with the time it read it, so every line
+		// of a batch read in one go carries the same instant. A test that needs
+		// one line to have been read strictly before another therefore needs the
+		// agent to have read the first before the second was written, and no
+		// interval between the writes can arrange that on a runner that can
+		// starve a tailer for a second (#80). The marker can.
+		marker := argAt(args, 1, "")
+		first, _ := strconv.Atoi(argAt(args, 2, "1"))
+		count, _ := strconv.Atoi(argAt(args, 3, "2"))
+		text := argAt(args, 4, "item")
+		for i := range count {
+			if i == first {
+				awaitFile(marker)
+			}
+			fmt.Printf("%s %d\n", text, i)
+		}
+		time.Sleep(time.Hour)
+
 	case "spew":
 		// spew <count> [gapMs] [rounds] — count lines as fast as the pipe will
 		// take them, then exit. The backpressure test asserts this still exits
@@ -163,17 +185,33 @@ func helperMain() {
 		}
 
 	case "streams":
-		// streams <gapMs> <pairs> — interleaves stdout and stderr, leaving a gap
-		// between each write. The gap is the test's, not the helper's: the two
-		// streams are tailed by two goroutines, so the agent's read order only
-		// reproduces the write order for writes further apart than a poll.
-		gap := durationArg(args, 1, 250*time.Millisecond)
+		// streams <markerPrefix> <pairs> — interleaves stdout and stderr,
+		// waiting for the test's go-ahead before every write after the first.
+		//
+		// The two streams are separate files followed by separate goroutines,
+		// so the agent's read order reproduces the write order only for a write
+		// it had already read before the next one happened. This used to leave
+		// a 250ms gap between writes and take that as separation; a quarter of
+		// a second is not separation on a runner that can leave a tailer
+		// unscheduled for longer than that, which is #80. The marker makes it
+		// the handshake awaitFile describes instead: the test releases each
+		// write only once it has seen the previous line arrive, so the ordering
+		// its assertion rests on is a fact it established rather than a gap it
+		// hoped was wide enough.
+		prefix := argAt(args, 1, "")
 		pairs, _ := strconv.Atoi(argAt(args, 2, "2"))
+		step := 0
 		for i := range pairs {
-			fmt.Printf("out %d\n", i)
-			time.Sleep(gap)
-			fmt.Fprintf(os.Stderr, "err %d\n", i)
-			time.Sleep(gap)
+			for _, s := range []struct {
+				out  *os.File
+				name string
+			}{{os.Stdout, "out"}, {os.Stderr, "err"}} {
+				if step > 0 {
+					awaitFile(stepMarker(prefix, step))
+				}
+				fmt.Fprintf(s.out, "%s %d\n", s.name, i)
+				step++
+			}
 		}
 		time.Sleep(time.Hour)
 
@@ -352,6 +390,26 @@ func writeMarker(t *testing.T, path, contents string) {
 	require.NoError(t, fsutil.WriteAtomic(path, []byte(contents), 0o600))
 }
 
+// stepMarker names the file that releases a helper's nth write. The helper and
+// the test derive it the same way, so the two halves of a handshake cannot
+// drift out of step with each other.
+func stepMarker(prefix string, step int) string {
+	return fmt.Sprintf("%s%d", prefix, step)
+}
+
+// staysUp is the linger given to a helper that has to keep running after its
+// output is finished: an hour, in the milliseconds durationArg parses.
+//
+// It is not a margin anything waits on. No assertion in this suite waits
+// anywhere near that long, so it cannot make one pass by outlasting it, and the
+// supervisor's own cleanup is what stops the process — so it cannot leave one
+// behind either. What it buys is a run that is still live, which is a different
+// thing from a process that has finished writing: the tailers are bounded once
+// a process has been reaped (drain_window, so a grandchild that inherited the
+// capture file cannot hold the exit open), so a test that waits for a line
+// after the exit is waiting on that bound rather than on the line.
+const staysUp = "3600000"
+
 // awaitFile blocks until path exists. It is the helper's half of a handshake
 // with the test: the test decides when, and the helper's output is a
 // consequence of that decision rather than of a duration either side guessed.
@@ -461,9 +519,10 @@ func newTestSupervisorIn(t *testing.T, dir string, tweak ...func(*testSupervisor
 		defaultRestartBackoff: 20 * time.Millisecond,
 		maxRestartBackoff:     200 * time.Millisecond,
 
-		tailPollMin: 2 * time.Millisecond,
-		tailPollMax: 20 * time.Millisecond,
-		drainWindow: 200 * time.Millisecond,
+		tailPollMin:           2 * time.Millisecond,
+		tailPollMax:           20 * time.Millisecond,
+		drainWindow:           200 * time.Millisecond,
+		captureOffsetInterval: 100 * time.Millisecond,
 
 		probeTimeout:     2 * time.Second,
 		probeInterval:    20 * time.Millisecond,
