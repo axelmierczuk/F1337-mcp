@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -73,6 +74,19 @@ type Service struct {
 	// platforms this suite can run on behaves that way. See
 	// [sessionTerminal.release] for the teardown that depends on it.
 	openPTY func() (platform.PTY, error)
+
+	// active counts the sessions currently being carried, and drops only once
+	// the session's audit record has been written.
+	//
+	// It is here for the reason forward.Service's is: the audit record is
+	// written on the way out of Shell, grpc.Server.Stop does not wait for
+	// handlers, and Audit.Close documents that a later write reopens the file.
+	// A handler still unwinding when the log is closed therefore recreates it —
+	// which on Windows is a file a temp directory's RemoveAll cannot delete,
+	// and which surfaces as a cleanup failure in whichever test the scheduler
+	// picked rather than in the one that walked away from a live session. This
+	// is the only thing that says "every record is on disk".
+	active atomic.Int64
 }
 
 // New builds the shell service. It satisfies agent.Factory.
@@ -151,6 +165,13 @@ func (s *Service) Register(r grpc.ServiceRegistrar) {
 // path jail is wired in only on an agent with exec disabled, and such an agent
 // refuses this call outright. See docs/security.md.
 func (s *Service) Shell(stream grpc.BidiStreamingServer[sandboxdv1.ShellRequest, sandboxdv1.ShellResponse]) error {
+	s.active.Add(1)
+	// After finish, not before it: every return below writes the session's
+	// audit record on its way out, and the count exists to say when the last
+	// of those has landed. A deferred decrement runs after the return value —
+	// s.finish(...) — has been evaluated.
+	defer s.active.Add(-1)
+
 	ctx := stream.Context()
 	principal, _ := agent.PrincipalFromContext(ctx)
 	rec := sessionAudit{started: time.Now().UTC(), principal: principal}
