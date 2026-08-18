@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -351,6 +352,73 @@ func TestSession_OutputAloneKeepsAnIdleTimeoutAtBay(t *testing.T) {
 	}
 }
 
+// TestSession_TypingAloneKeepsAnIdleTimeoutAtBay is the other half of "either
+// direction", and the half the two tests above leave uncovered.
+//
+// TestSession_ActivityKeepsAnIdleTimeoutAtBay types *and* reads, so it holds
+// with the input half of the activity clock deleted — the echo alone keeps the
+// session alive through the output half. Deleting session.pumpInput's touch
+// therefore leaves this whole package green, which is exactly the shape round
+// three found on the output side and fixed there.
+//
+// The session that distinguishes them is one whose program answers nothing and
+// whose terminal does not echo, so that the only thing moving is what the
+// operator types: a password prompt, a full-screen editor with echo off, a
+// program being fed input it does not acknowledge. The assertion that the
+// output half could not have been what held it up is made rather than assumed —
+// see the marker below.
+func TestSession_TypingAloneKeepsAnIdleTimeoutAtBay(t *testing.T) {
+	requirePTY(t)
+
+	// Same margins, and for the same reason, as the two tests above: the
+	// assertion holds for any interval shorter than the timeout, so the gap
+	// between them only has to be wider than a round trip through a pty and a
+	// gRPC stream on a loaded machine.
+	const (
+		idle     = 2 * time.Second
+		interval = idle / 8
+		keepFor  = 2 * idle
+	)
+	// Distinctive, so that "the session did not echo it" is a fact about this
+	// session rather than about the alphabet.
+	const marker = "typed-and-never-echoed"
+
+	svc := newService(t, options{shell: agent.ShellConfig{IdleTimeout: agent.Duration(idle)}})
+	client := serve(t, svc)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	sess, err := openSession(ctx, t, client, openOptions("mute"))
+	require.NoError(t, err)
+	sess.awaitOutput(muteReady)
+
+	// Typing for twice the timeout, and reading nothing back.
+	deadline := time.Now().Add(keepFor)
+	for time.Now().Before(deadline) {
+		require.NoError(t, sess.typed(marker))
+		time.Sleep(interval)
+	}
+
+	select {
+	case <-sess.done:
+		t.Fatalf("the session was reaped while the operator was typing at it: %s", sess.state())
+	default:
+	}
+	// The half that keeps this test honest. If the far end echoed, the session
+	// carried output throughout and would have survived on the output half of
+	// the clock alone, which is the half already covered.
+	assert.NotContains(t, sess.printed(), marker,
+		"the session echoed what was typed at it, so its output is what kept the idle timeout at bay and this proves nothing about its input")
+
+	// A carriage return first, to end the line the loop above accumulated.
+	require.NoError(t, sess.typed("\r"))
+	require.NoError(t, sess.typedLine("quit"))
+	exit := sess.awaitEnd()
+	require.NotNil(t, exit)
+	assert.False(t, exit.GetIdleTimeout(), "a session that was typed at throughout was reaped as idle")
+	assert.Equal(t, int32(0), exit.GetExitCode())
+}
+
 // TestAwait_IdleIsMeasuredFromTheLastByteRatherThanFromTheStart is the same
 // property without a terminal, and it is the one that cannot go flaky: it
 // asserts a lower bound on when the reaping happened, and a lower bound can
@@ -445,6 +513,99 @@ func TestSession_ClosingTheStreamKillsTheWholeTree(t *testing.T) {
 	assert.Equal(t, policy.OutcomeCancelled, rec.Outcome)
 }
 
+// TestSession_ACommandThatExitsStillTakesItsChildrenWithIt is the same
+// guarantee on the one ending that never reaches [Service.reap].
+//
+// Every other test of the tree kill drives a session the agent ended — a
+// cancelled caller, an idle timeout — and those all go through reap, which
+// hangs the terminal up and kills the group. A command that exits on its own
+// goes through none of it: the only thing between it and a child it left
+// running is the sweep in run's own defer, and on Unix that is the only thing
+// at all, because ProcessGroup.Close signals nothing there. Deleting that
+// sweep left this package green.
+//
+// The assertion is on a pid the session's own command reported, so it is about
+// the process rather than about the agent's opinion of it.
+func TestSession_ACommandThatExitsStillTakesItsChildrenWithIt(t *testing.T) {
+	requirePTY(t)
+
+	svc := newService(t, options{})
+	client := serve(t, svc)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sess, err := openSession(ctx, t, client, openOptions("orphan"))
+	require.NoError(t, err)
+
+	var pids []int
+	waitFor(t, "the session's command to name the child it is leaving behind", func() (bool, string) {
+		pids = parsePIDs(t, sess.printed())
+		if len(pids) == 1 {
+			return true, ""
+		}
+		return false, "so far: " + sess.printed()
+	})
+	orphan := pids[0]
+
+	// Checked before the assertion below, because it is what makes it mean
+	// anything: a session the agent reaped would have gone through reap, and
+	// "the child is gone" would then say nothing about the sweep.
+	exit := sess.awaitEnd()
+	require.NotNil(t, exit)
+	require.False(t, exit.GetIdleTimeout(), "the session was reaped rather than ending when its command did")
+	require.Equal(t, int32(0), exit.GetExitCode(), "the session's command did not exit on its own")
+
+	waitFor(t, "pid "+strconv.Itoa(orphan)+" to be gone", func() (bool, string) {
+		if !processRunning(orphan) {
+			return true, ""
+		}
+		return false, "pid " + strconv.Itoa(orphan) + " outlived the session that started it; a command that exits by " +
+			"itself never reaches reap, so the deferred sweep is the only thing that kills what it left running"
+	})
+}
+
+// TestSession_AReapedSessionReportsTheSignalThatEndedIt covers the two lines
+// that turn a wait status into the record's signal and the stream's.
+//
+// ShellExit.signal and the audit record's signal are the exit status of a
+// session that did not exit — a reaped one is killed by the hangup its closing
+// terminal delivered, or by the kill behind it, and "exit code -1" is not an
+// answer an operator can act on. Deleting the call to terminatingSignal left
+// every test in this package green: the function has no caller anything
+// asserted on, which is the shape this branch has now shipped four times.
+//
+// Unix only, because there is nothing to assert anywhere else: Windows
+// terminates with an exit code and has no separate fact to recover, and
+// terminatingSignal says so and returns nothing there.
+func TestSession_AReapedSessionReportsTheSignalThatEndedIt(t *testing.T) {
+	requirePTY(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows terminates a process with an exit code; there is no signal for terminatingSignal to recover")
+	}
+
+	svc := newService(t, options{shell: agent.ShellConfig{IdleTimeout: agent.Duration(300 * time.Millisecond)}})
+	client := serve(t, svc)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sess, err := openSession(ctx, t, client, openOptions("sleep"))
+	require.NoError(t, err)
+
+	exit := sess.awaitEnd()
+	require.NotNil(t, exit)
+	require.True(t, exit.GetIdleTimeout(), "this session has to have been reaped; a command that exited on its own has no signal")
+
+	assert.True(t, exit.GetSignaled(),
+		"a session killed by its own teardown reported an exit code instead, so the operator is told it exited %d", exit.GetExitCode())
+	assert.True(t, strings.HasPrefix(exit.GetSignal(), "SIG"),
+		"the signal that ended the session is spelled %q; ShellExit.signal documents the SIGHUP form", exit.GetSignal())
+
+	// And the record says the same thing, because both are rendered from it.
+	rec := onlyRecord(t, svc)
+	assert.Equal(t, exit.GetSignal(), rec.Signal,
+		"the audit log and the client disagree about what ended the session")
+}
+
 // TestSession_AProgramThatIgnoresTheHangupIsStillKilled covers the second half
 // of the teardown.
 //
@@ -530,6 +691,47 @@ func TestSession_ATerminalIsNeverResizedAfterItIsClosed(t *testing.T) {
 	require.ErrorIs(t, err, errTerminalGone)
 	assert.Equal(t, int32(1), fake.resizes.Load(),
 		"a resize reached a terminal that had already been released; on Windows that is ResizePseudoConsole against a freed console")
+}
+
+// TestSession_ReleasingATerminalOnlySaysSoWhenSomethingWentWrong keeps a
+// diagnostic worth reading.
+//
+// Every Unix release reports an error and always will: the agent gives up its
+// copy of the child's end at startup — see platform.ReleasePTYChildEnd, which
+// is what lets a read of the terminal end when the session does — go-pty's
+// Close then closes both ends of the pair and joins what each one said, and the
+// second close of the child end is os.ErrClosed. So the teardown of every
+// session that worked perfectly was logging that the teardown went wrong, which
+// is how a line stops being read on the day it means something.
+func TestSession_ReleasingATerminalOnlySaysSoWhenSomethingWentWrong(t *testing.T) {
+	expected := &failingClosePTY{err: os.ErrClosed}
+	quiet := &syncBuffer{}
+	<-newSessionTerminal(expected, debugTo(quiet)).release()
+	assert.NotContains(t, quiet.String(), "releasing the session terminal",
+		"the release complained about the child end this agent closed on purpose, which is every session on every Unix")
+
+	// And a release that really did fail still says so.
+	broken := &failingClosePTY{err: errors.New("the console host could not be asked to flush")}
+	loud := &syncBuffer{}
+	<-newSessionTerminal(broken, debugTo(loud)).release()
+	assert.Contains(t, loud.String(), "releasing the session terminal",
+		"a terminal that could not be released was released silently")
+}
+
+// debugTo is a logger at the level the release reports on.
+func debugTo(w *syncBuffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// failingClosePTY is a terminal whose release reports err.
+type failingClosePTY struct {
+	countingPTY
+	err error
+}
+
+func (p *failingClosePTY) Close() error {
+	_ = p.countingPTY.Close()
+	return p.err
 }
 
 // TestSession_AResizeRacingTheCloseNeverReachesAFreedTerminal is the same
@@ -916,6 +1118,114 @@ type stallingPTY struct {
 
 func (p *stallingPTY) Close() error {
 	<-p.blocked
+	return p.PTY.Close()
+}
+
+// TestSession_ATerminalIsNeverReleasedWithNobodyReadingIt is the sixth ConPTY
+// lifetime hazard on this branch, and the one the fourth and fifth fixes do not
+// reach.
+//
+// Both of those are about a reader that stopped: a pump that gave up when a
+// send failed, and a pump parked inside gRPC because the client stopped
+// reading. Neither helps where the reader was never started. There is exactly
+// one such path out of [Service.run] — a ShellOpened that could not be
+// delivered, which is a caller hanging up in the window between its command
+// starting and the pumps beginning — and by then the session's command has run
+// and may have printed. Releasing that terminal on Windows is a
+// ClosePseudoConsole, which does not return until the console host's remaining
+// output has somewhere to go, so the release goroutine parks forever holding a
+// pseudo-console and its two pipes: one per occurrence, for the life of the
+// daemon, from a client that is no more exotic than a script with a loop in it.
+//
+// The terminal here is one whose close cannot finish until something reads it,
+// which is the only way to stage what a pseudo-console does on the platforms
+// that have no such thing — the same technique as the test above, aimed at the
+// path where there is nobody rather than at the path where there is somebody
+// stalled.
+func TestSession_ATerminalIsNeverReleasedWithNobodyReadingIt(t *testing.T) {
+	requirePTY(t)
+
+	// Registered first so it is released last, whichever way this test went: a
+	// release still waiting for a reader has a goroutine parked inside it.
+	bail := make(chan struct{})
+	t.Cleanup(func() { close(bail) })
+
+	var captured *drainRequiredPTY
+	svc := newService(t, options{openPTY: func() (platform.PTY, error) {
+		raw, err := platform.OpenPTY()
+		if err != nil {
+			return nil, err
+		}
+		// Written and read on this test's own goroutine: the handler below is
+		// called directly rather than served, so there is no second one.
+		captured = &drainRequiredPTY{
+			wrappedPTY: wrappedPTY{raw},
+			closing:    make(chan struct{}),
+			drained:    make(chan struct{}),
+			done:       make(chan struct{}),
+			bail:       bail,
+		}
+		return captured, nil
+	}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var rec sessionAudit
+	spec, err := svc.plan(openOptions("sleep"), &rec)
+	require.NoError(t, err)
+
+	stream := &refusingStream{ctx: ctx, sendFail: errors.New("the caller went away mid-handshake")}
+	require.Error(t, svc.run(ctx, stream, spec, &rec))
+	require.NotNil(t, captured, "the session never allocated a terminal, so this test would prove nothing")
+
+	waitFor(t, "the session's terminal to finish being released", func() (bool, string) {
+		if closedNow(captured.done) {
+			return true, ""
+		}
+		return false, "the release is still waiting for somebody to read the terminal it is closing; on Windows " +
+			"that is ClosePseudoConsole, and this goroutine holds the pseudo-console and its pipes until the daemon exits"
+	})
+}
+
+// drainRequiredPTY is a terminal whose release cannot finish until somebody
+// reads it — a pseudo-console, on the two platforms that do not have one.
+//
+// Everything except Read and Close is the real terminal's, so the session it
+// carries is a real session: a command runs on it and its process group is the
+// platform's.
+type drainRequiredPTY struct {
+	wrappedPTY
+
+	// closing is closed when the release begins, drained by the first read
+	// after that, and done when the release has finished. bail releases
+	// whichever of them is waiting when the test is over.
+	closing chan struct{}
+	drained chan struct{}
+	done    chan struct{}
+	bail    <-chan struct{}
+
+	once sync.Once
+}
+
+// Read reports nothing until the terminal is being released, and then reports
+// the hangup: a console host that has been asked to flush and has nothing left.
+func (p *drainRequiredPTY) Read([]byte) (int, error) {
+	select {
+	case <-p.closing:
+	case <-p.bail:
+	}
+	p.once.Do(func() { close(p.drained) })
+	return 0, io.EOF
+}
+
+func (p *drainRequiredPTY) Close() error {
+	defer close(p.done)
+	close(p.closing)
+	select {
+	case <-p.drained:
+	case <-p.bail:
+	}
 	return p.PTY.Close()
 }
 

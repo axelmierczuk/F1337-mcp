@@ -25,9 +25,10 @@
 //     field capable of holding a byte of the session. [Service.finish] is the
 //     only call to Audit.Write in the package, and it takes nothing else.
 //   - The code that touches session bytes is [session.pumpInput] and
-//     [session.pumpOutput]. Neither is given the audit log, the record, or
-//     anything derived from them; both hold a buffer whose scope is one loop
-//     iteration.
+//     [session.readTerminal], which is the loop [session.pumpOutput] and
+//     [session.drainTerminal] share. None of them is given the audit log, the
+//     record, or anything derived from them; each holds a buffer whose scope is
+//     one loop iteration.
 //   - Nothing in this package logs a buffer. Byte counts are volume rather
 //     than content and are safe to keep; the bytes themselves never reach a
 //     log line, at any level.

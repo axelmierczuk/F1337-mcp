@@ -93,6 +93,23 @@ func helperMain(mode string, args []string) int {
 		// keeps the idle timeout at bay.
 		return helperTick(args)
 
+	case "mute":
+		// Reads what is typed and prints nothing, with the terminal's own echo
+		// turned off. It is the mirror of tick, and the only arrangement in
+		// which the *input* half of the activity clock is what keeps the idle
+		// timeout at bay: a terminal echoes by default, so typing at any other
+		// helper produces output, and the output half would be what held the
+		// session up.
+		return helperMute()
+
+	case "orphan":
+		// Spawns a child in its own process group and then exits, leaving it
+		// running. It is what a shell that backgrounded a job and then exited
+		// leaves behind, and the only session ending on which Service.reap
+		// never runs — so the deferred sweep is the only thing that reaches
+		// what the command left.
+		return helperOrphan(args)
+
 	case "announce":
 		// Says it is running, then waits to be killed. It exists so a test can
 		// know that *this* program is the terminal's foreground process before
@@ -139,6 +156,73 @@ func helperTick(args []string) int {
 		fmt.Printf("tick %d\n", i)
 		time.Sleep(interval)
 	}
+	return 0
+}
+
+// muteReady is what the mute helper prints once its terminal has gone silent.
+// It is the only thing that helper ever prints.
+const muteReady = "mute-ready"
+
+// helperMute reads the terminal and answers nothing.
+//
+// Raw mode first, and that is the whole point of this helper rather than a
+// detail of it: a pseudo-terminal echoes what is written to it, so a session
+// being typed at is a session producing output, and a test meaning to prove
+// that *input* keeps a session alive would be proving it about the echo.
+// platform.MakeRaw is the same call `fleetctl shell` makes on the operator's
+// end, and it turns echo off on all three platforms.
+func helperMute() int {
+	state, err := platform.MakeRaw(os.Stdin.Fd())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mute: %v\n", err)
+		return 2
+	}
+	defer func() { _ = state.Restore() }()
+
+	fmt.Println(muteReady)
+
+	var line strings.Builder
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n > 0 {
+			switch buf[0] {
+			case '\n', '\r':
+				text := strings.TrimSpace(line.String())
+				line.Reset()
+				if text == "quit" {
+					return 0
+				}
+			default:
+				line.WriteByte(buf[0])
+			}
+		}
+		if err != nil {
+			return 0
+		}
+	}
+}
+
+// helperOrphan starts a child and exits, leaving it behind.
+//
+// The child gets no stdio, deliberately: a grandchild holding the session's
+// terminal open would keep the output pump alive past the command's exit, and
+// a test about what the teardown kills would be waiting on the drain instead.
+func helperOrphan(args []string) int {
+	if len(args) > 0 && args[0] == "child" {
+		return blockUntilKilled()
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return 1
+	}
+	child := exec.Command(self, "child") //nolint:gosec // the test binary re-running itself
+	child.Env = append(os.Environ(), helperEnvFor("orphan"))
+	if err := child.Start(); err != nil {
+		return 1
+	}
+	fmt.Printf("pid %d\n", child.Process.Pid)
 	return 0
 }
 

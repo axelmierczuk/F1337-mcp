@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -230,7 +231,15 @@ func (t *sessionTerminal) release() <-chan struct{} {
 		go func() {
 			defer close(t.released)
 			t.releaseErr = t.PTY.Close()
-			if t.releaseErr != nil {
+			// os.ErrClosed is not a failure here, it is the expected answer on
+			// Unix: the agent gave up its copy of the child's end at startup
+			// (see platform.ReleasePTYChildEnd), go-pty's Close closes both
+			// ends of the pair and joins what each one said, and the second
+			// close of the child end is the one that already happened. Logging
+			// it would put a line saying the teardown went wrong into every
+			// session that ended perfectly, which is how a diagnostic stops
+			// being read.
+			if t.releaseErr != nil && !errors.Is(t.releaseErr, os.ErrClosed) {
 				t.log.Debug("releasing the session terminal reported an error; the session is being torn down anyway",
 					"error", t.releaseErr)
 			}
@@ -379,6 +388,17 @@ func (s *Service) run(
 	sess.touch()
 
 	if err := sess.send.within(sendStall, opened(tty, cmd.Process.Pid, spec.command.Argv)); err != nil {
+		// The one path out of this handler on which a command has already run
+		// and nothing has ever read its terminal. The deferred release below
+		// is a ClosePseudoConsole on Windows, and that does not return until
+		// the console host's remaining output has somewhere to go — so a
+		// session that got as far as printing something and then lost its
+		// caller would park that release forever, holding a pseudo-console and
+		// its pipes for the life of the daemon. Every other path either has
+		// the output pump or has produced no output at all. See
+		// [session.drainTerminal].
+		go sess.drainTerminal()
+
 		rec.outcome, rec.failure = policy.OutcomeError, "the session could not be reported as open"
 		rec.duration = time.Since(started)
 		return err
@@ -556,8 +576,8 @@ func (s *Service) reap(sess *session, group *platform.ProcessGroup, waited <-cha
 //
 // It is given the stream and the terminal and nothing else: no audit record, no
 // logger that could be handed a buffer, no counter that would tempt anyone into
-// keeping a sample. See the package comment — this function and pumpOutput are
-// the only two in the package that touch what a session carries.
+// keeping a sample. See the package comment — this function and readTerminal
+// are the only two in the package that touch what a session carries.
 func (s *session) pumpInput(stream grpc.BidiStreamingServer[sandboxdv1.ShellRequest, sandboxdv1.ShellResponse]) {
 	for {
 		req, err := stream.Recv()
@@ -627,9 +647,26 @@ func (s *session) pumpInput(stream grpc.BidiStreamingServer[sandboxdv1.ShellRequ
 // nothing waits for the close; see [sessionTerminal.release]. Neither half is
 // redundant: without this one every dropped connection stops the drain, and
 // without that one a wedged client stops the teardown.
-func (s *session) pumpOutput() {
+func (s *session) pumpOutput() { s.readTerminal(true) }
+
+// drainTerminal reads the session's terminal and sends none of it.
+//
+// It is [session.pumpOutput] with the sending already given up, and it exists
+// for the one path out of [Service.run] that reaches the teardown without ever
+// having started the pump: a ShellOpened that could not be delivered. Releasing
+// a terminal nobody is reading is what the fourth and fifth ConPTY lifetime
+// bugs on this branch were, one call site at a time; this is the sixth site,
+// and the only one where the reader was never started rather than having
+// stopped.
+//
+// It ends the way the pump does, and for the same reason: the release its
+// caller is about to start is what ends the read.
+func (s *session) drainTerminal() { s.readTerminal(false) }
+
+// readTerminal is the loop both of them share, so that "keep reading" cannot
+// come to mean two different things in two places.
+func (s *session) readTerminal(sending bool) {
 	buf := make([]byte, readBuffer)
-	sending := true
 	for {
 		n, readErr := s.tty.Read(buf)
 		if n > 0 && sending {
@@ -637,7 +674,7 @@ func (s *session) pumpOutput() {
 			if err := s.send.within(sendStall, data(buf[:n])); err != nil {
 				// Nobody to send to any more — the stream is gone, or the exit
 				// has already been reported. Stop sending; keep reading. See
-				// the doc comment.
+				// pumpOutput's doc comment.
 				sending = false
 			}
 		}

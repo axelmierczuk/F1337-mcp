@@ -237,8 +237,9 @@ func TestShellSession_RestoresTheTerminalOnANormalExit(t *testing.T) {
 	assert.Equal(t, int32(1), term.restored.Load(), "the terminal has to be put back exactly once")
 	assert.Contains(t, term.rendered(), "a prompt, and then some output")
 
-	// The open is the first thing on the wire, and it carries the size: a
-	// session opened without one draws its first screen at 80x24 and reflows.
+	// The open is the first thing on the wire. What it carries is
+	// TestShellSession_OpensAtTheTerminalsOwnSize's subject; this only pins the
+	// order, which is the part the render loop above depends on.
 	first := stream.requests()[0]
 	require.NotNil(t, first.GetOpen())
 }
@@ -480,6 +481,39 @@ func TestShellSession_SendsTheInterruptByteRatherThanDying(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the session did not end when the far end reported its exit")
 	}
+}
+
+// TestShellSession_OpensAtTheTerminalsOwnSize covers the size the session
+// starts at, which is not the same fact as the resizes below.
+//
+// The agent applies the opening size before the command starts — shell.proto
+// says so, and it is what the shell's first prompt is drawn at and what a
+// program that reads its size once and never listens for a change keeps for the
+// rest of the session. It went unasserted anywhere: dropping it left both this
+// package and the end-to-end suite green, because the resize watcher's first
+// report supplies a size a moment later and every scenario saw the right one,
+// one redraw late. Two facts that look the same from outside and are not.
+func TestShellSession_OpensAtTheTerminalsOwnSize(t *testing.T) {
+	term := newFakeTerminal()
+	stream := newFakeStream()
+	sess, _ := newSession(term, stream)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	stream.responses <- exitResponse(0)
+	_, err := sess.run(ctx, cancel, &sandboxdv1.ShellOpen{})
+	require.NoError(t, err)
+
+	requests := stream.requests()
+	require.NotEmpty(t, requests)
+	open := requests[0].GetOpen()
+	require.NotNil(t, open, "the first message on the stream was not a ShellOpen")
+
+	assert.Equal(t, uint32(100), open.GetSize().GetColumns(),
+		"the session opened without the operator's terminal width, so the remote shell drew its first prompt at 80 columns")
+	assert.Equal(t, uint32(40), open.GetSize().GetRows(),
+		"the session opened without the operator's terminal height")
 }
 
 // TestShellSession_ForwardsResizes covers the message a full-screen program

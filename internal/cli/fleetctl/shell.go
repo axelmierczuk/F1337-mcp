@@ -132,12 +132,14 @@ func newShellCommand(io.Writer) *cobra.Command {
 				return fmt.Errorf("opening a shell on %s: %w", target.Name(), client.MapError(err))
 			}
 
+			// No size here: run fills it in from the terminal it is about to
+			// take over, which is both later and the only place a test can
+			// reach. See shellSession.run.
 			session := &shellSession{term: term, stream: stream, notes: cmd.ErrOrStderr()}
 			code, err := session.run(ctx, cancel, &sandboxdv1.ShellOpen{
 				Argv:       command,
 				WorkingDir: workingDir,
 				Env:        sessionEnv(env),
-				Size:       term.size(),
 			})
 			if err != nil {
 				return fmt.Errorf("shell on %s: %w", target.Name(), client.MapError(err))
@@ -304,6 +306,19 @@ func (s *shellSession) run(ctx context.Context, cancel context.CancelFunc, open 
 
 	stopSignals := s.watchSignals(cancel)
 	defer stopSignals()
+
+	// The window the session opens at, read here rather than by the caller.
+	//
+	// The agent applies it before the command starts, so it is what the shell's
+	// first prompt is drawn at and what a program that reads its size once and
+	// never listens for a change is stuck with. Reading it here is the last
+	// moment before the open goes out — a window resized while a TLS handshake
+	// was in flight is still caught — and it is the only place the terminal's
+	// own size and the message carrying it meet somewhere a test can drive. At
+	// the call site it was one line whose deletion nothing noticed: the resize
+	// watcher's first report supplies a size a moment later, so every scenario
+	// still saw the right one, one redraw late.
+	open.Size = s.term.size()
 
 	if err := s.send(&sandboxdv1.ShellRequest{
 		Event: &sandboxdv1.ShellRequest_Open{Open: open},
