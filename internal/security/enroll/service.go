@@ -132,11 +132,13 @@ type Service struct {
 // checks and marks in one held lock, so of any number of enrollments racing a
 // single token exactly one wins and the rest are refused as replays. What the
 // reorder opens is a window in which several callers may hold a successful
-// [TokenStore.Inspect] at once — and Inspect claims nothing, reserves nothing
-// and writes nothing, so all it means is that they will all go on to attempt
-// the swap that only one of them can win. The validation between the two reads
-// the request, the record and the CA's rules and writes nothing, so it cannot
-// interleave into a wrong answer either.
+// [TokenStore.Inspect] at once — and Inspect claims nothing and reserves
+// nothing, so all it means is that they will all go on to attempt the swap that
+// only one of them can win. (It is not a write-free call in the literal sense:
+// it can still persist a pruning that dropped a long-spent entry, as Redeem
+// does and for the same reason. It marks no live token.) The validation between
+// the two reads the request, the record and the CA's rules and writes nothing,
+// so it cannot interleave into a wrong answer either.
 //
 // The swap therefore has to happen before the fleet registry write, which is
 // the first irreversible step: the loser of a race must be refused without

@@ -578,6 +578,12 @@ func (n *mutableNames) remove(name string) {
 // No caller in this tree writes to one today, which is why this is about the
 // store's contract rather than a bug being fixed. A contract enrollment's
 // soundness rests on is the store's to keep.
+//
+// "Every entry point" is meant literally, and is checked that way: there are
+// five, and removing the copy from any one of them has to fail this. Revoke was
+// the one no assertion reached, because it needs a token of its own — a token
+// that has been redeemed cannot be revoked — and that is exactly how an exit
+// ends up covered by a claim rather than by a test.
 func TestTokenStore_RecordsItHandsOutShareNothingWithTheStore(t *testing.T) {
 	store := enroll.NewTokenStore()
 	authorized := []string{"10.0.0.5:8722"}
@@ -625,6 +631,41 @@ func TestTokenStore_RecordsItHandsOutShareNothingWithTheStore(t *testing.T) {
 	require.Len(t, after, 1)
 	assert.Equal(t, map[string]string{"role": "build"}, after[0].Labels)
 	assert.Equal(t, []string{"10.0.0.5:8722"}, after[0].Addresses)
+
+	// And the fifth entry point, on a token of its own.
+	_, spare, err := store.Mint(enroll.MintOptions{
+		Name:      "spare-box",
+		Labels:    map[string]string{"role": "spare"},
+		Addresses: []string{"10.0.0.6:8722"},
+	})
+	require.NoError(t, err)
+	withdrawn, err := store.Revoke(spare.ID)
+	require.NoError(t, err)
+	withdrawn.Labels["role"] = "tampered-through-revoke"
+	withdrawn.Addresses[0] = "evil.internal:8722"
+
+	// Read back by id rather than by position: a listing carrying two tokens
+	// answers about whichever one it is asked about, not whichever one is
+	// first.
+	listedAfterRevoke, err := store.List()
+	require.NoError(t, err)
+	revoked, ok := recordWithID(listedAfterRevoke, spare.ID)
+	require.True(t, ok, "the revoked token is still listed")
+	assert.Equal(t, map[string]string{"role": "spare"}, revoked.Labels,
+		"writing through the record Revoke handed out must not rewrite what the store holds")
+	assert.Equal(t, []string{"10.0.0.6:8722"}, revoked.Addresses,
+		"writing through the record Revoke handed out must not rewrite what the store holds")
+}
+
+// recordWithID picks one token out of a listing by the id `fleetctl enroll
+// list` prints.
+func recordWithID(records []enroll.TokenRecord, id string) (enroll.TokenRecord, bool) {
+	for _, rec := range records {
+		if rec.ID == id {
+			return rec, true
+		}
+	}
+	return enroll.TokenRecord{}, false
 }
 
 // hookedNames runs fn the first time the collision check is consulted, which is
