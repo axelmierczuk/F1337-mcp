@@ -784,10 +784,12 @@ func (m Model) applyDetail(msg detailMsg) Model {
 // waiting out a refresh period wondering whether the keystroke landed.
 func (m Model) applyAction(msg actionMsg) (Model, []Effect) {
 	if msg.err != nil {
-		m.status, m.statusAt = msg.what+": "+msg.err.Error(), m.now
+		// The reason goes through the same mapping the panes use, so a stop
+		// refused by an unreachable sandbox says what the fleet row says.
+		m.status, m.statusAt = msg.attempted+": "+probeDetail(msg.err), m.now
 		return m, nil
 	}
-	m.status, m.statusAt = msg.what, m.now
+	m.status, m.statusAt = msg.done, m.now
 	// An action's result is the one thing worth interrupting an in-flight
 	// fetch for: whatever it is about to report was read before the change.
 	m.procState.inFlight = false

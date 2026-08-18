@@ -136,12 +136,19 @@ type detailMsg struct {
 	err        error
 }
 
-// actionMsg reports what a mutating effect did. Failure is a status line
-// rather than an exit: an operator whose stop was refused needs to keep
-// looking at the fleet.
+// actionMsg reports what a mutating effect did. Failure is a status line rather
+// than an exit: an operator whose stop was refused needs to keep looking at the
+// fleet.
 type actionMsg struct {
-	what string
-	err  error
+	// done is what to say when it worked, in the past tense; attempted is what
+	// to put in front of the reason when it did not.
+	//
+	// Two strings rather than one, because one produced "stopped
+	// web-dev-server on alpha: permission denied" — a sentence that claims the
+	// stop happened and then denies it.
+	done      string
+	attempted string
+	err       error
 }
 
 // tickMsg drives every refresh decision and the relative clock. One timer, not

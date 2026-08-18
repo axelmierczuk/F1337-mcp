@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/axelmierczuk/fleet-mcp/internal/client"
 )
@@ -382,13 +384,23 @@ func TestActionsRefreshWhatTheyChanged(t *testing.T) {
 	t.Parallel()
 
 	m := demoModel(80, 24)
-	m, effects := m.Step(actionMsg{what: "stopped web-dev-server on alpha"})
+	m, effects := m.Step(actionMsg{done: "stopped web-dev-server on alpha", attempted: "stop web-dev-server on alpha"})
 	require.Equal(t, []EffectKind{EffectProcesses}, kinds(effects))
 	require.Equal(t, "stopped web-dev-server on alpha", m.status)
 
-	m, effects = m.Step(actionMsg{what: "stop web-dev-server on alpha", err: errors.New("permission denied")})
+	// And a failure says what was attempted rather than what was done: "stopped
+	// … : permission denied" claims the stop happened and then denies it.
+	m, effects = m.Step(actionMsg{
+		done:      "stopped web-dev-server on alpha",
+		attempted: "stop web-dev-server on alpha",
+		err:       status.Error(codes.PermissionDenied, "the agent said no"),
+	})
 	require.Empty(t, effects, "a failed action must not be retried by itself")
-	require.Contains(t, m.status, "permission denied")
+	require.True(t, strings.HasPrefix(m.status, "stop web-dev-server on alpha: "), m.status)
+	require.NotContains(t, m.status, "stopped", "the status claims the stop happened and then denies it")
+	// And the reason is in the shared vocabulary, the same as `fleetctl list`
+	// gives for the same refusal.
+	require.Contains(t, m.status, "permission denied by sandbox policy")
 }
 
 // TestToolchainsAreProbedOnlyWhenAskedFor: the probe is measurably slower, and
@@ -556,7 +568,7 @@ func TestAnActionInterruptsTheFetchItInvalidates(t *testing.T) {
 	m := demoModel(80, 24)
 	m.now = fixedNow
 	m.procState.inFlight = true
-	m, effects := m.Step(actionMsg{what: "stopped web-dev-server on alpha"})
+	m, effects := m.Step(actionMsg{done: "stopped web-dev-server on alpha"})
 	require.Equal(t, []EffectKind{EffectProcesses}, kinds(effects))
 	require.True(t, m.procState.inFlight, "the replacement fetch is not marked in flight")
 }

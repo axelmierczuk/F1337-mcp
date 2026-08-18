@@ -309,13 +309,18 @@ func (p *program) command(e Effect) tea.Cmd {
 	case EffectSignal:
 		return func() tea.Msg {
 			err := src.Signal(context.Background(), e.Sandbox, e.Address, e.ProcessID, e.Signal, e.Graceful)
-			return actionMsg{what: signalReport(e), err: err}
+			done, attempted := signalReport(e)
+			return actionMsg{done: done, attempted: attempted, err: err}
 		}
 
 	case EffectRestart:
 		return func() tea.Msg {
 			err := src.Restart(context.Background(), e.Sandbox, e.Address, e.ProcessID)
-			return actionMsg{what: fmt.Sprintf("restarted %s on %s", e.ProcessName, e.Sandbox), err: err}
+			return actionMsg{
+				done:      fmt.Sprintf("restarted %s on %s", e.ProcessName, e.Sandbox),
+				attempted: fmt.Sprintf("restart %s on %s", e.ProcessName, e.Sandbox),
+				err:       err,
+			}
 		}
 
 	case EffectOpenShell:
@@ -329,9 +334,13 @@ func (p *program) command(e Effect) tea.Cmd {
 	return nil
 }
 
-func signalReport(e Effect) string {
+// signalReport is what to say about a signal that worked, and about one that
+// did not.
+func signalReport(e Effect) (done, attempted string) {
 	if e.Graceful {
-		return fmt.Sprintf("stopped %s on %s", e.ProcessName, e.Sandbox)
+		return fmt.Sprintf("stopped %s on %s", e.ProcessName, e.Sandbox),
+			fmt.Sprintf("stop %s on %s", e.ProcessName, e.Sandbox)
 	}
-	return fmt.Sprintf("sent SIG%s to %s on %s", e.Signal, e.ProcessName, e.Sandbox)
+	return fmt.Sprintf("sent SIG%s to %s on %s", e.Signal, e.ProcessName, e.Sandbox),
+		fmt.Sprintf("send SIG%s to %s on %s", e.Signal, e.ProcessName, e.Sandbox)
 }
