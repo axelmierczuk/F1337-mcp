@@ -1,0 +1,24 @@
+ fleetctl tui               20 sandboxes  12 serving  4 degraded  4 unreachable 
+┌ fleet ──────────────────────────────────────────────────────────────── 7/20 ─┐
+│  NAME                         PLATFORM      AGENT      HEALTH      LAST SEEN │
+│● node-06                      linux/amd64   v0.4.1     serving     5s ago    │
+│● node-07                      linux/amd64   v0.4.1     serving     6s ago    │
+│● node-08                      linux/amd64   v0.4.1     serving     7s ago    │
+│● node-09                      linux/amd64   v0.4.1     degraded    8s ago    │
+│● node-10                      linux/amd64   v0.4.1     unreachable 9s ago    │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ processes ─────────────────────────────── node-07 ─┐┌ detail ────── node-07 ─┐
+│asking node-07…                                     ││sandbox   node-07       │
+│                                                    ││address   10.0.1.7:9443 │
+│                                                    ││health    serving       │
+│                                                    ││platform  linux/amd64   │
+│                                                    ││agent     v0.4.1        │
+│                                                    ││                        │
+└────────────────────────────────────────────────────┘└────────────────────────┘
+┌ logs ────────────────────────────────────────────────────────────────────────┐
+│no process selected                                                           │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ tab pane   r restart   x stop   S signal   ? help   q quit                     

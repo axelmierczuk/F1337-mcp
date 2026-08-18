@@ -100,6 +100,7 @@ func NewRootCommand(out io.Writer) *cobra.Command {
 		newSelectCommand(out),
 		newShellCommand(out),
 		newSocksCommand(out),
+		newTUICommand(out),
 		newVersionCommand(out),
 	)
 	return root

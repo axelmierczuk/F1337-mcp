@@ -102,7 +102,13 @@ func newShellCommand(io.Writer) *cobra.Command {
 				return err
 			}
 
-			pool, err := control.pool()
+			// A session reaches its sandbox through pool.Shell and never asks
+			// what the health cache thinks, so a background probe loop would
+			// be traffic nobody reads — for a command that stays open for as
+			// long as the operator holds the terminal, for hours of it. See
+			// oneShotHealthInterval; `fleetctl tui` is the one command on the
+			// other side of that.
+			pool, err := control.pool(oneShotHealthInterval)
 			if err != nil {
 				return err
 			}

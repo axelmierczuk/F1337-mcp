@@ -1,0 +1,9 @@
+ fleetctl tui                           
+┌ fleet ───────────────────────── 1/4 ─┐
+│  NAME                     HEALTH     │
+│● alpha                    serving    │
+│● beta-builder             degraded   │
+│● gamma                    unreachable│
+│● delta                    unknown    │
+└──────────────────────────────────────┘
+ ? help   q quit                        

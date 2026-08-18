@@ -169,6 +169,18 @@ func (p *Pool) DialCount() int64 {
 	return p.dialCount.Load()
 }
 
+// HealthInterval is how often each pooled channel's background loop re-probes
+// its sandbox, after Config's defaults have been applied.
+//
+// Like DialCount it exists for callers to assert with rather than to act on.
+// A one-shot command sets this to longer than the process lives and a watching
+// one sets it to what the operator asked for, and those are opposite
+// requirements built from the same struct — so which one a command got is
+// worth being able to check.
+func (p *Pool) HealthInterval() time.Duration {
+	return p.cfg.HealthInterval
+}
+
 // Close closes every pooled channel and stops every health loop, waiting
 // for them to exit before returning.
 func (p *Pool) Close() error {

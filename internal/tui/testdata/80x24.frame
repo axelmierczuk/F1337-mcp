@@ -1,0 +1,24 @@
+ fleetctl tui      4 sandboxes  1 serving  1 degraded  1 unreachable  1 unknown 
+┌ fleet ───────────────────────────────────────────────────────────────── 1/4 ─┐
+│  NAME                         PLATFORM      AGENT      HEALTH      LAST SEEN │
+│● alpha                        linux/amd64   v0.4.1     serving     3s ago    │
+│● beta-builder                 darwin/arm64  v0.4.1     degraded    40s ago   │
+│● gamma                        windows/amd64 v0.4.0     unreachable 2h ago    │
+│● delta                                                 unknown     never     │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ processes ───────────────────────────────── alpha ─┐┌ detail ──────── alpha ─┐
+│STATE      NAME                   PID    UPTIME  RST││sandbox   alpha         │
+│ready      web-dev-server         4211   12m4s   -  ││address   10.0.0.11:9443│
+│running    queue-worker           4300   3m10s   2  ││health    serving       │
+│crashed    fuzzer                 -      1h2m    5  ││platform  linux/amd64   │
+│orphaned   old-watcher            900    2d3h    -  ││agent     v0.4.1        │
+│                                                    ││… 10 more (↑↓)          │
+└────────────────────────────────────────────────────┘└────────────────────────┘
+┌ logs ─────────────────────────────────────────────────────── web-dev-server ─┐
+│--- 412 line(s) dropped: the process outran the log buffer ---                │
+│E| upstream timeout after 30s                                                 │
+│S| restarting under policy on_failure (attempt 2)                             │
+│GET / 200 4ms                                                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+ tab pane   r restart   x stop   S signal   ? help   q quit                     

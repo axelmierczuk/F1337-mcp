@@ -157,6 +157,7 @@ fleet_exec(argv=["go","test","./..."])          → exit 0
 fleetctl list                     # the fleet, with health
 fleetctl list --json              # the same, for scripting
 fleetctl info build-box           # one host in full: resources, roots, uptime
+fleetctl tui                      # watch the whole fleet at once
 fleetctl select build-box         # the host later commands act on
 fleetctl shell                    # an interactive shell on it
 fleetctl remove build-box         # deregister locally; the host is untouched
@@ -165,6 +166,42 @@ fleetctl version
 
 `--json` is available on every command that reports something, and is the
 supported interface for scripts — the tables are laid out for people.
+
+`tui` is the same data as `list` and `info`, kept on screen: every sandbox and
+its health, the supervised processes on the sandbox you are looking at, that
+process's output as it arrives, and the host's resources and allowed roots.
+Press `?` for the keys.
+
+```
+ fleetctl tui                        3 sandboxes  2 serving  1 unreachable
+┌ fleet ──────────────────────────────────────────────────────────────── 1/3 ─┐
+│  NAME             PLATFORM      AGENT   HEALTH      LAST SEEN               │
+│● build-box        linux/amd64   v0.3.0  serving     2s ago                  │
+│● gpu-01           linux/amd64   v0.3.0  serving     3s ago                  │
+│● laptop           darwin/arm64  v0.3.0  unreachable 2h ago                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌ processes ──────────────────────── build-box ─┐┌ detail ───── build-box ────┐
+│STATE    NAME             PID    UPTIME  RST   ││sandbox   build-box         │
+│ready    web-dev-server   4211   12m4s   -     ││health    serving           │
+│running  queue-worker     4300   3m10s   2     ││cpu       8 cores           │
+└───────────────────────────────────────────────┘└────────────────────────────┘
+┌ logs ──────────────────────────────────────────────────── web-dev-server ───┐
+│listening on :8080                                                           │
+│E| upstream timeout after 30s                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+ Stop "web-dev-server" on "build-box"? SIGTERM, then SIGKILL after 10s  [y/N]
+```
+
+Two things about it are deliberate. Every action that changes a sandbox asks
+first and names both the sandbox and the process, because a keystroke away from
+"signal every process on prod-db" is a different risk from typing that as a
+command. And health is the only thing refreshed for the whole fleet — in the
+background, in parallel, under a per-sandbox deadline — while processes, logs
+and host detail are fetched only for the sandbox you are looking at, so a
+hundred-machine fleet costs one machine's worth of traffic beyond health.
+
+It needs a terminal; `fleetctl list --json` is the scriptable view of the same
+data. `--refresh` sets how often health is re-probed (default 10s).
 
 `remove` is local only. The agent keeps running and keeps its certificate, so a
 removed sandbox can be re-registered without re-enrolling; to actually stop it
