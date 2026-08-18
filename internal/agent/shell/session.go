@@ -104,23 +104,93 @@ func dimension(requested uint32, fallback int) int {
 	}
 }
 
+// errTerminalGone is what an operation gets when the session's terminal has
+// already been released. It is not a failure of the session: the session is
+// over, and this is the race being refused rather than a symptom of one.
+var errTerminalGone = errors.New("shell: the session terminal has been closed")
+
+// sessionTerminal is the session's pseudo-terminal, with the two guards its
+// teardown needs.
+//
+// # It is closed exactly once
+//
+// A session is torn down by hanging the terminal up and then releasing it, and
+// on Unix the second close is harmless because go-pty guards it. The ConPTY
+// implementation does not: its Close calls ClosePseudoConsole unconditionally,
+// so a second one destroys a console object that is already gone and corrupts
+// the agent's own heap. CI found this as an 0xC0000374 with no stack, on the
+// first Windows run where a session got far enough to be reaped.
+//
+// # And it is never resized afterwards
+//
+// Closing once is not enough on its own, because the close is not the only
+// call that reaches the console object. go-pty's ConPTY Resize hands the
+// pseudo-console handle straight to ResizePseudoConsole, and by then
+// ClosePseudoConsole has freed what that names — the same use-after-free, one
+// call along, with a handle value Windows is free to have reissued to
+// something else in the meantime.
+//
+// It is reachable on an ordinary session rather than in theory.
+// [session.pumpInput] runs on its own goroutine and is deliberately not joined
+// before teardown — it is parked in Recv, and the only thing that unblocks it
+// is the handler returning — so a resize that arrives while a session is being
+// reaped is what a person dragging their window during a reconnect produces.
+//
+// Read and Write need no guard and deliberately do not take one. Both go to
+// the *os.File ends of the pair, whose descriptors the runtime reference-
+// counts: a read or write after the close reports a closed file rather than
+// touching a handle value that now names something else. Guarding them would
+// also be a liveness bug — a Write that blocks because the far end has stopped
+// reading its console would hold the lock the teardown needs.
+//
+// The pty is embedded rather than held in a field, and that is load-bearing:
+// Command is promoted, so the *go-pty* value is what ends up on the Cmd, and
+// go-pty's Start type-asserts it back to its own concrete type. A wrapper
+// passed in there would fail that assertion on both platforms. Override
+// nothing else here without checking that.
+type sessionTerminal struct {
+	platform.PTY
+
+	// mu orders a resize against the close that destroys the terminal: the
+	// resize takes it for reading, the close for writing, so the two can never
+	// overlap and a resize that lost the race sees closed rather than a freed
+	// handle.
+	mu     sync.RWMutex
+	closed bool
+
+	// closeOnce releases the terminal, exactly once however many paths reach
+	// it. See the type comment.
+	closeOnce func() error
+}
+
+func newSessionTerminal(p platform.PTY) *sessionTerminal {
+	return &sessionTerminal{PTY: p, closeOnce: sync.OnceValue(p.Close)}
+}
+
+// Resize applies a new window size, unless the terminal has already gone.
+func (t *sessionTerminal) Resize(columns, rows int) error {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.closed {
+		return errTerminalGone
+	}
+	return t.PTY.Resize(columns, rows)
+}
+
+// Close hangs the terminal up and shuts the door behind it.
+func (t *sessionTerminal) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closed = true
+	return t.closeOnce()
+}
+
 // session is one running terminal: the pseudo-terminal, the stream it is
 // carried on, and the activity clock the idle timeout reads.
 type session struct {
 	svc  *Service
-	tty  platform.PTY
+	tty  *sessionTerminal
 	send *sender
-
-	// closeTTY closes the terminal, exactly once however many paths reach it.
-	//
-	// Once is not a nicety. A session is torn down by hanging the terminal up
-	// and then releasing it, and on Unix the second close is harmless because
-	// go-pty guards it. The ConPTY implementation does not: its Close calls
-	// ClosePseudoConsole unconditionally, so a second one destroys a console
-	// object that is already gone and corrupts the agent's own heap. CI found
-	// this as an 0xC0000374 with no stack, on the first Windows run where a
-	// session got far enough to be reaped.
-	closeTTY func() error
 
 	// activity is when a byte last moved in either direction, in Unix
 	// nanoseconds.
@@ -151,7 +221,7 @@ func (s *Service) run(
 	spec sessionSpec,
 	rec *sessionAudit,
 ) error {
-	tty, err := platform.OpenPTY()
+	raw, err := platform.OpenPTY()
 	if err != nil {
 		rec.outcome, rec.failure = policy.OutcomeError, "this host could not allocate a pseudo-terminal"
 		if errors.Is(err, platform.ErrUnsupported) {
@@ -161,9 +231,10 @@ func (s *Service) run(
 	}
 	// Closed on every path out, and it is not only cleanup: on Unix this is the
 	// terminal hanging up, which is what tells the far end the session ended.
-	// Once, and through the same guard the teardown uses — see session.closeTTY.
-	closeTTY := sync.OnceValue(tty.Close)
-	defer func() { _ = closeTTY() }()
+	// Once, and through the same guard the teardown and the input pump use —
+	// see sessionTerminal.
+	tty := newSessionTerminal(raw)
+	defer func() { _ = tty.Close() }()
 
 	// Before the command starts, so the shell's first prompt is drawn at the
 	// operator's real width rather than at 80 columns and then reflowed.
@@ -222,12 +293,24 @@ func (s *Service) run(
 	// After Start, never before: this is the agent giving up its own copy of
 	// the child's end of the terminal, which is what lets a read of the
 	// terminal end when the session does. See platform.ReleasePTYChildEnd.
-	if err := platform.ReleasePTYChildEnd(tty); err != nil {
+	if err := platform.ReleasePTYChildEnd(raw); err != nil {
 		s.log.Warn("could not release the agent's copy of the session terminal; the session's last output may be delayed",
 			"error", err)
 	}
 
-	sess := &session{svc: s, tty: tty, send: newSender(stream), closeTTY: closeTTY}
+	// Wait on its own goroutine, so this handler is never stuck behind a
+	// process that will not exit. The channel is buffered so that goroutine can
+	// finish after this function has returned.
+	//
+	// Started here rather than beside the pumps below, and that is the fix to a
+	// leak rather than a tidying: everything between Start and the pumps can
+	// return, and a child this handler walks away from without ever waiting on
+	// is a zombie for the life of the daemon. The teardown below kills it, and
+	// this is what reaps it afterwards.
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	sess := &session{svc: s, tty: tty, send: newSender(stream)}
 	sess.touch()
 
 	if err := sess.send.within(sendStall, opened(tty, cmd.Process.Pid, spec.command.Argv)); err != nil {
@@ -236,24 +319,30 @@ func (s *Service) run(
 		return err
 	}
 
-	// Both pumps are started and neither is joined. The output pump ends when
-	// the terminal is closed, which the defer above guarantees; the input pump
-	// is parked in Recv, and what ends it is this handler returning — gRPC
-	// cancels the stream when it does, which is the only thing that can unblock
-	// a receive from a client that is simply sitting there. Waiting for it here
-	// would be waiting for the thing this return causes.
+	// Both pumps are started and neither is joined.
+	//
+	// The input pump is parked in Recv, and what ends it is this handler
+	// returning — gRPC cancels the stream when it does, which is the only thing
+	// that can unblock a receive from a client that is simply sitting there.
+	// Waiting for it here would be waiting for the thing this return causes.
+	//
+	// The output pump ends when the last writer of the child's end of the
+	// terminal is gone, which is what the teardown below is for. Closing the
+	// terminal is *not* what ends it, tempting as that reading is: go-pty opens
+	// the master in blocking mode, so a read already in flight sits in the
+	// syscall and the runtime cannot interrupt it — the close is deferred until
+	// the read returns rather than the other way round. What returns it is the
+	// slave losing its last writer: the hangup, then the group kill. A process
+	// that deliberately escaped the group with setsid and kept the terminal
+	// open therefore keeps this pump alive with it, which is the same
+	// "detached is detached" property docs/security.md documents for the tree
+	// itself.
 	go sess.pumpInput(stream)
 	outputDone := make(chan struct{})
 	go func() {
 		defer close(outputDone)
 		sess.pumpOutput()
 	}()
-
-	// Wait on its own goroutine, so this handler is never stuck behind a
-	// process that will not exit. The channel is buffered so that goroutine can
-	// finish after this function has returned.
-	waited := make(chan error, 1)
-	go func() { waited <- cmd.Wait() }()
 
 	reason, reaped := s.await(ctx, sess, waited)
 	if reason != endExited {
@@ -360,7 +449,7 @@ func (s *Service) await(ctx context.Context, sess *session, waited <-chan error)
 // survives, exactly as it does over ssh. That is a property of what they asked
 // for rather than a gap in this teardown.
 func (s *Service) reap(sess *session, group *platform.ProcessGroup, waited <-chan error) bool {
-	if err := sess.closeTTY(); err != nil {
+	if err := sess.tty.Close(); err != nil {
 		s.log.Debug("closing the session terminal reported an error; the session is being killed anyway", "error", err)
 	}
 

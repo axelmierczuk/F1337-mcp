@@ -217,7 +217,56 @@ type shellSession struct {
 	// restore puts the terminal back, exactly once, from whichever of the four
 	// exit paths reaches it first. See run.
 	restore *restoreGuard
+
+	// sendMu serialises everything this session puts on the stream, and
+	// sendClosed remembers the half-close so nothing follows it.
+	//
+	// gRPC is explicit that one goroutine may send while another receives, and
+	// that two may not send: "it is not safe to call SendMsg on the same
+	// stream in different goroutines. It is also not safe to call CloseSend
+	// concurrently with SendMsg." This session has two senders — the input
+	// pump on every keystroke and the resize watcher on every SIGWINCH — plus
+	// the half-close the input pump issues when stdin ends. A resize while the
+	// operator is typing is not an edge case; it is what dragging a window
+	// corner during a build does, and the CloseSend half of it is a plain data
+	// race on the stream's own end-of-send flag.
+	//
+	// A plain mutex, unlike the agent's deadline-carrying equivalent: nothing
+	// here is on a path that has to make progress. A send parked because the
+	// far end stopped reading is unparked when the stream tears down, and the
+	// only thing waiting behind it is a resize nobody is holding their breath
+	// for. The agent's sender needs a deadline because the handler's own exit
+	// message queues behind the output pump.
+	sendMu     sync.Mutex
+	sendClosed bool
 }
+
+// send puts one message on the stream. See shellSession.sendMu.
+func (s *shellSession) send(req *sandboxdv1.ShellRequest) error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.sendClosed {
+		// The write half is already shut. gRPC answers this with an internal
+		// error about SendMsg after CloseSend, which describes the client
+		// rather than the session; there is simply nothing left to send on.
+		return errSendClosed
+	}
+	return s.stream.Send(req)
+}
+
+// closeSend tells the far end that no more input is coming.
+func (s *shellSession) closeSend() error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.sendClosed {
+		return nil
+	}
+	s.sendClosed = true
+	return s.stream.CloseSend()
+}
+
+// errSendClosed is what a resize gets when it arrives after stdin has ended.
+var errSendClosed = errors.New("the session's write half is closed")
 
 // run carries the session and returns the exit code the CLI should use.
 //
@@ -250,7 +299,7 @@ func (s *shellSession) run(ctx context.Context, cancel context.CancelFunc, open 
 	stopSignals := s.watchSignals(cancel)
 	defer stopSignals()
 
-	if err := s.stream.Send(&sandboxdv1.ShellRequest{
+	if err := s.send(&sandboxdv1.ShellRequest{
 		Event: &sandboxdv1.ShellRequest_Open{Open: open},
 	}); err != nil {
 		return 0, err
@@ -333,7 +382,7 @@ func (s *shellSession) pumpInput() {
 	for {
 		n, err := s.term.Read(buf)
 		if n > 0 {
-			if sendErr := s.stream.Send(&sandboxdv1.ShellRequest{
+			if sendErr := s.send(&sandboxdv1.ShellRequest{
 				Event: &sandboxdv1.ShellRequest_Data{Data: buf[:n]},
 			}); sendErr != nil {
 				return
@@ -344,7 +393,7 @@ func (s *shellSession) pumpInput() {
 			// The session is not: a command still running still has output to
 			// deliver, so the write half is closed and the read half is left
 			// alone.
-			_ = s.stream.CloseSend()
+			_ = s.closeSend()
 			return
 		}
 	}
@@ -361,7 +410,7 @@ func (s *shellSession) pumpResizes(ctx context.Context) {
 	defer s.guardPanic()
 
 	s.term.watch(ctx, func(columns, rows int) {
-		if err := s.stream.Send(&sandboxdv1.ShellRequest{
+		if err := s.send(&sandboxdv1.ShellRequest{
 			Event: &sandboxdv1.ShellRequest_Resize{Resize: &sandboxdv1.ShellSize{
 				Columns: uint32(columns), //nolint:gosec // bounded by the terminal's own dimensions, which are 16-bit
 				Rows:    uint32(rows),    //nolint:gosec // as above

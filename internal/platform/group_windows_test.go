@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aymanbagabas/go-pty"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 
 	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
@@ -515,4 +517,41 @@ func terminatePID(pid int) {
 	if p, err := os.FindProcess(pid); err == nil {
 		_ = p.Kill()
 	}
+}
+
+// TestConfigureInteractivePTYCommand_LeavesCtrlCDeliverable pins the one thing
+// that makes an interrupt work at all in a Windows session.
+//
+// CREATE_NEW_PROCESS_GROUP is what Configure sets, and its documented effect is
+// that "CTRL+C signals will be disabled for all processes within the new
+// process group". That is the right trade for a supervised background process,
+// where the agent aims a CTRL_BREAK_EVENT at the child and must not hit itself.
+// It is exactly wrong for a session: the operator's Ctrl-C arrives as byte 0x03
+// on the pseudo-console, the console host raises a control event for whatever
+// is attached, and a shell started with Ctrl-C disabled ignores it. The
+// operator presses Ctrl-C and nothing happens on the far end.
+//
+// Nothing is lost by omitting it — the job object is what makes the tree
+// killable, and this service never sends a console control event of its own —
+// so the assertion is that the interactive form leaves the flag alone while the
+// supervised form still sets it. Without this, the difference between the two
+// is a comment, and the failure it prevents is invisible on any other platform.
+func TestConfigureInteractivePTYCommand_LeavesCtrlCDeliverable(t *testing.T) {
+	t.Parallel()
+
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = group.Close() })
+
+	supervised := &pty.Cmd{Path: "cmd.exe", Args: []string{"cmd.exe"}}
+	group.ConfigurePTYCommand(supervised)
+	require.NotNil(t, supervised.SysProcAttr)
+	require.NotZero(t, supervised.SysProcAttr.CreationFlags&windows.CREATE_NEW_PROCESS_GROUP,
+		"a supervised child still needs its own console process group, or CTRL_BREAK cannot be aimed at it")
+
+	interactive := &pty.Cmd{Path: "cmd.exe", Args: []string{"cmd.exe"}}
+	group.ConfigureInteractivePTYCommand(interactive)
+	require.NotNil(t, interactive.SysProcAttr)
+	require.Zero(t, interactive.SysProcAttr.CreationFlags&windows.CREATE_NEW_PROCESS_GROUP,
+		"an interactive session's command was started with Ctrl-C disabled; the operator's interrupt would reach the far end and do nothing")
 }

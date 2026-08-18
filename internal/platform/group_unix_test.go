@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aymanbagabas/go-pty"
 	"github.com/stretchr/testify/require"
 
 	"github.com/axelmierczuk/fleet-mcp/internal/platform"
@@ -417,4 +418,31 @@ func TestProcessGroup_ClosedGroupRefusesSignals(t *testing.T) {
 	// Close on Unix must not kill anything: a supervised process is meant to
 	// outlive the agent, and Close is what the agent does on the way out.
 	requireAlive(t, cmd.Process.Pid)
+}
+
+// TestConfigureInteractivePTYCommand_StillLeadsItsOwnSession pins the Unix
+// half of the split `fleetctl shell` needs.
+//
+// The two configurations differ only on Windows, where the console process
+// group flag that makes an agent-sent CTRL_BREAK aimable is the same flag that
+// stops a typed Ctrl-C being delivered at all. On Unix there is nothing to give
+// up: the child leads its own session with the pty as its controlling terminal,
+// the line discipline turns 0x03 into a SIGINT for the foreground group, and
+// the session's group is what a kill reaches. This asserts the interactive form
+// still asks for all of that, so a future Windows-shaped change to it cannot
+// quietly cost a Unix session its process group — which is what "closing the
+// stream kills the whole tree" rests on.
+func TestConfigureInteractivePTYCommand_StillLeadsItsOwnSession(t *testing.T) {
+	t.Parallel()
+
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = group.Close() })
+
+	cmd := &pty.Cmd{Path: "/bin/sh", Args: []string{"/bin/sh"}}
+	group.ConfigureInteractivePTYCommand(cmd)
+
+	require.NotNil(t, cmd.SysProcAttr)
+	require.True(t, cmd.SysProcAttr.Setsid,
+		"an interactive session's command must still lead its own session, or nothing can kill its tree")
 }

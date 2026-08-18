@@ -2,6 +2,8 @@ package shell
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"regexp"
@@ -13,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	gopty "github.com/aymanbagabas/go-pty"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -400,25 +404,222 @@ func TestSession_AProgramThatIgnoresTheHangupIsStillKilled(t *testing.T) {
 // which is the worst shape a bug can arrive in — so the guard gets a test that
 // names it rather than a comment alone.
 func TestSession_TheTerminalIsClosedExactlyOnce(t *testing.T) {
-	var closes atomic.Int32
-	closeTTY := sync.OnceValue(func() error {
-		closes.Add(1)
-		return nil
-	})
-	sess := &session{closeTTY: closeTTY}
+	fake := &countingPTY{}
+	tty := newSessionTerminal(fake)
 
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = sess.closeTTY()
+			_ = tty.Close()
 		}()
 	}
 	wg.Wait()
 
-	assert.Equal(t, int32(1), closes.Load(),
+	assert.Equal(t, int32(1), fake.closes.Load(),
 		"the terminal was closed more than once; on Windows the second one takes the agent's heap with it")
+}
+
+// TestSession_ATerminalIsNeverResizedAfterItIsClosed pins the other half of
+// the same hazard, and the half a close guard alone does not cover.
+//
+// Closing a pseudo-console frees it; go-pty's ConPTY Resize then hands that
+// freed handle to ResizePseudoConsole, which is the same use-after-free one
+// call along — and worse, because Windows reissues handle values, so the
+// number can by then name an object something else owns. The input pump is not
+// joined before teardown, so a resize arriving while a session is being reaped
+// is what a person dragging their window during a reconnect produces rather
+// than a thought experiment.
+func TestSession_ATerminalIsNeverResizedAfterItIsClosed(t *testing.T) {
+	fake := &countingPTY{}
+	tty := newSessionTerminal(fake)
+
+	require.NoError(t, tty.Resize(100, 40))
+	require.Equal(t, int32(1), fake.resizes.Load(), "a resize before the close has to reach the terminal")
+
+	require.NoError(t, tty.Close())
+
+	err := tty.Resize(120, 50)
+	require.ErrorIs(t, err, errTerminalGone)
+	assert.Equal(t, int32(1), fake.resizes.Load(),
+		"a resize reached a terminal that had already been released; on Windows that is ResizePseudoConsole against a freed console")
+}
+
+// TestSession_AResizeRacingTheCloseNeverReachesAFreedTerminal is the same
+// property under the concurrency it actually happens under: the input pump
+// resizing while the reaper closes.
+//
+// The fake fails the test from inside the terminal rather than after it, which
+// is the only way to catch an ordering that a counter read afterwards would
+// have already lost.
+func TestSession_AResizeRacingTheCloseNeverReachesAFreedTerminal(t *testing.T) {
+	fake := &countingPTY{}
+	tty := newSessionTerminal(fake)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			_ = tty.Resize(100, 40)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		_ = tty.Close()
+	}()
+	wg.Wait()
+
+	assert.Zero(t, fake.afterClose.Load(),
+		"a resize reached the terminal after it had been closed")
+}
+
+// countingPTY is a pseudo-terminal that never allocates anything, and reports
+// what was done to it after it was closed.
+//
+// A fake rather than a real pty, deliberately: what is being asserted is that
+// a call does *not* reach the platform, and on the platform where that matters
+// the consequence of it reaching is a corrupted heap rather than an error
+// anything could observe.
+type countingPTY struct {
+	closes     atomic.Int32
+	resizes    atomic.Int32
+	afterClose atomic.Int32
+	closed     atomic.Bool
+}
+
+func (p *countingPTY) Read([]byte) (int, error) { return 0, io.EOF }
+func (p *countingPTY) Write(b []byte) (int, error) {
+	return len(b), nil
+}
+
+func (p *countingPTY) Close() error {
+	p.closes.Add(1)
+	p.closed.Store(true)
+	return nil
+}
+
+func (p *countingPTY) Resize(int, int) error {
+	if p.closed.Load() {
+		p.afterClose.Add(1)
+	}
+	p.resizes.Add(1)
+	return nil
+}
+
+func (p *countingPTY) Name() string                         { return "counting-pty" }
+func (p *countingPTY) Fd() uintptr                          { return 0 }
+func (p *countingPTY) Command(string, ...string) *gopty.Cmd { return nil }
+func (p *countingPTY) CommandContext(context.Context, string, ...string) *gopty.Cmd {
+	return nil
+}
+
+// TestSession_AChildIsReapedEvenWhenTheOpenCannotBeDelivered covers the one
+// path out of the handler that runs after a command exists and before anything
+// is waiting for it.
+//
+// The ShellOpened send is the last thing between starting the session's process
+// and the goroutine that waits on it. A handler that returns from there without
+// ever calling Wait leaves the child killed by the teardown and unreaped by
+// anyone — a zombie in the daemon's own process table, for the life of the
+// daemon, one per session whose caller hung up at the wrong instant. A caller
+// that opens streams and drops them is not an exotic client; it is a script
+// with a loop in it.
+//
+// Unix only, because the zombie is. On Windows an unwaited child leaves a
+// handle rather than a process-table entry, and go-pty leaks a handle of its
+// own to every session's process regardless of what this agent does, so there
+// is nothing there for an assertion to distinguish.
+func TestSession_AChildIsReapedEvenWhenTheOpenCannotBeDelivered(t *testing.T) {
+	requirePTY(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("a child nobody waits on is a zombie on Unix; on Windows it is a leaked handle that go-pty leaks anyway")
+	}
+
+	svc := newService(t, options{})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var rec sessionAudit
+	spec, err := svc.plan(openOptions("sleep"), &rec)
+	require.NoError(t, err)
+
+	stream := &refusingStream{ctx: ctx, sendFail: errors.New("the caller went away mid-handshake")}
+	require.Error(t, svc.run(ctx, stream, spec, &rec))
+
+	pid := stream.openedPID()
+	require.Positive(t, pid, "the session never started a process, so this test would prove nothing")
+
+	waitFor(t, "the session's own process to be reaped", func() (bool, string) {
+		if !platform.ProcessExists(pid) {
+			return true, ""
+		}
+		return false, "pid " + strconv.Itoa(pid) + " is still in the process table; the handler killed its child and never waited on it"
+	})
+}
+
+// ---------------------------------------------------------------- leaks
+
+// TestSession_NoGoroutineLeakAcrossManySessions is the counterpart of
+// ForwardService's, for a service with the same shape and one more goroutine
+// per stream.
+//
+// A session is three goroutines and a pseudo-terminal: the input pump, the
+// output pump, and the wait. None of the three is joined by the handler, on
+// purpose — the input pump is parked in Recv and only the handler returning
+// unblocks it — so "they end" is an argument rather than something the code
+// makes obvious, and an argument about goroutine lifetimes is exactly the kind
+// that stays true right up until it does not. The failure it guards against is
+// an agent that slowly stops working on a host nobody is watching.
+//
+// Both endings are driven, because they end the pumps differently: a session
+// whose command exits, and a caller that hangs up on a session that is still
+// running.
+func TestSession_NoGoroutineLeakAcrossManySessions(t *testing.T) {
+	requirePTY(t)
+
+	const (
+		exited    = 5
+		cancelled = 5
+	)
+
+	svc := newService(t, options{})
+	client := serve(t, svc)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// One first, so gRPC's own long-lived goroutines are in the baseline.
+	runOne := func() {
+		sess, err := openSession(ctx, t, client, openOptions("exit", "0"))
+		require.NoError(t, err)
+		require.NotNil(t, sess.awaitEnd())
+	}
+	runOne()
+	baseline := goleak.IgnoreCurrent()
+
+	for range exited {
+		runOne()
+	}
+
+	// And the ending that has to tear a running session down rather than
+	// collect one that finished: the caller goes away mid-session.
+	for range cancelled {
+		streamCtx, streamCancel := context.WithCancel(ctx)
+		sess, err := openSession(streamCtx, t, client, openOptions("sleep"))
+		require.NoError(t, err)
+		require.NotNil(t, sess.opened)
+		streamCancel()
+		<-sess.done
+	}
+
+	// The agent's own record of each session, not the client's stream ending:
+	// a cancelled caller is gone long before the agent has hung the terminal
+	// up and killed the tree, and counting goroutines in that window would
+	// measure the teardown rather than what it leaves behind.
+	awaitRecords(t, svc, 1+exited+cancelled)
+
+	goleak.VerifyNone(t, baseline)
 }
 
 // -------------------------------------------------------------- refusals

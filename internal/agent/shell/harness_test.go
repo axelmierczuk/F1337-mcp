@@ -319,6 +319,25 @@ func onlyRecord(t *testing.T, svc *Service) policy.Record {
 	return got[0]
 }
 
+// awaitRecords waits until the service has recorded want sessions.
+//
+// It is the only synchronisation point a test has for "the handler returned".
+// A client's stream ends the moment its context is cancelled, which is well
+// before the agent has hung the terminal up, killed the tree and written the
+// line saying so — so a test that measured the server's teardown from the
+// client's own ending would be measuring the wrong end of the session.
+func awaitRecords(t *testing.T, svc *Service, want int) {
+	t.Helper()
+
+	waitFor(t, fmt.Sprintf("%d sessions to reach the audit log", want), func() (bool, string) {
+		got := records(t, svc)
+		if len(got) >= want {
+			return true, ""
+		}
+		return false, fmt.Sprintf("%d of %d recorded so far", len(got), want)
+	})
+}
+
 // auditFile is the raw log, for the assertions about what is *not* in it.
 func auditFile(t *testing.T, svc *Service) string {
 	t.Helper()
@@ -328,4 +347,52 @@ func auditFile(t *testing.T, svc *Service) string {
 	}
 	require.NoError(t, err)
 	return string(data)
+}
+
+// refusingStream is a server stream whose Send always fails, and which keeps
+// what it refused.
+//
+// It exists for the one window a real client cannot be aimed at: the
+// ShellOpened send, between the session's command starting and the pumps
+// beginning. A client can drop its connection, but not at that instruction —
+// and the failure has to land exactly there, because that is the only path out
+// of the handler that runs after a child exists.
+//
+// Everything else is the embedded nil ServerStream, deliberately: an
+// unexpected call panics with the method's name rather than quietly succeeding
+// and letting this fake stand in for more of gRPC than it is.
+type refusingStream struct {
+	grpc.ServerStream
+
+	ctx      context.Context
+	sendFail error
+
+	mu   sync.Mutex
+	sent []*sandboxdv1.ShellResponse
+}
+
+func (s *refusingStream) Context() context.Context { return s.ctx }
+
+func (s *refusingStream) Recv() (*sandboxdv1.ShellRequest, error) {
+	<-s.ctx.Done()
+	return nil, s.ctx.Err()
+}
+
+func (s *refusingStream) Send(resp *sandboxdv1.ShellResponse) error {
+	s.mu.Lock()
+	s.sent = append(s.sent, resp)
+	s.mu.Unlock()
+	return s.sendFail
+}
+
+// openedPID is the process id the session reported for itself, or zero.
+func (s *refusingStream) openedPID() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, resp := range s.sent {
+		if opened := resp.GetOpened(); opened != nil {
+			return int(opened.GetPid())
+		}
+	}
+	return 0
 }

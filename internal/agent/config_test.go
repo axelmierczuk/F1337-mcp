@@ -57,6 +57,13 @@ func TestLoad_ShippedExample(t *testing.T) {
 	assert.Equal(t, 3600*time.Second, cfg.Exec.MaxTimeout.Duration())
 	assert.EqualValues(t, 2097152, cfg.Exec.MaxOutputBytes)
 
+	// The interactive shell ships on, with the idle bound the file documents.
+	// A default that drifted to zero would not fail to parse: it would reap
+	// every session the instant it opened, on every agent in the fleet, and
+	// nothing else in the unit suite runs against a config the daemon loaded.
+	assert.True(t, cfg.Shell.IsEnabled())
+	assert.Equal(t, 30*time.Minute, cfg.Shell.IdleTimeout.Duration())
+
 	assert.Equal(t, 32, cfg.Process.MaxConcurrent)
 	assert.EqualValues(t, 33554432, cfg.Process.MaxLogBytes)
 	assert.Equal(t, 2000, cfg.Process.RingBufferLines)
@@ -373,4 +380,41 @@ func TestStatus_ConcurrentAccess(t *testing.T) {
 	state, _, running := s.Snapshot()
 	assert.Equal(t, sandboxdv1.HealthResponse_STATUS_SERVING, state)
 	assert.EqualValues(t, 1, running)
+}
+
+// TestLoad_ShellDefaults pins what an agent that says nothing about shells
+// gets.
+//
+// Both halves matter and neither is visible from a config that names them. An
+// omitted `enabled` has to mean on — the field is a pointer for exactly that
+// reason, and a plain bool would read a missing key as a refusal — and an
+// omitted `idle_timeout` has to mean a bound rather than zero, because a zero
+// timer fires immediately and every session on that agent would be reaped
+// before its first prompt.
+func TestLoad_ShellDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("name: build-box\n"), 0o600))
+
+	cfg, err := agent.Load(path)
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Shell.IsEnabled(), "a config that says nothing about shells gets one")
+	assert.Equal(t, 30*time.Minute, cfg.Shell.IdleTimeout.Duration(),
+		"an unset idle timeout must be a bound, not zero; zero reaps every session as it opens")
+}
+
+// TestLoad_ShellCanBeTurnedOffWithoutTurningOffExec covers the configuration
+// the setting exists for: an agent that runs commands for a model and hands
+// nobody an interactive terminal.
+func TestLoad_ShellCanBeTurnedOffWithoutTurningOffExec(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("name: build-box\nshell:\n  enabled: false\n"), 0o600))
+
+	cfg, err := agent.Load(path)
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Shell.IsEnabled())
+	assert.True(t, cfg.Exec.IsEnabled(), "turning off interactive terminals is not turning off execution")
 }

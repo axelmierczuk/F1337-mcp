@@ -46,6 +46,10 @@ type fakeTerminal struct {
 	// panicOnRead makes the input pump panic, which is the only way to reach
 	// the goroutine-panic restoration path.
 	panicOnRead bool
+	// writeErr, when set, is what rendering session output fails with — the
+	// operator's terminal going away underneath a session that is still
+	// producing output.
+	writeErr error
 
 	resizes chan [2]int
 }
@@ -65,7 +69,12 @@ func (f *fakeTerminal) Read(p []byte) (int, error) {
 	return copy(p, chunk), nil
 }
 
-func (f *fakeTerminal) Write(p []byte) (int, error) { return f.written.Write(p) }
+func (f *fakeTerminal) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return f.written.Write(p)
+}
 
 func (f *fakeTerminal) makeRaw() (func() error, error) {
 	if f.rawErr != nil {
@@ -371,6 +380,32 @@ func TestShellSession_ReportsAStreamThatEndedWithoutAStatus(t *testing.T) {
 	assert.Equal(t, int32(1), term.restored.Load())
 }
 
+// TestShellSession_RestoresTheTerminalWhenRenderingFails is the exit path the
+// other three do not reach: output arriving for a terminal that has gone away.
+//
+// A dropped connection is the far end going quiet. This is the near end going
+// quiet while the far end is mid-sentence — the terminal emulator killed, the
+// descriptor closed underneath the process — and it leaves the render loop
+// returning from a write rather than from a receive. It is a different
+// statement in a different branch, and it is the one that would put a terminal
+// back into raw mode for whatever runs next in that shell.
+func TestShellSession_RestoresTheTerminalWhenRenderingFails(t *testing.T) {
+	term := newFakeTerminal()
+	term.writeErr = errors.New("input/output error")
+	stream := newFakeStream()
+	stream.responses <- dataResponse("output nobody can render\n")
+
+	sess, _ := newSession(term, stream)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := sess.run(ctx, cancel, &sandboxdv1.ShellOpen{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "input/output error")
+	assert.Equal(t, int32(1), term.restored.Load(),
+		"a terminal that failed mid-render was left in raw mode")
+}
+
 // ------------------------------------------------- path 4: a panic
 
 // TestShellSession_RestoresTheTerminalWhenAPumpPanics is the path a deferred
@@ -510,6 +545,148 @@ func TestShellSession_HalfClosesWhenLocalInputEnds(t *testing.T) {
 	}
 	assert.Contains(t, term.rendered(), "output after stdin closed")
 }
+
+// ------------------------------------------------------ the session's env
+
+// TestSessionEnv_CarriesTheTerminalAndNothingElse pins both halves of what a
+// session is opened with.
+//
+// The first half is a rendering bug that is invisible to every assertion about
+// bytes: a session with no TERM renders as well as `TERM=dumb` allows, which
+// is to say `vi` draws nothing, and the locale variables are what decide
+// whether a box-drawing character arrives as one or as a question mark.
+//
+// The second half is the security one, and it is the reason this is a fixed
+// list rather than a filter. This command runs a program on somebody else's
+// machine, and an operator's own environment is full of credentials — AWS keys,
+// tokens, whatever their shell profile exports. Forwarding it wholesale is one
+// line away at any time, and nothing else in this package would notice.
+func TestSessionEnv_CarriesTheTerminalAndNothingElse(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("LANG", "en_GB.UTF-8")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "not-for-somebody-elses-machine")
+	t.Setenv("LC_ALL", "")
+
+	env := sessionEnv([]string{"FOO=bar"})
+
+	assert.Contains(t, env, "TERM=xterm-256color", "a session without TERM renders as well as TERM=dumb allows")
+	assert.Contains(t, env, "LANG=en_GB.UTF-8")
+	assert.Contains(t, env, "FOO=bar", "--env is what an operator sets deliberately, and it goes on top")
+	assert.NotContains(t, env, "LC_ALL=", "an unset variable is not forwarded as an empty one; the agent would apply it over its own")
+
+	for _, entry := range env {
+		assert.NotContains(t, entry, "not-for-somebody-elses-machine",
+			"the operator's own environment was forwarded to a remote host")
+	}
+}
+
+// ------------------------------------------------- one sender at a time
+
+// TestShellSession_NeverHasTwoSendsInFlight pins the property gRPC requires of
+// every client stream and this session has two goroutines to break.
+//
+// "It is not safe to call SendMsg on the same stream in different goroutines.
+// It is also not safe to call CloseSend concurrently with SendMsg." The input
+// pump sends on every keystroke, the resize watcher sends on every SIGWINCH,
+// and the input pump half-closes when stdin ends — so an operator who resizes
+// their window while typing is the whole violation, and the half-close variant
+// of it races the stream's own end-of-send flag rather than merely being
+// undefined.
+//
+// The stream reports the overlap from inside Send rather than leaving it to be
+// inferred afterwards, and holds the call open long enough that a second
+// entrant would have to be caught: a counter read at the end could not tell an
+// interleaving that happened from one that did not.
+func TestShellSession_NeverHasTwoSendsInFlight(t *testing.T) {
+	term := newFakeTerminal()
+	stream := newOverlappingStream()
+	sess, _ := newSession(term, stream)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = sess.run(ctx, cancel, &sandboxdv1.ShellOpen{})
+	}()
+
+	// Typing and resizing at once, for long enough that an unserialised pair
+	// would have to collide: every send is held open, so two senders that are
+	// not taking turns are overlapping by construction.
+	var feeding sync.WaitGroup
+	feeding.Add(2)
+	go func() {
+		defer feeding.Done()
+		for range 40 {
+			term.input <- []byte("x")
+		}
+		// And the half-close, which is the variant with a data race attached.
+		close(term.input)
+	}()
+	go func() {
+		defer feeding.Done()
+		for i := range 40 {
+			term.resizes <- [2]int{100 + i, 40}
+		}
+	}()
+	feeding.Wait()
+
+	waitForCondition(t, "the session to have carried the typing and the resizes", func() bool {
+		return stream.completed() >= 40
+	})
+
+	stream.responses <- exitResponse(0)
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the session did not end when the far end reported its exit")
+	}
+
+	assert.Zero(t, stream.overlaps.Load(),
+		"two goroutines were inside Send on the same stream at once; gRPC does not permit that, and the CloseSend case races the stream's own state")
+}
+
+// overlappingStream is a fakeStream that notices two senders at once.
+//
+// Send holds the stream for a moment rather than returning immediately, which
+// is what makes the overlap observable: a real gRPC send marshals, takes the
+// transport's write path and can block on flow control, so an unserialised
+// pair overlaps in production for far longer than this.
+type overlappingStream struct {
+	*fakeStream
+
+	inFlight atomic.Int32
+	overlaps atomic.Int32
+	sends    atomic.Int32
+}
+
+func newOverlappingStream() *overlappingStream {
+	return &overlappingStream{fakeStream: newFakeStream()}
+}
+
+func (s *overlappingStream) Send(req *sandboxdv1.ShellRequest) error {
+	if s.inFlight.Add(1) > 1 {
+		s.overlaps.Add(1)
+	}
+	err := s.fakeStream.Send(req)
+	time.Sleep(200 * time.Microsecond)
+	s.inFlight.Add(-1)
+	s.sends.Add(1)
+	return err
+}
+
+func (s *overlappingStream) CloseSend() error {
+	if s.inFlight.Add(1) > 1 {
+		s.overlaps.Add(1)
+	}
+	err := s.fakeStream.CloseSend()
+	time.Sleep(200 * time.Microsecond)
+	s.inFlight.Add(-1)
+	return err
+}
+
+func (s *overlappingStream) completed() int32 { return s.sends.Load() }
 
 // ------------------------------------------------------ endings and codes
 
