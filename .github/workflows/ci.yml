@@ -85,6 +85,15 @@ jobs:
       # it is protecting is this job's cache.
       - name: Self-test the tooling gates
         run: make tools-selftest
+      # The Lint job below downloads its own golangci-lint through the action
+      # instead of using .tools/, so its version is spelled out three times in
+      # this file with nothing holding it to GOLANGCI_VERSION. Bumping the pin
+      # moves the cache key, rebuilds .tools/, and changes what `make lint`
+      # runs — while the job that blocks the merge carries on with the old
+      # linter. `make check` runs this too, but not here, so this is the only
+      # place the two can be held together before a merge.
+      - name: Check CI's pins against the Makefile's
+        run: make check-ci-pins
       - name: Lint and format
         run: make proto-lint
       - name: Verify committed codegen is current

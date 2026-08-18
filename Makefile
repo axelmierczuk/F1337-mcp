@@ -167,10 +167,20 @@ tools-key-check:
 # the scan, including this paragraph, can never be read as input to it. The
 # binary name is the last path element, minus a /vN major-version suffix, which
 # is how the go tool names it.
+#
+# Continuations are joined before the match, because a *logical* recipe line is
+# what installs a binary and this file already wraps its long ones (TOOL_PINS,
+# TOOL_BINS, AGENT_PLATFORMS, LDFLAGS). Wrapping an install the same way put
+# `GOBIN=$(TOOLS_DIR)` on one physical line and `go install` on the next, and a
+# line-at-a-time scan saw neither: a fifth tool added by every rule this file
+# states, and formatted the way this file formats things, passed every gate and
+# left tools-verify reporting ".tools/ matches every pin" about a binary it had
+# never looked at. That is the hole tools-bins-check exists to close, walked
+# straight back open by a line wrap.
 .PHONY: tools-bins-check
 tools-bins-check:
 	@fail=0; \
-	for pkg in $$(sed -n 's/^[[:blank:]].*GOBIN=$$(TOOLS_DIR).*go install \([^@ ]*\)@.*/\1/p' $(firstword $(MAKEFILE_LIST))); do \
+	for pkg in $$(awk '/\\$$/ { sub(/[[:blank:]]*\\$$/, " "); buf = buf $$0; next } { line = buf $$0; buf = ""; if (line ~ /^[[:blank:]].*GOBIN=\$$\(TOOLS_DIR\).*go install /) { sub(/.*go install[[:blank:]]+/, "", line); sub(/[@[:blank:]].*/, "", line); print line } }' $(firstword $(MAKEFILE_LIST))); do \
 		name=$${pkg##*/}; \
 		case "$$name" in v[0-9]|v[0-9][0-9]) rest=$${pkg%/*}; name=$${rest##*/};; esac; \
 		case " $(TOOL_BINS) " in \
@@ -434,6 +444,39 @@ check-extra-pkgs:
 		}; \
 	done
 
+## check-ci-pins: fail if CI's golangci-lint has drifted from GOLANGCI_VERSION
+#
+# The Lint job downloads its own golangci-lint through the action rather than
+# using .tools/, so the version is written out in ci.yml — three times — with
+# nothing holding it to the pin everything else reads. Bump GOLANGCI_VERSION and
+# the cache key moves, .tools/ is rebuilt, and `make lint` and every local run
+# pick up the new linter, while the job that actually blocks a merge quietly
+# carries on with the old one. Two linters, one of them invisible, and the gate
+# reports clean under whichever it happened to run — which is the failure
+# tools-key-check exists to prevent, one file over.
+#
+# Zero matches is a failure, not a pass. A check that silently stops finding
+# anything to compare is how the drift it watches for gets through, so this
+# fails if the Lint job is restructured out from under it rather than going
+# quiet. Same reasoning as tools-key-check's "no pins at all".
+.PHONY: check-ci-pins
+check-ci-pins:
+	@found=0; fail=0; \
+	for v in $$(awk '/uses:[[:blank:]]*golangci\/golangci-lint-action/ { want = 1; next } want && /^[[:blank:]]*version:/ { sub(/^[[:blank:]]*version:[[:blank:]]*/, ""); print; want = 0 }' .github/workflows/ci.yml); do \
+		found=$$((found + 1)); \
+		[ "$$v" = "$(GOLANGCI_VERSION)" ] || { \
+			echo "check-ci-pins: ci.yml runs golangci-lint $$v, but GOLANGCI_VERSION is $(GOLANGCI_VERSION);" >&2; \
+			echo "  the Lint job that blocks a merge is not running the linter 'make lint' and .tools/ do" >&2; \
+			fail=1; \
+		}; \
+	done; \
+	if [ $$found -eq 0 ]; then \
+		echo "check-ci-pins: no golangci-lint-action version found in .github/workflows/ci.yml;" >&2; \
+		echo "  this check would pass without comparing anything, which is how the pin drifts" >&2; \
+		exit 1; \
+	fi; \
+	if [ $$fail -ne 0 ]; then exit 1; fi
+
 ## check: the local gate — what CI runs, across every GOOS
 #
 # CI's own lint job runs on one runner, so it sees one GOOS too; the test
@@ -446,7 +489,7 @@ check-extra-pkgs:
 # every run. Run it by hand if you have touched anything whose assertion could
 # depend on how fast the machine is.
 .PHONY: check
-check: proto-lint proto-check check-extra-pkgs vet lint test
+check: proto-lint proto-check check-extra-pkgs check-ci-pins vet lint test
 
 ## clean: remove build output
 .PHONY: clean
