@@ -38,6 +38,11 @@ type persisted struct {
 	// differs names a process this agent never started.
 	PID     int    `json:"pid"`
 	StartID string `json:"start_id,omitempty"`
+	// RunFirstSeq is the log sequence the running run's output starts at, so a
+	// probe resumed by the next agent can still tell that run's output from the
+	// output of the runs before it. Absent in records written before it existed,
+	// where zero reads as "the whole retained buffer" — see record.runFirstSeq.
+	RunFirstSeq uint64 `json:"run_first_seq,omitempty"`
 	// JobName is the Windows job object this process's tree lives in, so a
 	// restarted agent can reopen it. Empty and unused on Unix.
 	JobName string `json:"job_name,omitempty"`

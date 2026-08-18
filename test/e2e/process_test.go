@@ -118,23 +118,14 @@ func TestProcessRestartKeepsItsIdentityAndComesBackReady(t *testing.T) {
 	// It is serving again, which is the claim readiness makes and the only one
 	// worth checking from outside the agent.
 	//
-	// Waited for rather than demanded on the first call. Readiness is what
-	// should make this immediate, and today it does not: the probe passed on a
-	// line the *previous* run wrote — see
-	// TestALogPatternProbeMatchesThePreviousRunsOutput — so the restart returns
-	// before the new run has bound anything, and a forward opened in that window
-	// is refused by the agent for a port nothing is serving. The claim worth
-	// asserting is that it serves again, not how soon; when the probe is fixed
-	// this passes on the first attempt.
-	var fwd forwardResult
-	waitFor(t, 60*time.Second, "the restarted server to answer over a forward", func() (bool, string) {
-		res := s.call("fleet_forward", map[string]any{"remote_port": port}, callOptions{})
-		if res.IsError {
-			return false, resultText(res)
-		}
-		fwd = structured[forwardResult](t, res)
-		return true, ""
-	})
+	// Demanded rather than waited for. It used to be waited for, because a
+	// restart returned ready before the new run had bound anything (#57) and a
+	// forward to a port nothing is serving is refused by design. What decides
+	// that defect is TestALogPatternProbeWatchesTheRunItIsProbing below, where
+	// the restarted run cannot print the pattern at all; the retry here only
+	// ever hid it. This asserts the ordinary claim: after a restart that
+	// reported ready, the server answers.
+	fwd := structured[forwardResult](t, s.okAs("fleet_forward", map[string]any{"remote_port": port}, callOptions{}))
 	if got := httpGet(t, "http://"+fwd.LocalAddress+"/"); got != "first" {
 		t.Fatalf("the restarted server answered %q", got)
 	}
@@ -142,54 +133,36 @@ func TestProcessRestartKeepsItsIdentityAndComesBackReady(t *testing.T) {
 
 	// And the log history of both runs is there: a restart that reset the
 	// buffer would lose the output that explains why it was restarted.
-	//
-	// Waited for rather than read once, because the second run's line reaches
-	// the log after the restart call returns — see
-	// TestALogPatternProbeMatchesThePreviousRunsOutput, which is why.
 	marker := "listening on " + strconv.Itoa(port)
-	waitFor(t, 30*time.Second, "both runs' output to be in the log", func() (bool, string) {
-		logs := readLogs(t, s, started.Process.ProcessID)
-		if strings.Count(logs.Logs, marker) >= 2 {
-			return true, ""
-		}
-		return false, "log so far:\n" + logs.Logs
-	})
+	logs := readLogs(t, s, started.Process.ProcessID)
+	if n := strings.Count(logs.Logs, marker); n < 2 {
+		t.Fatalf("the log carries the announcement %d times; both runs made it:\n%s", n, logs.Logs)
+	}
 }
 
-// TestALogPatternProbeMatchesThePreviousRunsOutput records a defect, as the
-// product currently behaves.
+// TestALogPatternProbeWatchesTheRunItIsProbing is #57 from outside the agent.
 //
-// A log_pattern readiness probe scans the lines already in the process's log
-// buffer before it starts following new ones. That pre-scan is there for a good
-// reason — a process that prints "listening on :3000" before the probe is set
-// up would otherwise never be seen — but the buffer is not emptied or
-// watermarked when a run starts, so after a restart the pre-scan matches the
-// *previous* run's output and the new run is declared ready before it has
+// A log_pattern probe scans the lines already in the process's log buffer
+// before it starts following new ones, and it has to: a process that prints
+// "listening on :3000" before the probe is set up would otherwise never be
+// seen. But a restart keeps the buffer — that is what makes the output of the
+// run that died readable afterwards — so an unbounded pre-scan matched the
+// *previous* run's announcement and reported the new run ready before it had
 // printed anything at all.
 //
-// The scenario makes that decidable without timing anything. The helper
-// announces itself only on its first run, so a probe watching this run's output
-// must time out and report ready_error; a probe watching the buffer's history
-// passes instantly on a line the last run wrote. The assertion below is on the
-// second, because that is what happens.
+// The scenario decides that without timing anything. The helper announces
+// itself only on its first run, so the restarted run cannot print the pattern
+// however long anyone watches. A probe reading the buffer's history reports
+// ready; a probe watching this run reports that it gave up. The assertion is on
+// the second.
 //
-// # It is not only the explicit restart
-//
-// fleet_process_restart is where this is *observable*, not where it does harm.
-// Supervisor.spawn keeps the record's log buffer across every run of a process
-// and only the raw capture files start over, so the automatic restart path —
-// restart_policy: always, after a crash — reaches the same pre-scan with the
-// same stale lines in front of it. A crash-looping service with a log_pattern
-// probe therefore reports READY on every automatic restart without ever having
-// printed its readiness line again, which is the damaging case: the process
-// state a caller reads says healthy for a service that is not up. A fix has to
-// cover that path, not only this one.
-//
-// If this test starts failing because the restart reports ready_error, that is
-// the fix landing: delete it, and drop the waitFors in the scenario above.
-//
-// Reported in the PR body for #28.
-func TestALogPatternProbeMatchesThePreviousRunsOutput(t *testing.T) {
+// The damaging case is the automatic one, not this one. restart_policy: always
+// reaches the same pre-scan with the same stale line in front of it, so a
+// crash-looping service reported healthy on every restart; that path is pinned
+// by TestACrashLoopingProcessDoesNotReportReadyOnEveryRestart in
+// internal/agent/process, where a crash loop can be stepped one crash at a
+// time.
+func TestALogPatternProbeWatchesTheRunItIsProbing(t *testing.T) {
 	f := newFleet(t)
 	a := f.enroll("build-box", enrollOptions{})
 	s := f.connect(t)
@@ -201,34 +174,243 @@ func TestALogPatternProbeMatchesThePreviousRunsOutput(t *testing.T) {
 		"name": "quiet-on-restart",
 		"argv": []string{bins.helpers, "serve", strconv.Itoa(port), "body", once},
 		"ready_probe": map[string]any{
+			// The probe's own timeout, which is also what the restarted run's
+			// probe spends before giving up — a restart re-runs the probe the
+			// process already has, and ready_timeout_seconds only sizes this
+			// side's deadline. Six seconds is about twenty times what the first
+			// run takes to announce itself, so a loaded machine does not turn
+			// this into a coin toss, and it is what the scenario costs once the
+			// restarted run stays silent.
 			"log_pattern":     "listening on",
-			"timeout_seconds": 30,
+			"timeout_seconds": 6,
 		},
 	})
 	defer stopProcess(t, s, started)
 
 	restarted := structured[processStartResult](t, s.okAs("fleet_process_restart", map[string]any{
 		"process_id":            started.Process.ProcessID,
-		"ready_timeout_seconds": 5,
+		"ready_timeout_seconds": 30,
 	}, callOptions{timeout: 120 * time.Second}))
 
-	if restarted.Ready == nil || !*restarted.Ready {
-		t.Fatalf("the probe no longer matches the previous run's output — the defect this test records is fixed, so delete it: %+v", restarted)
+	if restarted.ReadyError == "" {
+		t.Fatalf("the restarted run never printed the pattern, so its probe cannot have passed: %+v", restarted)
+	}
+	if restarted.Ready == nil || *restarted.Ready {
+		t.Fatalf("a restart whose probe did not pass must not report ready: %+v", restarted)
+	}
+	// Left running, which is the other half of the contract: a probe that did
+	// not pass is not a reason to kill the process that would explain why.
+	if restarted.Process.State != "starting" {
+		t.Fatalf("a process whose probe has not passed is starting, got %q: %+v", restarted.Process.State, restarted.Process)
 	}
 
-	// The new run had not printed the pattern when it was called ready, and
-	// this is the fact that says so: it never prints it, and the log ends up
-	// carrying the announcement once and the silent line once.
+	// And it is a live second run being reported on, not a dead one: it says so
+	// on its own stdout, and it never repeats the announcement.
+	//
+	// Counted against the announcement the helper actually prints, port and
+	// all. The bare pattern also appears in the note the supervisor writes into
+	// this process's log when the probe gives up — which is the line that says
+	// the fix is working, so a count that included it would go up by one for
+	// the right reason and fail.
 	waitFor(t, 30*time.Second, "the second run to say it is serving silently", func() (bool, string) {
 		logs := readLogs(t, s, started.Process.ProcessID)
 		if !contains(logs.Logs, "serving "+strconv.Itoa(port)+" without announcing it") {
 			return false, "log so far:\n" + logs.Logs
 		}
-		if n := strings.Count(logs.Logs, "listening on"); n != 1 {
-			t.Fatalf("the announcement appears %d times; the helper announces once per file", n)
+		if n := strings.Count(logs.Logs, "listening on "+strconv.Itoa(port)); n != 1 {
+			t.Fatalf("the announcement appears %d times; the helper announces once per file:\n%s", n, logs.Logs)
 		}
 		return true, ""
 	})
+}
+
+// TestAReadoptedProcessIsReadyOnTheAnnouncementItAlreadyMade is the case that
+// stops #57 being fixed by simply deleting the pre-scan.
+//
+// When an agent restarts and re-adopts a process that was still being probed,
+// the retained history is the only place the readiness evidence can be: the
+// process announced itself to the agent that is gone, and a dev server says
+// "listening on 3000" once. So the probe resumes against that history, and a
+// process that has been serving since before the restart is reported ready
+// rather than left starting for the rest of its life.
+//
+// The announcement is arranged by handshake rather than by delay: the helper
+// binds its port at once and says nothing until this test writes a file, so the
+// first probe cannot race it and has to give up. That is what leaves a record
+// in the state a re-adoption then has to resolve.
+func TestAReadoptedProcessIsReadyOnTheAnnouncementItAlreadyMade(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+	s := f.connect(t)
+	s.ok("fleet_select", map[string]any{"name": a.name})
+
+	port := freePort(t)
+	announce := filepath.Join(a.home, "announce-now")
+	started := structured[processStartResult](t, s.okAs("fleet_process_start", map[string]any{
+		"name": "quiet-until-told",
+		"argv": []string{bins.helpers, "serve-when", strconv.Itoa(port), "adopted", announce},
+		"ready_probe": map[string]any{
+			// Nothing can match until this test says so, so the probe gives up
+			// whatever the machine is doing; the number is only what the wait
+			// costs.
+			//
+			// The pattern is anchored on the port rather than left as bare
+			// "listening on" so that it cannot match the note the supervisor
+			// writes when this probe gives up — that note quotes the pattern.
+			// The probe ignores the supervisor's notes, but a scenario about
+			// which line a re-adopted probe read should not be resting on that.
+			"log_pattern":     "listening on [0-9]+",
+			"timeout_seconds": 1,
+		},
+	}, callOptions{timeout: 120 * time.Second}))
+	pid := int(started.Process.PID)
+	t.Cleanup(func() { killPID(pid) })
+
+	if started.ReadyError == "" {
+		t.Fatalf("the process has not announced itself yet, so its probe cannot have passed: %+v", started)
+	}
+	if started.Process.State != "starting" {
+		t.Fatalf("a process still being probed is starting, got %q: %+v", started.Process.State, started.Process)
+	}
+
+	// Now it announces itself, and this agent captures the line into the
+	// history it keeps on disk.
+	writeFile(t, announce, []byte("go"))
+	marker := "listening on " + strconv.Itoa(port)
+	waitFor(t, 30*time.Second, "the announcement to reach the agent's log", func() (bool, string) {
+		logs := readLogs(t, s, started.Process.ProcessID)
+		return contains(logs.Logs, marker), "log so far:\n" + logs.Logs
+	})
+
+	// The agent goes away and comes back. The process does not go anywhere, and
+	// it will never print that line again.
+	a.stop(t)
+	if !processAlive(pid) {
+		t.Fatalf("pid %d did not survive an agent shutdown", pid)
+	}
+	f.restart(a)
+
+	var found *processDetail
+	waitFor(t, 60*time.Second, "the re-adopted process to be reported ready", func() (bool, string) {
+		res := s.call("fleet_process_list", nil, callOptions{})
+		if res.IsError {
+			return false, resultText(res)
+		}
+		list := structured[processListResult](t, res)
+		found = findProcess(list.Processes, started.Process.ProcessID)
+		if found == nil {
+			return false, fmt.Sprintf("not in the listing: %+v", list.Processes)
+		}
+		return found.State == "ready", fmt.Sprintf("state is %q: %+v", found.State, found)
+	})
+	if !contains(found.AdoptionNote, "re-adopted") {
+		t.Fatalf("the process reported ready is not the re-adopted one: %q", found.AdoptionNote)
+	}
+
+	// And the retained history is what it read that from. A resumed capture
+	// that re-read bytes the previous agent had already turned into lines would
+	// show the announcement twice, and the probe would then have passed on new
+	// output rather than on the line it was left with — which is the claim this
+	// scenario would otherwise only appear to make.
+	logs := readLogs(t, s, started.Process.ProcessID)
+	if n := strings.Count(logs.Logs, marker); n != 1 {
+		t.Fatalf("the announcement appears %d times, so the re-adopted probe was not reading the retained history:\n%s", n, logs.Logs)
+	}
+
+	// It is serving, which is what readiness claims about it.
+	fwd := structured[forwardResult](t, s.okAs("fleet_forward", map[string]any{"remote_port": port}, callOptions{}))
+	if got := httpGet(t, "http://"+fwd.LocalAddress+"/"); got != "adopted" {
+		t.Fatalf("the re-adopted server answered %q", got)
+	}
+	s.ok("fleet_forward", map[string]any{"remote_port": port, "stop": true})
+}
+
+// TestAnAgentKilledWhileProbingHandsTheRunOver is the same handover as the
+// scenario above, from an agent that never got to tidy up.
+//
+// The distinction is the whole of what makes it worth running twice. A daemon
+// that is stopped writes every record again on the way out, so a record that
+// was wrong for the entire life of a run still looks right to the agent that
+// reads it afterwards — which is exactly how a spawn that never wrote down its
+// own pid, start identity and log mark survived a green suite: the only case
+// anything exercised was the one that repaired the record on the way past it.
+//
+// Here the daemon is SIGKILLed instead, while a probe is still outstanding and
+// nothing since the spawn has written the record. If what the spawn wrote is
+// not the run that is running, the next agent cannot prove the process survived
+// and marks a serving process crashed — for good, because ORPHANED and CRASHED
+// are terminal.
+func TestAnAgentKilledWhileProbingHandsTheRunOver(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+	s := f.connect(t)
+	s.ok("fleet_select", map[string]any{"name": a.name})
+
+	port := freePort(t)
+	announce := filepath.Join(a.home, "announce-now")
+	started := structured[processStartResult](t, s.okAs("fleet_process_start", map[string]any{
+		"name": "killed-while-probing",
+		"argv": []string{bins.helpers, "serve-when", strconv.Itoa(port), "survived", announce},
+		"ready_probe": map[string]any{
+			// Nothing can match until this test says so, so the probe gives up
+			// whatever the machine is doing.
+			"log_pattern":     "listening on [0-9]+",
+			"timeout_seconds": 1,
+		},
+	}, callOptions{timeout: 120 * time.Second}))
+	pid := int(started.Process.PID)
+	t.Cleanup(func() { killPID(pid) })
+
+	// A probe that gave up is a run whose readiness nobody decided, and the
+	// state machine has nothing left to write. From here to the kill, the
+	// record on disk is exactly what the spawn wrote and nothing else.
+	if started.ReadyError == "" {
+		t.Fatalf("the process has not announced itself yet, so its probe cannot have passed: %+v", started)
+	}
+	if started.Process.State != "starting" {
+		t.Fatalf("a process still being probed is starting, got %q: %+v", started.Process.State, started.Process)
+	}
+
+	writeFile(t, announce, []byte("go"))
+	marker := "listening on " + strconv.Itoa(port)
+	waitFor(t, 30*time.Second, "the announcement to reach the agent's log", func() (bool, string) {
+		logs := readLogs(t, s, started.Process.ProcessID)
+		return contains(logs.Logs, marker), "log so far:\n" + logs.Logs
+	})
+
+	// SIGKILL, not a drain.
+	a.kill()
+	if !processAlive(pid) {
+		t.Fatalf("pid %d died with the agent; supervised processes are meant to outlive it", pid)
+	}
+	f.restart(a)
+
+	var found *processDetail
+	waitFor(t, 60*time.Second, "the re-adopted process to be reported ready", func() (bool, string) {
+		res := s.call("fleet_process_list", nil, callOptions{})
+		if res.IsError {
+			return false, resultText(res)
+		}
+		list := structured[processListResult](t, res)
+		found = findProcess(list.Processes, started.Process.ProcessID)
+		if found == nil {
+			return false, fmt.Sprintf("not in the listing: %+v", list.Processes)
+		}
+		return found.State == "ready", fmt.Sprintf("state is %q (note %q)", found.State, found.AdoptionNote)
+	})
+	if !contains(found.AdoptionNote, "re-adopted") {
+		t.Fatalf("the process reported ready is not the re-adopted one: %q", found.AdoptionNote)
+	}
+	if int(found.PID) != pid {
+		t.Fatalf("the re-adopted process reports pid %d, want the pid the killed agent was supervising (%d)", found.PID, pid)
+	}
+
+	// And it is serving, which is what readiness claims about it.
+	fwd := structured[forwardResult](t, s.okAs("fleet_forward", map[string]any{"remote_port": port}, callOptions{}))
+	if got := httpGet(t, "http://"+fwd.LocalAddress+"/"); got != "survived" {
+		t.Fatalf("the re-adopted server answered %q", got)
+	}
+	s.ok("fleet_forward", map[string]any{"remote_port": port, "stop": true})
 }
 
 // TestSupervisedProcessSurvivesAndIsReadoptedAfterAnAgentCrash runs the

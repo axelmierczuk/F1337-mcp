@@ -163,6 +163,44 @@ func helperMain() {
 		fmt.Fprintln(out, argAt(args, 3, "ready"))
 		time.Sleep(time.Hour)
 
+	case "announce-once":
+		// announce-once <markerPath> <text> [diePath] — announces on its first
+		// run and stays quiet on every run after it.
+		//
+		// A supervised process keeps its argv across a restart, so a marker file
+		// is the only way to give the second run of the *same* process different
+		// output — which is what it takes to ask whether a log_pattern probe is
+		// watching this run's output or the last one's.
+		//
+		// With diePath it also waits for that file, removes it, and exits 1. The
+		// removal is what makes a crash loop steppable: every run of it needs
+		// its own signal, so a test drives the loop one crash at a time instead
+		// of watching one go past.
+		marker, text := argAt(args, 1, ""), argAt(args, 2, "ready")
+		if _, err := os.Stat(marker); err == nil {
+			fmt.Println("restarted without announcing")
+		} else {
+			_ = os.WriteFile(marker, []byte("announced"), 0o600)
+			fmt.Println(text)
+		}
+		if die := argAt(args, 3, ""); die != "" {
+			awaitFile(die)
+			_ = os.Remove(die)
+			os.Exit(1)
+		}
+		time.Sleep(time.Hour)
+
+	case "announce-when":
+		// announce-when <markerPath> <text> — says nothing until the file
+		// appears, then announces once and stays up.
+		//
+		// It is how a test arranges a readiness line at a moment of its
+		// choosing: a probe that has to time out first cannot race an
+		// announcement that cannot happen yet.
+		awaitFile(argAt(args, 1, ""))
+		fmt.Println(argAt(args, 2, "ready"))
+		time.Sleep(time.Hour)
+
 	case "listen":
 		// listen <delayMs> <port> — binds loopback after a delay.
 		time.Sleep(durationArg(args, 1, 0))
@@ -250,6 +288,21 @@ func helperMain() {
 	default:
 		fmt.Fprintln(os.Stderr, "unknown helper mode", args[0])
 		os.Exit(2)
+	}
+}
+
+// awaitFile blocks until path exists. It is the helper's half of a handshake
+// with the test: the test decides when, and the helper's output is a
+// consequence of that decision rather than of a duration either side guessed.
+func awaitFile(path string) {
+	if path == "" {
+		return
+	}
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
