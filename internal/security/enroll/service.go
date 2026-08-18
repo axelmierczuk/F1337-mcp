@@ -113,26 +113,48 @@ type Service struct {
 	Log *slog.Logger
 }
 
-// Enroll redeems req.Token, signs req.CsrDer into an agent leaf, and
-// returns it along with the CA bundle and the name finally assigned to this
-// sandbox.
+// Enroll checks req against the token it names, redeems that token, signs
+// req.CsrDer into an agent leaf, and returns it along with the CA bundle and
+// the name finally assigned to this sandbox.
+//
+// The order of those first two is deliberate and was not always this one.
+// Redemption used to be the first thing that happened, so a request refused for
+// anything else — a mistyped --address, a name the CA will not certify — had
+// already spent the operator's single-use token. Their corrected retry then
+// failed with "enrollment token rejected", which names the credential rather
+// than the mistake, and the obvious next move is to mint a fresh token: that
+// works, and leaves the real cause undiagnosed and repeatable. So every check
+// that can refuse this request now runs first, and the token is spent at the
+// last moment before anything irreversible is done on its behalf.
+//
+// Moving it did not weaken replay protection, because what provides that is
+// [TokenStore.Redeem]'s compare-and-swap and not its position. Redeem still
+// checks and marks in one held lock, so of any number of enrollments racing a
+// single token exactly one wins and the rest are refused as replays. What the
+// reorder opens is a window in which several callers may hold a successful
+// [TokenStore.Inspect] at once — and Inspect claims nothing and reserves
+// nothing, so all it means is that they will all go on to attempt the swap that
+// only one of them can win. (It is not a write-free call in the literal sense:
+// it can still persist a pruning that dropped a long-spent entry, as Redeem
+// does and for the same reason. It marks no live token.) The validation between
+// the two reads the request, the record and the CA's rules and writes nothing,
+// so it cannot interleave into a wrong answer either.
+//
+// The swap therefore has to happen before the fleet registry write, which is
+// the first irreversible step: the loser of a race must be refused without
+// having left a fleet member behind. That is why it is [Service.reserve] that
+// spends the token, immediately before it takes the name.
 func (s *Service) Enroll(ctx context.Context, req *sandboxdv1.EnrollRequest) (*sandboxdv1.EnrollResponse, error) {
 	if err := s.limiter().Allow(peerAddr(ctx)); err != nil {
 		return nil, status.Error(codes.ResourceExhausted, err.Error())
 	}
 
-	rec, err := s.Tokens.Redeem(req.GetToken())
+	// The token is still the first thing checked, so nothing below is reachable
+	// without one: a caller holding no valid token learns only that, exactly as
+	// before, and cannot use the validation that follows as an oracle.
+	rec, err := s.Tokens.Inspect(req.GetToken())
 	if err != nil {
-		// Every rejection reason is reported to the caller identically. The
-		// caller already holds whatever token it sent, so telling it *which*
-		// of invalid, expired, or already-used applies teaches it something
-		// about the store's contents without helping a legitimate agent,
-		// whose operator can read the real reason in the control plane's log.
-		s.log().Warn("enrollment token rejected",
-			slog.String("peer", peerAddr(ctx)),
-			slog.String("reason", err.Error()),
-		)
-		return nil, status.Error(codes.Unauthenticated, "enroll: enrollment token rejected")
+		return nil, s.rejectToken(ctx, err)
 	}
 
 	// A token authorizes an identity, not merely admission. The name is half
@@ -197,12 +219,29 @@ func (s *Service) Enroll(ctx context.Context, req *sandboxdv1.EnrollRequest) (*s
 	// taking it first closes the window where two hosts enrolling at once both
 	// pass the collision check. A failure here means no certificate is issued
 	// at all, which is the safe direction.
-	name, err = s.reserve(name, enrolledSandbox(rec, req), certifiable)
+	//
+	// The token is spent in there too, immediately before the record that
+	// cannot be taken back. Everything above this line can still refuse the
+	// request, and none of it costs the operator their token.
+	redeem := func() error {
+		if _, err := s.Tokens.Redeem(req.GetToken()); err != nil {
+			return fmt.Errorf("%w: %w", errNotRedeemed, err)
+		}
+		return nil
+	}
+	name, err = s.reserve(name, enrolledSandbox(rec, req), certifiable, redeem)
 	switch {
 	case errors.Is(err, errUncertifiable):
 		// The caller's own request is what cannot be certified, so it gets to
 		// hear why — nothing here describes the control plane.
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, errNotRedeemed):
+		// This enrollment lost the race for the token to a concurrent one, or
+		// the operator revoked it, or it expired while this request was being
+		// checked. Every one of those is about the token, so it is reported the
+		// way the token is reported everywhere else — and nothing has been
+		// written to the fleet registry on this request's behalf.
+		return nil, s.rejectToken(ctx, err)
 	case err != nil:
 		// The caller is unauthenticated and a registry failure is the control
 		// plane's own problem, described in the control plane's own terms —
@@ -270,15 +309,48 @@ func (s *Service) log() *slog.Logger {
 	return s.Log
 }
 
+// rejectToken turns a token store failure into the status the caller sees.
+//
+// Every reason a token is refused is reported identically. The caller already
+// holds whatever token it sent, so telling it which of invalid, expired,
+// revoked or already-used applies teaches it something about the store's
+// contents without helping a legitimate agent, whose operator can read the real
+// reason in the control plane's log.
+//
+// A store that could not be read or written is not a refusal and is not
+// reported as one. "Enrollment token rejected" tells an operator to mint
+// another token, and against a corrupt or unwritable store the second one fails
+// exactly as the first did — the same misdirection, one layer down, that moving
+// redemption after validation exists to remove.
+func (s *Service) rejectToken(ctx context.Context, err error) error {
+	if !isTokenRejection(err) {
+		s.log().Error("enrollment could not reach the token store",
+			slog.String("peer", peerAddr(ctx)),
+			slog.String("error", err.Error()),
+		)
+		return status.Error(codes.Internal, "enroll: could not check this enrollment token")
+	}
+	s.log().Warn("enrollment token rejected",
+		slog.String("peer", peerAddr(ctx)),
+		slog.String("reason", err.Error()),
+	)
+	return status.Error(codes.Unauthenticated, "enroll: enrollment token rejected")
+}
+
 // errUncertifiable marks a reserve failure caused by the request itself rather
 // than by the fleet registry, so Enroll can tell the caller what was wrong with
 // what it sent instead of reporting the control plane as broken.
 var errUncertifiable = errors.New("enroll: this request cannot be certified")
 
-// reserve records sb under base, or under the first free "base-N" when base is
-// taken, and returns the name it settled on. The response's AssignedName tells
-// the caller which name it actually got, so a collision is visible rather than
-// silently masked.
+// errNotRedeemed marks a reserve failure caused by the redemption rather than
+// by the name, so Enroll reports it as what it is — a token — instead of as a
+// fleet registry that would not take the name.
+var errNotRedeemed = errors.New("enroll: the enrollment token could not be spent")
+
+// reserve spends the enrollment token and records sb under base, or under the
+// first free "base-N" when base is taken, and returns the name it settled on.
+// The response's AssignedName tells the caller which name it actually got, so a
+// collision is visible rather than silently masked.
 //
 // The NameChecker is consulted first because it makes the common case one
 // write, but it is not trusted: between the check and the record, another host
@@ -288,8 +360,20 @@ var errUncertifiable = errors.New("enroll: this request cannot be certified")
 // certifiable is consulted for the candidate this call is about to take, and it
 // is what keeps the reservation and the certificate in step. The registry entry
 // cannot be taken back, so a candidate whose leaf could not be signed must be
-// rejected before the write, not discovered after it.
-func (s *Service) reserve(base string, sb EnrolledSandbox, certifiable func(string) error) (string, error) {
+// rejected before the write, not discovered after it. Collision resolution is
+// why that check lives here rather than beside the others in Enroll: the name
+// this settles on is not the name the request arrived with, and "build-box-2"
+// is two bytes the CA's limits never saw.
+//
+// redeem spends the enrollment token, and is called exactly once, at the last
+// moment before the first Record — after a candidate has passed both checks
+// above, and before anything has been written. That placement is what makes the
+// two irreversible steps of an enrollment happen together and in the only order
+// that is safe in both directions: a request refused above this point costs the
+// operator nothing, and an enrollment that loses the race for the token is
+// refused without having taken a name.
+func (s *Service) reserve(base string, sb EnrolledSandbox, certifiable func(string) error, redeem func() error) (string, error) {
+	spent := false
 	for i := 0; i < maxNameAttempts; i++ {
 		candidate := base
 		if i > 0 {
@@ -300,6 +384,12 @@ func (s *Service) reserve(base string, sb EnrolledSandbox, certifiable func(stri
 		}
 		if err := certifiable(candidate); err != nil {
 			return candidate, fmt.Errorf("%w: %w", errUncertifiable, err)
+		}
+		if !spent {
+			if err := redeem(); err != nil {
+				return candidate, err
+			}
+			spent = true
 		}
 		if s.Fleet == nil {
 			return candidate, nil
@@ -475,10 +565,12 @@ func checkRequestedAddresses(certName string, authorized, requested []string) ([
 // asks — over the same SAN set, assembled by the same code.
 //
 // It is exported for `fleetctl enroll mint`, which has to answer this before it
-// records a single-use secret. [Service.Enroll] applies the CA's SAN rules in
-// its certifiable closure, which runs after Redeem has marked the token used, so
-// a name the CA will not sign costs the operator a token and is discovered on a
-// host they have already walked away from.
+// records a single-use secret. Redemption no longer spends the token before
+// asking the same question — [Service.reserve] refuses an uncertifiable name
+// with the token still unspent — so a mint that got this wrong now costs a
+// re-mint rather than a re-mint the operator only discovers on a host they have
+// already walked away from. Asking here is still worth it: the operator is in
+// front of the command at mint time, and nowhere near the host at redemption.
 //
 // The point of it living here is that there is one implementation. Mint's own
 // re-derivation of this rule agreed with sanSet on almost every input and

@@ -245,6 +245,19 @@ func (b *logBuffer) stats() (bytes uint64, last string, produced uint64) {
 	return b.logBytes, b.lastLine, b.nextSeq
 }
 
+// nextSequence is the sequence the next appended line will take.
+//
+// It is read under the lock that assigns sequences, so every line appended
+// after it returns carries a sequence at or after the number it handed back.
+// That is what makes it usable as a boundary: a caller who takes it before a
+// process starts writing can afterwards tell that process's output from
+// whatever was in the buffer beforehand. See record.runFirstSeq.
+func (b *logBuffer) nextSequence() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.nextSeq
+}
+
 // oldestRetainedSeq is the sequence of the oldest line still in the ring, and
 // whether the ring holds anything at all.
 func (b *logBuffer) oldestRetainedSeq() (uint64, bool) {

@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
@@ -185,60 +187,231 @@ func TestServer_FactoryErrorAbortsStartup(t *testing.T) {
 	assert.Contains(t, err.Error(), "no state directory")
 }
 
+// rpcResult is what an in-flight call came back with, recorded at the moment
+// it came back.
+//
+// The fields are exported for one reason, and it is not style. #59 reported
+// this test's failure as `{resp:<nil> err:0xc000010100}` and the investigation
+// stopped there for want of the error. That was fmt, not brevity: %+v walks a
+// struct with reflection, reflect refuses to hand out an interface for an
+// unexported field, and so fmt never gets to call Error() and prints the
+// pointer instead. A struct with unexported fields cannot report an error it
+// holds, however it is formatted.
+type rpcResult struct {
+	Resp *sandboxdv1.HealthResponse
+	Err  error
+	// CtxErr is the caller's own context at the moment the call returned. It
+	// is what separates "the server cut this RPC" from "the client gave up on
+	// it", which is the question #59 could not answer.
+	CtxErr error
+	// Elapsed is reported, never asserted on. A call cut at the shutdown
+	// signal and a call that ran out its own 20s deadline are different
+	// failures, and this is what tells them apart in the log.
+	Elapsed time.Duration
+}
+
+// String spells out the gRPC status, because the code is the fact that
+// separates the two hypotheses on #59: Unavailable or a transport close is the
+// daemon cutting the call, DeadlineExceeded or Canceled is the caller or the
+// test giving up on it.
+func (r rpcResult) String() string {
+	var what string
+	switch st, ok := status.FromError(r.Err); {
+	case r.Err == nil:
+		what = fmt.Sprintf("no error, status %v", r.Resp.GetStatus())
+	case ok:
+		what = fmt.Sprintf("gRPC %s: %q", st.Code(), st.Message())
+	default:
+		what = fmt.Sprintf("non-status error: %v", r.Err)
+	}
+	return fmt.Sprintf("%s; caller context: %v; %s after the call started",
+		what, r.CtxErr, r.Elapsed.Round(time.Millisecond))
+}
+
 // The shutdown contract: an RPC already running when the daemon is signalled
 // gets to finish, and its result reaches the caller.
+//
+// The ordering this needs used to be established with a fixed 100ms sleep and
+// then sampled once, which is the shape #59 suspects. Two things replace it.
+// The daemon's listener refusing a dial is a recorded fact that the drain has
+// started, so nothing has to be timed. And the handler records its own stream
+// context being cancelled, which is how gRPC cuts an in-flight RPC — a fact
+// written on the server at the moment it happens, covering the whole time the
+// handler is in the call rather than one sampled instant.
+//
+// The client-side sample is kept as well, because that is the assertion #59
+// tripped, and a run that trips it now says what the RPC actually came back
+// with and what the daemon was doing at the time.
 func TestServer_ShutdownDrainsInFlightRPCs(t *testing.T) {
 	fleet := newTestFleet(t)
 	svc := newCountingService()
 	svc.block = make(chan struct{})
 
-	h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)})
+	// The daemon's own log, kept so that a failure here can say what the
+	// shutdown path thought it was doing — whether it logged "drained" while
+	// a handler was still inside a call, or hit its drain deadline and
+	// cancelled. Neither is visible from the client side alone.
+	log, serverLog := capturedLogger()
+	h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)},
+		func(o *agent.Options) { o.Log = log })
+
+	// Registered after start, so it runs before the cleanup start registered:
+	// cleanups are LIFO, and releasing the handler has to happen before
+	// anything waits on the drain. Every t.Fatalf below this line skips the
+	// release in the body, and a handler nobody releases makes GracefulStop
+	// sit for the full 30s and report a second, misleading failure on top of
+	// the real one. That is the shape #59 arrived in; see release.
+	t.Cleanup(svc.release)
 
 	certPEM, keyPEM := fleet.controlLeaf()
 	hostClient := h.hostClient(t, fleet.ca.CertPEM(), certPEM, keyPEM)
 
-	type result struct {
-		resp *sandboxdv1.HealthResponse
-		err  error
-	}
-	results := make(chan result, 1)
+	results := make(chan rpcResult, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		resp, err := hostClient.Health(ctx, &sandboxdv1.HealthRequest{})
-		results <- result{resp, err}
+		started := time.Now()
+		// Marked, so the handler holds this call and not the pool's background
+		// health probe; see holdHeader.
+		resp, err := hostClient.Health(hold(ctx), &sandboxdv1.HealthRequest{})
+		results <- rpcResult{Resp: resp, Err: err, CtxErr: ctx.Err(), Elapsed: time.Since(started)}
 	}()
 
-	// Wait until the handler is genuinely inside the call, so the shutdown
+	// Wait until the handler is genuinely inside *this* call, so the shutdown
 	// that follows is racing a real in-flight RPC rather than an idle server.
+	//
+	// "This call" is the part #59 turned on: only a marked call closes
+	// entered, and the marker is on the call above and nowhere else. A future
+	// edit that drops it does not quietly weaken this into "some call entered"
+	// — nothing closes entered at all and the wait below fails outright.
 	select {
 	case <-svc.entered:
 	case <-time.After(10 * time.Second):
-		t.Fatal("handler never entered")
+		t.Fatalf("handler never entered; daemon log:\n%s", serverLog)
 	}
 
-	// Signal shutdown while the call is still running.
+	// Signal shutdown while the call is still running, and wait for the
+	// daemon to prove it started: GracefulStop closes the listener before it
+	// waits on any handler. Only this test can release the handler, so a
+	// refused dial here means the drain is under way with an RPC still in it.
 	h.cancel()
-	time.Sleep(100 * time.Millisecond)
+	h.awaitNotAccepting(t, serverLog)
 
-	// Nothing has returned yet: the drain is waiting on the handler.
+	// Nothing has come back yet: the drain is waiting on the handler. This is
+	// the client's side of the contract, and the assertion #59 tripped.
 	select {
 	case r := <-results:
-		t.Fatalf("in-flight RPC returned before its handler finished: %+v", r)
+		t.Fatalf("an RPC already in flight came back while its handler was still running: %s\ndaemon log:\n%s",
+			r, serverLog)
 	default:
 	}
 
-	close(svc.block)
+	svc.release()
 
 	select {
 	case r := <-results:
-		require.NoError(t, r.err, "an RPC already in flight must complete rather than being cut off")
-		assert.Equal(t, sandboxdv1.HealthResponse_STATUS_SERVING, r.resp.GetStatus())
+		// The server's side, and the one that cannot be raced: gRPC cancels a
+		// handler's context when it drops the stream, so an empty record here
+		// means nothing cut this RPC at any point between the shutdown signal
+		// and the handler being released.
+		require.Empty(t, svc.wasCut(),
+			"the shutdown cancelled an in-flight handler instead of waiting for it; the call saw %s\ndaemon log:\n%s",
+			r, serverLog)
+		require.NoError(t, r.Err,
+			"an RPC already in flight must complete rather than being cut off: %s\nhandlers entered: %d\ndaemon log:\n%s",
+			r, svc.servedCount(), serverLog)
+		assert.Equal(t, sandboxdv1.HealthResponse_STATUS_SERVING, r.Resp.GetStatus())
 	case <-time.After(10 * time.Second):
-		t.Fatal("in-flight RPC never returned")
+		t.Fatalf("in-flight RPC never returned; daemon log:\n%s", serverLog)
 	}
 
 	require.NoError(t, h.wait(t))
+}
+
+// A blocked handler is released whatever the body did, so a failing run says
+// what failed once instead of hanging first.
+//
+// This is the second half of what #59 reported. The first line of that failure
+// was the real one; the second — "server did not shut down within 30s" — was
+// the test's own cleanup waiting on a handler the body had stopped short of
+// releasing, and it is the line that reads like the problem. A test that
+// exists to say what happened has to survive its own failure to say it.
+//
+// The subtest here ends the way a t.Fatalf ends the drain test: shutdown
+// signalled, a handler still inside the call, and nothing in the body left to
+// run. What is measured is its cleanup, which is why the release is registered
+// after start — cleanups are LIFO, and a release that runs after the wait on
+// the daemon is a release that runs 30s too late.
+func TestServer_ABlockedHandlerIsReleasedWhateverTheBodyDid(t *testing.T) {
+	started := time.Now()
+	finished := t.Run("signals shutdown and returns without releasing its handler", func(t *testing.T) {
+		fleet := newTestFleet(t)
+		svc := newCountingService()
+		svc.block = make(chan struct{})
+
+		h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)})
+		t.Cleanup(svc.release)
+
+		certPEM, keyPEM := fleet.controlLeaf()
+		hostClient := h.hostClient(t, fleet.ca.CertPEM(), certPEM, keyPEM)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			_, _ = hostClient.Health(hold(ctx), &sandboxdv1.HealthRequest{})
+		}()
+
+		select {
+		case <-svc.entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("handler never entered")
+		}
+		h.cancel()
+	})
+	elapsed := time.Since(started)
+
+	assert.True(t, finished,
+		"the subtest's own cleanup reported the daemon failing to shut down, which is the second error #59 carried")
+	assert.Less(t, elapsed, agent.DefaultDrainTimeout/2,
+		"the daemon drained for %s: a handler left blocked by a body that stopped early has to be released by "+
+			"cleanup, or every failure in the drain test is followed by a full drain and a second, misleading error",
+		elapsed.Round(time.Millisecond))
+}
+
+// awaitNotAccepting waits for the listener's own answer, not for its own
+// patience to run out.
+//
+// bufconn hands a dial straight to Accept over an unbuffered channel, so a
+// dial against a listener that is open but unattended fails with the poll's
+// deadline rather than with a closed-listener error. Reading that as "the
+// drain has started" would make this helper a fixed sleep again — the exact
+// thing it replaced — and would let the drain test's ordering assertion run
+// before the shutdown it is supposed to be racing.
+func TestAwaitNotAccepting_WaitsForTheListenerNotForItsOwnTimeout(t *testing.T) {
+	lis := bufconn.Listen(1024)
+	t.Cleanup(func() { _ = lis.Close() })
+	h := &harness{lis: lis}
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		h.awaitNotAccepting(t, &syncBuffer{})
+	}()
+
+	// Nothing ever calls Accept, so every poll times out. Three times the
+	// poll's own bound is long enough that a helper returning on that timeout
+	// has certainly done so.
+	select {
+	case <-returned:
+		t.Fatal("awaitNotAccepting reported the drain under way while the listener was still open and serving")
+	case <-time.After(3 * awaitPollTimeout):
+	}
+
+	require.NoError(t, lis.Close())
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("awaitNotAccepting did not return once the listener was closed")
+	}
 }
 
 // A handler that will never return must not stop the daemon exiting. The drain
@@ -247,17 +420,19 @@ func TestServer_ShutdownCutsOffAtTheDrainDeadline(t *testing.T) {
 	fleet := newTestFleet(t)
 	svc := newCountingService()
 	svc.block = make(chan struct{})
-	t.Cleanup(func() { close(svc.block) })
 
 	h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)},
 		func(o *agent.Options) { o.DrainTimeout = 300 * time.Millisecond })
+	// After start, for the ordering reason the drain test gives: this has to
+	// run before the cleanup that waits on the daemon, not after it.
+	t.Cleanup(svc.release)
 
 	certPEM, keyPEM := fleet.controlLeaf()
 	hostClient := h.hostClient(t, fleet.ca.CertPEM(), certPEM, keyPEM)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		_, _ = hostClient.Health(ctx, &sandboxdv1.HealthRequest{})
+		_, _ = hostClient.Health(hold(ctx), &sandboxdv1.HealthRequest{})
 	}()
 
 	select {

@@ -126,10 +126,11 @@ dedicated machine). Full threat model in [docs/security.md](docs/security.md).
 ## Development
 
 ```sh
-make tools     # pinned buf, protoc plugins, golangci-lint into .tools/
-make proto     # regenerate Go from proto/
-make build     # all three binaries
-make check     # everything CI runs
+make tools        # pinned buf, protoc plugins, golangci-lint into .tools/
+make proto        # regenerate Go from proto/
+make build        # all three binaries
+make check        # the gate: proto, vet and lint per GOOS, tests under -race
+make test-norace  # the unit tests without -race, as CI and the release gate run them
 ```
 
 Go 1.25, [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk),

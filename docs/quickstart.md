@@ -317,5 +317,10 @@ given at install time. Check `fleet_info` for the roots actually in force.
 Only an agent with `exec.enabled: false` produces this error at all; with exec
 on there is no jail to escape.
 
-**Enrollment fails with `token expired or already used`.**
-Tokens are single-use. Mint another.
+**Enrollment fails with `enrollment token rejected`.**
+The token was unrecognized, expired, revoked, or already redeemed — the control
+plane reports all four identically to an unauthenticated caller, and names which
+one in its own log. Mint another. This message is about the token and only the
+token: a request refused for anything else — a `--name` the token does not
+reserve, an `--address` it does not authorize — says so, and leaves the token
+spendable, so the corrected command works without a re-mint.

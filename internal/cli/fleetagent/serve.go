@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -64,6 +65,21 @@ type serveOptions struct {
 	drain      time.Duration
 }
 
+// serverOptions is what the daemon is built from.
+//
+// Extracted for the same reason enrollRequest is: the version the running
+// daemon reports and the version enrollment records are one fact, and a test
+// can only hold them to that if both are reachable without starting a daemon
+// or dialling a control plane. See reportedVersion and #61.
+func serverOptions(cfg *agent.Config, log *slog.Logger, drain time.Duration) agent.Options {
+	return agent.Options{
+		Config:       cfg,
+		Log:          log,
+		Version:      reportedVersion(),
+		DrainTimeout: drain,
+	}
+}
+
 func runServe(ctx context.Context, opts serveOptions) error {
 	path, err := agent.ResolveConfigPath(opts.configPath)
 	if err != nil {
@@ -98,12 +114,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 
 	// The jail state is announced by agent.New, which is the one place that
 	// decides it — see jailFor. Doing it here as well would let the two drift.
-	srv, err := agent.New(agent.Options{
-		Config:       cfg,
-		Log:          log,
-		Version:      version.Version,
-		DrainTimeout: opts.drain,
-	})
+	srv, err := agent.New(serverOptions(cfg, log, opts.drain))
 	if err != nil {
 		return err
 	}

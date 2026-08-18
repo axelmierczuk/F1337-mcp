@@ -59,7 +59,9 @@ Everything except one scenario.
 | `TestDevServerReadinessForwardAndFetch` | The whole remote dev loop: readiness probe, port forward, HTTP GET over `localhost`. |
 | `TestForwardRefusesAPortNothingIsServing` | A forward to a dead port is refused by the sandbox rather than opening a local listener that resets every connection. |
 | `TestProcessRestartKeepsItsIdentityAndComesBackReady` | A restart keeps the process id, passes its log-pattern probe again, serves again, keeps both runs' logs, and leaves the restart policy's budget alone. |
-| `TestALogPatternProbeMatchesThePreviousRunsOutput` | Records a defect, not a requirement. See the comment on the test. |
+| `TestALogPatternProbeWatchesTheRunItIsProbing` | A restarted run that never prints the pattern is reported as not ready, rather than matching the previous run's announcement out of the retained log (#57). |
+| `TestAReadoptedProcessIsReadyOnTheAnnouncementItAlreadyMade` | The other side of the same rule: a process re-adopted while it was still being probed is ready on the announcement it made to the agent that is gone, read out of the retained log rather than waited for again. |
+| `TestAnAgentKilledWhileProbingHandsTheRunOver` | The same handover from an agent that was SIGKILLed rather than stopped, while a probe was outstanding and nothing since the spawn had written the record. |
 | `TestProcessLogsFollowReturnsAtItsDeadline` | A following read of a process's logs is bounded. |
 | `TestSupervisedProcessSurvivesAndIsReadoptedAfterAnAgentCrash` | A supervised process outlives a SIGKILLed agent, the next agent re-adopts it, its logs survive, capture resumes, and a stop still reaches it. |
 | `TestStaleRecordIsOrphanedRatherThanSignalled` | A record whose pid exists but whose start identity does not match is orphaned, never signalled. |
@@ -69,7 +71,10 @@ Everything except one scenario.
 | `TestAgentRejectsForeignAndWrongProfileClientCertificates` | A leaf from another CA is refused, and so is an agent's own leaf used as a client certificate. |
 | `TestEnrollmentRefusesWhatTheTokenDoesNotAuthorize` | A host cannot enroll as a name or an address its token does not authorize, and a spent token cannot be replayed. |
 | `TestEnrollmentRequiresThePinnedFingerprint` | Enrollment refuses to proceed unpinned, and a wrong pin fails the handshake before the token is sent. |
-| `TestARefusedEnrollmentSpendsItsToken` | Records a defect, not a requirement. See the comment on the test. |
+| `TestARefusedEnrollmentKeepsItsToken` | A wrong `--name` and a mistyped `--address` are each refused on what they name, and the corrected command enrolls on the same token; single-use still holds afterwards. |
+| `TestARefusedEnrollmentKeepsItsTokenWhenTheAgentAddsALoopbackName` | A loopback SAN the agent adds takes the leaf one name over the CA's limit; the refusal is correct and costs no token. |
+| `TestARefusedEnrollmentKeepsItsTokenWhenACollisionLengthensTheName` | Collision resolution offers `<name>-2`, two bytes past the DNS label limit; the refusal is correct and costs no token. |
+| `TestTheSANLimitThisSuiteAssumesIsTheOneTheCAEnforces` | Pins this suite's `maxLeafSANs` to the product through `enroll mint`, so raising `ca.MaxSANs` cannot leave the loopback scenario passing on an enrollment that was never refused. |
 | `TestConcurrentCallsKeepTheirTargets` | Two dozen calls in flight across both sandboxes each run where they were aimed. |
 | `TestListReportsAnUnreachableSandboxWithoutWaitingForIt` | A dead sandbox is reported dead in the same listing that still reports its neighbour live. |
 | `TestFileSearchToolsWalkTheSandbox` | `fleet_ls`, `fleet_glob` and `fleet_grep` — the last of which is a server stream — over a real tree. |
