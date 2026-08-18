@@ -402,10 +402,11 @@ func (s *Service) run(
 		// And the one path out that ends a running session without going
 		// through [Service.reap]. The tree still has to go with it, and the
 		// deferred sweep that used to do that from below is gone; this is the
-		// same signal, sent from the one place that can still prove where it is
-		// aimed. The terminal is released after it, by the defer above, exactly
-		// as it was when the sweep was deferred too.
-		wait.killGroup(group, s.log)
+		// same signal, sent through the group, which is the only thing that
+		// knows whether its id is still the session's. The terminal is released
+		// after it, by the defer above, exactly as it was when the sweep was
+		// deferred too.
+		killGroup(group, s.log)
 
 		rec.outcome, rec.failure = policy.OutcomeError, "the session could not be reported as open"
 		rec.duration = time.Since(started)
@@ -550,13 +551,15 @@ func (s *Service) await(ctx context.Context, sess *session, waited <-chan error)
 // stalled one must not be able to stop this. See [sessionTerminal.release], and
 // read [session.pumpOutput] before changing either.
 //
-// The kill goes through [leaderWait.killGroup] rather than straight to the
-// group, and that is #96 rather than indirection. This teardown used to send
-// its kill after a select on the wait, so the branch it takes when the hangup
-// did end the session is the branch on which the leader has already been
-// collected — and on Unix that is a SIGKILL to a group id the kernel has taken
-// back. Ordering the two is not something either of them can do alone: the
-// leader can exit while this function is deciding to signal.
+// The kill below is sent unconditionally and the group decides whether it goes
+// anywhere, which is #96 and then #105. This teardown sends its kill after a
+// select on the wait, so the branch it takes when the hangup did end the
+// session is the branch on which the leader has already been collected — and on
+// Unix that is a SIGKILL to a group id the kernel has taken back. Ordering the
+// two is not something either of them can do alone: the leader can exit while
+// this function is deciding to signal. So the ordering belongs to the thing
+// that owns the id and performs the collection; see [killGroup] and
+// [platform.ProcessGroup.Collect].
 func (s *Service) reap(sess *session, group *platform.ProcessGroup, wait *leaderWait) bool {
 	_ = sess.tty.release()
 
@@ -567,7 +570,7 @@ func (s *Service) reap(sess *session, group *platform.ProcessGroup, wait *leader
 	case <-time.After(hangupGrace):
 	}
 
-	wait.killGroup(group, s.log)
+	killGroup(group, s.log)
 	if reaped {
 		return true
 	}
@@ -610,69 +613,76 @@ func (s *Service) reap(sess *session, group *platform.ProcessGroup, wait *leader
 // This is #91 one package over, and the ordering, the measurements and the
 // deterministic reproduction are recorded in [platform.AwaitExit].
 //
-// # Why a lock and not just the right order
+// # Where the rule now lives
 //
-// Two things signal a session's group: the sweep below, and the teardown's own
-// kill in [Service.reap]. Writing them in the right order is not enough,
-// because the teardown decides to signal on a timeout and the leader can exit
-// while it is deciding — so the two are ordered against the collection rather
-// than against each other, and the collection is what takes the lock.
+// Not here. [platform.ProcessGroup] keeps it, because the release is its event
+// to know about: [platform.ProcessGroup.SweepAndCollect] performs the
+// collection, marks the id released under the same lock every signal takes, and
+// refuses afterwards. This type is what starts that wait and hands the handler
+// its answer.
+//
+// The mutex that used to be here was right and reached one package. #105 is the
+// same defect in internal/agent/exec's timeout watcher, which signals a group
+// its own wait is about to collect — and a copy of this rule that agreed with
+// that one on the day it was written is what #54 spent an audit round
+// collapsing. So it is one implementation, enforced by the type that owns the
+// id, rather than a rule each caller is trusted to keep.
 type leaderWait struct {
 	// waited carries what Wait reported, buffered so the goroutine can finish
 	// after the handler has returned.
 	waited chan error
-
-	// mu orders this session's group signals against the Wait that releases
-	// the group id; collected records that the release has happened.
-	mu        sync.Mutex
-	collected bool
 }
 
 // startLeaderWait begins waiting for the session's command on its own
 // goroutine, so the handler is never stuck behind a process that will not exit.
 func startLeaderWait(cmd *pty.Cmd, group *platform.ProcessGroup, log *slog.Logger) *leaderWait {
 	l := &leaderWait{waited: make(chan error, 1)}
-	go func() { l.waited <- l.sweepAndCollect(cmd, group, log) }()
+	go func() { l.waited <- sweepAndCollect(cmd, group, log) }()
 	return l
 }
 
 // killGroup sends the teardown's own kill to the session's group.
-func (l *leaderWait) killGroup(group *platform.ProcessGroup, log *slog.Logger) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.signal(group.Kill, log, "could not kill the session's process group")
-}
-
-// signal sends one of the session's group signals, unless a signal sent now
-// could no longer name the session's own tree. Called with the lock held.
 //
-// Every group signal this package sends goes through here, the sweep included,
-// so the rule is one thing that is enforced rather than two call sites that
-// happen to be written in the right order. The sweep is inside the interval by
-// construction — it is sent under this same lock, between the leader exiting
-// and the collection — and asking anyway is what makes moving it out of that
-// interval stop working rather than quietly still compile.
+// It is sent unconditionally and the group decides, which is the whole of the
+// change #105 brought back here. On Unix a group whose leader the wait has
+// already collected refuses it — see [platform.ErrGroupReleased] — and there is
+// nothing left for it to have reached: the sweep went out from inside that
+// collection, to the same group, while the leader's zombie still held its id.
 //
-// Two answers are ordinary here rather than failures:
+// On Windows it goes out and has to: closing a pseudo-console ends the
+// processes attached to it, and a grandchild that never attached to one —
+// anything the session started that is not a console application — has nothing
+// else to end it before the job is closed. TerminateJobObject is what does, and
+// skipping it because the leader happened to exit first is exactly how "closing
+// the stream kills the whole tree" becomes a claim rather than a fact. It cost
+// three rounds of PR #63 to establish that. Nothing there is named by a number
+// the kernel reclaims, so nothing there refuses.
 //
-//   - ErrProcessNotFound, for a group with nothing left in it. See
-//     [platform.ProcessGroup.Sweep] for what the two platforms say about a
-//     group holding only its leader's zombie.
+// Two answers are ordinary rather than failures:
+//
+//   - ErrProcessNotFound, for a group with nothing left in it — and for the
+//     released id above, which wraps it. See [platform.ProcessGroup.Sweep] for
+//     what the two platforms say about a group holding only its leader's
+//     zombie.
 //   - ErrGroupClosed, for a handler that has already returned. [Service.run]
 //     releases the group on its way out while this wait may still be watching
 //     for the leader to exit — on the path where a ShellOpened could not be
-//     delivered, always — so a sweep that arrives afterwards finds a group the
-//     session has given up. There is nothing left for it to reach: the kill
-//     that ended the session went out before the release, to the whole group.
-func (l *leaderWait) signal(send func() error, log *slog.Logger, failed string) {
-	if !l.mayStillSignal() {
-		return
+//     delivered, always — so a kill that arrives afterwards finds a group the
+//     session has given up.
+func killGroup(group *platform.ProcessGroup, log *slog.Logger) {
+	switch err := group.Kill(); {
+	case err == nil:
+	case errors.Is(err, platform.ErrGroupReleased):
+		// Tested for before ErrProcessNotFound, which it wraps, because the two
+		// are worth telling apart here: this one is the teardown arriving after
+		// the wait, which is the interleaving #96 and #105 are about, and a line
+		// saying so is what makes it visible that the refusal happened rather
+		// than that the group was empty.
+		log.Debug("the session's leader had already been collected, so the teardown's kill was not sent")
+	case errors.Is(err, platform.ErrProcessNotFound), errors.Is(err, platform.ErrGroupClosed):
+	default:
+		log.Warn("could not kill the session's process group", "error", err)
 	}
-	err := send()
-	if err == nil || errors.Is(err, platform.ErrProcessNotFound) || errors.Is(err, platform.ErrGroupClosed) {
-		return
-	}
-	log.Warn(failed, "error", err)
 }
 
 // pumpInput carries the client's keystrokes and resizes to the terminal.

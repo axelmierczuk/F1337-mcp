@@ -56,6 +56,14 @@ func (s *Supervisor) signalRecord(r *record, sig platform.Signal, group bool) er
 	}
 
 	if !group {
+		if existing != nil {
+			// The group this agent spawned, which holds the leader as a
+			// process rather than as a number — and which refuses once its own
+			// collection has released it. The check above rules out a pid the
+			// kernel reissued before it ran; this is what rules out the exit
+			// landing between that check and the kill.
+			return leaderResult(existing.SignalLeader(sig), pid)
+		}
 		return signalLeader(pid, sig)
 	}
 
@@ -87,12 +95,39 @@ func (s *Supervisor) signalRecord(r *record, sig platform.Signal, group bool) er
 	return nil
 }
 
-// signalLeader delivers to the single process, for the caller that explicitly
-// asked not to signal the group.
+// leaderResult translates what a group said about signalling its leader alone
+// into what this package's callers read.
+func leaderResult(err error, pid int) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, platform.ErrProcessNotFound), errors.Is(err, platform.ErrGroupClosed):
+		return errAlreadyExited
+	case errors.Is(err, platform.ErrSignalUnsupported):
+		return fmt.Errorf("this signal has no meaning on this platform: %w", err)
+	default:
+		return fmt.Errorf("could not signal pid %d: %w", pid, err)
+	}
+}
+
+// signalLeader delivers to the single process, for a caller that explicitly
+// asked not to signal the group and a record this agent did not spawn.
+//
+// Re-adoption is the whole of that: the agent is not this process's parent, so
+// nothing it holds keeps the pid naming this process — the process's real
+// parent is gone, init reaps it, and the number is free the moment it does.
+// There is no handle to pin it with and no collection to order against, so the
+// start-identity check in signalRecord is the only guard there is, and it is a
+// check-then-act: a process that exits inside the syscall that follows leaves
+// this call aiming at whatever takes the pid next. That is a property of
+// supervising a process this agent did not fork, not something this function
+// can fix; a spawned process takes the branch above instead, which can.
 //
 // On Windows there is no POSIX delivery at all, so it degrades to a
 // single-process group — a job-less handle, which terminates the leader and
-// nothing else. That is as close to "just this process" as Windows offers.
+// nothing else. That is as close to "just this process" as Windows offers, and
+// it is pinned: OpenProcessGroup proves the handle it opened is the process
+// StatProcess saw before it hands it back.
 func signalLeader(pid int, sig platform.Signal) error {
 	osSig, err := sig.OSSignal()
 	if err != nil {

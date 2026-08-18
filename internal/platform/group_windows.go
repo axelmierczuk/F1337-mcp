@@ -491,6 +491,50 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 	}
 }
 
+// SignalLeader delivers sig to the group's leader alone, for the caller that
+// explicitly asked not to reach the tree.
+//
+// It is [ProcessGroup.Signal] with the job left out, so a terminate goes to the
+// leader's own handle and nothing else in the job goes with it. SignalInt is
+// the exception it cannot make: CTRL_BREAK_EVENT is delivered to a console
+// process group, which is what the flag Configure sets creates, and Windows
+// offers no per-process form of it. That is the same answer this platform gives
+// everywhere else — the leader is what can be reached individually, and only by
+// terminating it.
+//
+// Its Unix counterpart exists to keep a signal aimed at a process rather than a
+// number. Nothing here needs that: the group has held a handle to the leader
+// since Adopt, and Windows will not reissue a pid while a handle to its process
+// object is open.
+func (g *ProcessGroup) SignalLeader(sig Signal) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.closed {
+		return ErrGroupClosed
+	}
+	if g.pid == 0 {
+		return ErrNoProcess
+	}
+
+	switch sig {
+	case SignalInt:
+		if g.leader == 0 {
+			return g.leaderReason()
+		}
+		if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, g.pid); err != nil {
+			return fmt.Errorf("platform: sending CTRL_BREAK_EVENT to pid %d: %w", g.pid, err)
+		}
+		return nil
+	case SignalTerm, SignalKill:
+		return terminateLeader(g.leaderRef())
+	case SignalUnspecified, SignalHup, SignalUSR1, SignalUSR2:
+		return fmt.Errorf("%w: %s", ErrSignalUnsupported, sig)
+	default:
+		return fmt.Errorf("%w: %s", ErrSignalUnsupported, sig)
+	}
+}
+
 // stillActive is STILL_ACTIVE, the exit code GetExitCodeProcess reports for a
 // process that has not exited.
 const stillActive = 259
@@ -646,6 +690,41 @@ func (g *ProcessGroup) Kill() error { return g.Signal(SignalKill) }
 // sweeps. It exists so that a caller written against [ProcessGroup] compiles
 // and means the same thing on every platform.
 func (g *ProcessGroup) Sweep() error { return g.Signal(SignalKill) }
+
+// Collect reaps the group's leader. On Windows that is the wait and nothing
+// else, and the nothing else is the point.
+//
+// The Unix implementation exists to order a caller's signals against the
+// collection, because a process group id there is a number the kernel reclaims
+// the moment the last member of the group is reaped — so the collection is what
+// takes the group's name away, and everything that signals has to be kept on
+// the near side of it.
+//
+// Nothing here has a name to lose. A job object is a kernel object reached
+// through a handle this group holds, and [ProcessGroup.Adopt] opens a handle to
+// the leader as well, at the one moment its pid is unambiguous; Windows will
+// not reissue a pid while any handle to its process object is open. So neither
+// the job nor the leader can come to name anything else while the group can
+// still be asked to signal them, whatever any caller does with Wait — and a
+// signal sent after the collection is as well aimed as one sent before it. See
+// [AwaitExit], which returns ErrUnsupported here for the same reason.
+//
+// groupErr is therefore always nil: there is no guarantee for this call to
+// give up.
+func (g *ProcessGroup) Collect(wait func() error) (groupErr, waitErr error) {
+	return nil, wait()
+}
+
+// SweepAndCollect is [ProcessGroup.Collect]: there is no sweep on Windows.
+//
+// Both agent callers create their group with GroupConfig.KillOnClose and hold
+// the only handle to the job, so closing the group is what takes the tree down
+// and an extra TerminateJobObject would add no guarantee to it. See
+// internal/agent/exec's and internal/agent/shell's Windows sweeps, which say
+// the same thing from the other side.
+func (g *ProcessGroup) SweepAndCollect(wait func() error) (groupErr, waitErr error) {
+	return g.Collect(wait)
+}
 
 // Close releases the job handle and the leader handle. When the group was
 // created with GroupConfig.KillOnClose, closing the job is what kills the tree

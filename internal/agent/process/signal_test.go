@@ -128,6 +128,43 @@ func TestWholeTreeIsKilled(t *testing.T) {
 		func() bool { return !pidRunning(grandchild) })
 }
 
+// A caller that asked not to signal the group gets the leader and nothing else.
+//
+// process_group: false is the one request that says "this process, not its
+// tree", and the assertion is the grandchild still running afterwards: a path
+// that quietly signalled the group would pass every other check here, and
+// killing a tree a caller asked to leave alone is the same class of harm as
+// killing the wrong tree.
+//
+// It is also what routes that request through the group the agent spawned,
+// which holds the leader as a process rather than as a number — os.FindProcess
+// and a pid would re-open the reuse window that the group's own collection
+// closes. Windows reaches the same place: no job is terminated, so the
+// grandchild inside it survives.
+func TestSignalWithoutTheGroupReachesTheLeaderAlone(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t)
+
+	r := ts.startHelper("keeps-its-children", "spawn")
+	line := waitForLine(t, r, 20*time.Second, "grandchild ")
+	grandchild, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "grandchild ")))
+	require.NoError(t, err)
+	leader := int(r.status().GetPid())
+	require.NotEqual(t, leader, grandchild)
+
+	// Both running before the signal, so what follows is about the signal and
+	// not about a grandchild that never started.
+	require.True(t, pidRunning(leader))
+	require.True(t, pidRunning(grandchild))
+	t.Cleanup(func() { killPID(t, grandchild) })
+
+	require.NoError(t, ts.signalRecord(r, platform.SignalKill, false))
+
+	waitFor(t, 10*time.Second, "the leader to be gone", func() bool { return !pidRunning(leader) })
+	require.True(t, pidRunning(grandchild),
+		"the grandchild went with the leader: a request that asked for one process signalled the group")
+}
+
 // TestSignalDoesNotTrustACachedPID is the pid-reuse guard on the signalling
 // path. The record's start identity is deliberately corrupted, which is exactly
 // what a reused pid looks like from the supervisor's side.

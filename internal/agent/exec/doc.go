@@ -29,6 +29,7 @@
 //	env.go      the documented base environment and how a request overrides it
 //	stream.go   chunking, the output cap, and the truncation report
 //	shell_*.go  what `shell: true` routes through on each platform
-//	sweep_*.go  the post-exec sweep, and the ordering that keeps it aimed
+//	sweep.go    the post-exec sweep and the collection it is ordered against,
+//	            both of which platform.ProcessGroup performs
 //	wait_*.go   reading a terminating signal out of a process state
 package exec

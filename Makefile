@@ -367,6 +367,30 @@ test-integration:
 test-integration-docker:
 	FLEET_E2E_DOCKER=1 go test -tags integration -count=1 -timeout 30m -run InContainer ./test/...
 
+## test-pidreuse: reproduce the pid-reuse hazard in a pid namespace
+#
+# The one scenario in this repository that arranges the event rather than the
+# call. A process group id is a pid, and what makes signalling a released one
+# dangerous is the kernel handing that number to somebody else — which cannot
+# be waited for on a shared machine and can be placed exactly in a pid
+# namespace, through /proc/sys/kernel/ns_last_pid.
+#
+# Privileged and in a container, because writing that file needs CAP_SYS_ADMIN
+# and a namespace of its own; --privileged is also what unmasks /proc/sys. The
+# module cache is mounted so the inner build does not need the network.
+#
+# Not part of `test` or `check`: the test skips without the environment
+# variable below, so a run outside a namespace neither fails nor pretends to
+# have proved anything. See internal/agent/exec/pidreuse_linux_test.go.
+.PHONY: test-pidreuse
+test-pidreuse:
+	docker run --rm --privileged \
+		--volume "$(CURDIR):/src" \
+		--volume "$$(go env GOMODCACHE):/go/pkg/mod" \
+		--workdir /src \
+		--env FLEET_PIDNS_REUSE=1 \
+		golang:1.25 go test -count=1 -v -run PIDReuse ./internal/agent/exec/
+
 ## lint: run golangci-lint for every GOOS the agent ships for
 #
 # Once per GOOS, not once. A host-only run structurally cannot see a file
