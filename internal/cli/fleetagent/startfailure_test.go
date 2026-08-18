@@ -350,12 +350,22 @@ func TestServiceControl_AFailedStartNamesTheCommandThatHasTheReason(t *testing.T
 		"a stop that failed has no start to explain, and pointing at a start record would be noise")
 }
 
-// The message the manager's log is handed carries the error whole.
-func TestStartupFailureMessage(t *testing.T) {
-	assert.Empty(t, fleetagent.StartupFailureMessageForTest(nil))
+// The message the manager's log is handed carries the error whole, and says
+// which of the two failures it is.
+func TestManagedFailureMessage(t *testing.T) {
+	assert.Empty(t, fleetagent.ManagedFailureMessageForTest(false, nil))
+	assert.Empty(t, fleetagent.ManagedFailureMessageForTest(true, nil))
 
-	msg := fleetagent.StartupFailureMessageForTest(errors.New("because of the listen address"))
-	assert.Contains(t, msg, fleetagent.ServiceName, "the event log entry has to name the product")
-	assert.Contains(t, msg, "could not start")
-	assert.Contains(t, msg, "because of the listen address")
+	never := fleetagent.ManagedFailureMessageForTest(false, errors.New("because of the listen address"))
+	assert.Contains(t, never, fleetagent.ServiceName, "the event log entry has to name the product")
+	assert.Contains(t, never, "could not start")
+	assert.Contains(t, never, "because of the listen address")
+
+	// A daemon that served for a week and then failed is not a daemon that could
+	// not start, and sending that operator to their config file is a wrong
+	// answer with a plausible-looking reason attached.
+	after := fleetagent.ManagedFailureMessageForTest(true, errors.New("the listener closed"))
+	assert.NotContains(t, after, "could not start")
+	assert.Contains(t, after, "stopped with an error")
+	assert.Contains(t, after, "the listener closed")
 }

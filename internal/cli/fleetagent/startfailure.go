@@ -193,18 +193,28 @@ func startFailureNotes(rec *startFailure) []string {
 	return lines
 }
 
-// startupFailureMessage is what a daemon started by a service manager hands
-// that manager's own log when it cannot start: the Windows event log, journald,
-// or launchd's error path.
+// managedFailureMessage is what a daemon started by a service manager hands that
+// manager's own log when it fails: the Windows event log, journald, or launchd's
+// error path.
 //
 // It carries the error verbatim, remedy included. The operator reading
 // services.msc or `Get-EventLog -LogName Application -Source fleet-agent` is
 // the same operator who would have read it on a terminal, and paraphrasing it
 // there is what turned "listen on a loopback or private address" into a
 // 30-second timeout.
-func startupFailureMessage(err error) string {
+//
+// started tells apart the two failures a manager can hand back, because they are
+// different events for the operator reading them. A daemon that never started is
+// #98; one that served and then stopped with an error is a daemon that was
+// working, and telling that operator it "could not start" would send them to the
+// config file for a fault that is not there.
+func managedFailureMessage(started bool, err error) string {
 	if err == nil {
 		return ""
 	}
-	return ServiceName + " " + version.String() + " could not start, and is not running:\n\n" + err.Error()
+	what := " could not start, and is not running:\n\n"
+	if started {
+		what = " stopped with an error:\n\n"
+	}
+	return ServiceName + " " + version.String() + what + err.Error()
 }

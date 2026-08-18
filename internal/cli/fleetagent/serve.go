@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -140,7 +141,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		// fleet-agent`; on the other two platforms the manager's log is
 		// journald and launchd's error path, which already have the same text
 		// from stderr.
-		host.log(startupFailureMessage(err))
+		host.log(managedFailureMessage(prg.started.Load(), err))
 	}
 	return err
 }
@@ -295,10 +296,15 @@ type program struct {
 	// service.Interface only to address an already-installed registration by
 	// name; those never call Run, and Start refuses rather than panicking if a
 	// future one does.
-	start  func(context.Context) (*agent.Server, *slog.Logger, error)
-	onErr  func(msg string, args ...any)
-	cancel context.CancelFunc
-	done   chan error
+	start func(context.Context) (*agent.Server, *slog.Logger, error)
+	// started reports that Start got as far as a bound listener, which is what
+	// tells the two failures a manager can see apart: a daemon that never
+	// started, and one that stopped with an error after serving. Read after Run
+	// has returned, which is after whichever callback produced the error.
+	started atomic.Bool
+	onErr   func(msg string, args ...any)
+	cancel  context.CancelFunc
+	done    chan error
 }
 
 func (p *program) Start(service.Service) error {
@@ -321,6 +327,7 @@ func (p *program) Start(service.Service) error {
 	p.cancel = cancel
 	p.done = make(chan error, 1)
 	go func() { p.done <- srv.Serve(ctx) }()
+	p.started.Store(true)
 	return nil
 }
 

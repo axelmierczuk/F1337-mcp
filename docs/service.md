@@ -156,7 +156,11 @@ Policies → User Rights Assignment → Log on as a service*.
 
 The account is still in session 0. Whether it sees its own per-user toolchains
 depends on whether its profile is loaded, which the SCM does not guarantee —
-so `service status` checks rather than assumes. See
+so `service status` checks rather than assumes, and `install` now says so at the
+moment it registers one, naming the command that answers it and the mechanism
+that does not have the question. #99 was an operator who asked for a service
+under their own account, was told nothing about session 0, and had the #74
+outcome. See
 [When the agent is running and cannot work](#when-the-agent-is-running-and-cannot-work).
 
 ### There is no third mechanism, and that is a decision
@@ -274,6 +278,91 @@ A `--config` outside `%ProgramData%\fleet` gets the same treatment as on Unix:
 the four files are granted read individually and the directory holding them is
 left alone. It needs the traverse grant `install` prints, or the daemon starts
 and fails on a config it cannot open.
+
+## When the agent will not start
+
+A service manager reports what *it* saw, and on Windows that is not the reason.
+
+`agent.yaml` with `listen: "0.0.0.0:8722"` and `tls.enabled: false` is refused —
+correctly, and in four lines naming the address, what it would expose, and three
+ways out. Run by hand you read them. Started as a Windows service you used to get:
+
+> **Error 1053: The service did not respond to the start or control request in a
+> timely fashion.**
+
+The daemon exited before it could perform the SCM's start handshake, so the
+manager had nothing to report but silence, and reported it as a timeout. The four
+lines went to a stderr the SCM discards. That was the product's most likely
+first-run failure on Windows — `0.0.0.0` is the obvious thing to write in a
+listen field — arriving as a timeout about nothing.
+
+Three things now carry the reason:
+
+**The startup happens inside the manager's own start callback.** The config is
+resolved, the posture is checked, the log is opened and the listener is bound
+from inside `Start`, which the SCM is told about *after* it has been told the
+service is starting. A refusal there is a service that reports `SERVICE_STOPPED`
+with a service-specific exit code, in milliseconds:
+
+```powershell
+sc.exe query fleet-agent
+#   STATE            : 1  STOPPED
+#   WIN32_EXIT_CODE  : 1066  (ERROR_SERVICE_SPECIFIC_ERROR)
+#   SERVICE_EXIT_CODE: 1
+```
+
+That is also what stops the restart loop. The definition sets a recovery action
+— restart after 5s — and the SCM applies recovery actions to a service that
+terminates *without* reporting stopped, which is what a daemon exiting early
+does. A clean stop with an error code is not that.
+
+**The reason goes to the Windows event log**, through the logger
+`kardianos/service` binds to the event source `install` registers:
+
+```powershell
+Get-WinEvent -LogName Application -MaxEvents 20 |
+    Where-Object { $_.ProviderName -eq 'fleet-agent' } | Format-List TimeCreated, Message
+# or, on an older host:
+Get-EventLog -LogName Application -Source fleet-agent -Newest 5 | Format-List
+```
+
+`services.msc` shows the same entries. The message is the daemon's own error,
+verbatim and remedy included, because paraphrasing it is the whole defect. On
+Linux and macOS the manager's log is journald and launchd's error path, which
+already had the same text from stderr.
+
+**And the daemon records why, where `service status` reads it.** The event log is
+the SCM's; a logon-triggered Scheduled Task has nothing of the kind — it is
+started by `schtasks /Run`, which succeeds whatever the process does next, and
+its stderr goes to the scheduler. So a daemon that cannot start writes
+`state_dir/start-failure.json`: when it happened, the config it resolved, the
+version that failed, and the error verbatim. `service status` prints it:
+
+```
+service fleet-agent: installed, stopped
+mechanism:  logon-triggered Scheduled Task
+platform:   windows-service
+config:     C:\ProgramData\fleet\agent.yaml
+
+LAST START FAILED
+  The last attempt to start this agent, at 2026-08-18T09:30:00Z, ended with:
+    agent: refusing to serve without mTLS on an address that is neither loopback
+    nor private: 0.0.0.0:8722 binds every interface on this host, including any
+    public one
+    ...
+  config:  C:\ProgramData\fleet\agent.yaml
+  version: 0.1.0
+```
+
+The record is one file, 0644, holding no secret — a timestamp, a version, a pid,
+a config path and an error. A start that reaches its listener deletes it, so what
+`status` reports is always the *last* attempt and never a fault that has since
+been fixed. `service start` and `service restart` say where to look when the
+manager refuses them, because what the manager returns is about the manager.
+
+The exit code does not change: an agent that failed to start is still reported
+with `0`, the way "not installed" is. Only an agent that is up and cannot work
+exits non-zero; see [What a script can branch on](#what-a-script-can-branch-on).
 
 ## When the agent is running and cannot work
 
@@ -656,8 +745,107 @@ service, and none can perform a real service logon either: that needs a real
 LSA, a real account, and that account's real password, none of which a runner
 has or should have. So `LogonUser` is *invoked* only by hand, from the list
 below; every decision drawn from its answer is *asserted*, on every runner,
-against a supplied one. The rows that follow marked MUST are the ones only a
-real host can settle. From an elevated PowerShell:
+against a supplied one. The same split holds for the two most recent findings:
+
+- **#98, a startup failure the SCM turned into a timeout.** That the daemon hands
+  its reason to the service manager's logger, that the failure comes back out of
+  the manager's own `Start` rather than being decided before the manager is
+  involved, and that the record it writes is what `service status` reports are all
+  *asserted* on every runner, driven from `fleet-agent serve` with the manager
+  replaced (`PinServiceManagerForTest`). What is *invoked* only by hand is the one
+  line underneath: `eventlog.Open` writing to a real Windows event log, and the
+  SCM deciding what to do with a service-specific exit code. Steps 0a–0c below.
+- **#99, the mechanism `install` chose.** That nothing reads the host's existing
+  registration to pick a mechanism is asserted from every runner — a registered
+  task does not make Linux install a task — and the Windows half of it, `auto`
+  under an interactive account resolving to the Scheduled Task with a *service*
+  already registered, is driven from the operator's argv on the Windows runner
+  with the registration replaced. What no runner can do is register the real
+  service that steers it. Step 0d below is the reproduction the issue asks for.
+
+The rows that follow marked MUST are the ones only a real host can settle. From
+an elevated PowerShell:
+
+```powershell
+# 0a. #98: the refusal an operator meets first, as a service. Write the config
+#     that produced it — a plaintext agent on the address that binds everything.
+#     (Back up the real one first; this deliberately breaks the daemon.)
+Copy-Item C:\ProgramData\fleet\agent.yaml C:\ProgramData\fleet\agent.yaml.bak
+#     set: listen: "0.0.0.0:8722", and tls.enabled: false
+fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
+fleet-agent service start
+#   MUST fail in seconds, not after 30, and MUST NOT be error 1053.
+sc.exe query fleet-agent
+#   MUST print STATE STOPPED, WIN32_EXIT_CODE 1066, SERVICE_EXIT_CODE 1.
+#   MUST stay stopped: a recovery action applies to a service that dies without
+#   reporting stopped, and this one reports it.
+Get-WinEvent -LogName Application -MaxEvents 20 |
+    Where-Object { $_.ProviderName -eq 'fleet-agent' } |
+    Format-List TimeCreated, Message
+#   MUST carry the whole refusal: "refusing to serve without mTLS",
+#   "0.0.0.0:8722", "binds every interface", and all three ways out. This is the
+#   only place a service operator can read it, and the one line CI cannot reach.
+fleet-agent service status
+#   MUST print "installed, stopped", and exit 0.
+Get-Content C:\ProgramData\fleet\state\start-failure.json
+#   The record — which a built-in identity can only leave if it can write the
+#   state directory. It is the same file, and the same question, as the
+#   runtime.json the confined shape below is checked through: %ProgramData%
+#   admits Users, and NETWORK SERVICE is not one. Where it is there, `status`
+#   MUST print a LAST START FAILED block with the refusal verbatim, the config
+#   path and the version; where it is not, the event log above is the channel and
+#   step 0c is where the record is the only one there is.
+
+# 0b. The fix takes, and the record does not outlive it.
+#     Put listen back to a loopback or private address.
+fleet-agent service start
+fleet-agent service status
+#   MUST be running, and MUST NOT print LAST START FAILED: a start that reached
+#   its listener deletes the record, or `status` reports a fault already fixed.
+Test-Path C:\ProgramData\fleet\state\start-failure.json    # False
+
+# 0c. The same failure under the task mechanism, which has no event log at all:
+#     it is started by `schtasks /Run`, which succeeds whatever the daemon does.
+#     Break the config again, then:
+fleet-agent service install                 # the task
+fleet-agent service start                   # MUST report success; the scheduler did
+fleet-agent service status
+#   MUST print LAST START FAILED with the reason. Nothing else on this host has
+#   it — this is the step that says why the record exists and not only the log.
+Copy-Item C:\ProgramData\fleet\agent.yaml.bak C:\ProgramData\fleet\agent.yaml -Force
+
+# 0d. #99: what a host that has carried a service gets from a bare install.
+#     This is the reproduction the issue asks for, in both directions.
+fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
+fleet-agent service uninstall
+fleet-agent service install                 # elevated, no --user, no --mechanism
+#   MUST print "mechanism: logon-triggered Scheduled Task" and "runs as: <you>".
+#   A Windows service here is #74 arriving again after the fix, for the
+#   population it was filed for.
+Get-Service fleet-agent -ErrorAction SilentlyContinue    # MUST be nothing
+Get-ScheduledTask fleet-agent | Format-List TaskName, State
+#     And with a service still registered and running, which is the upgrade path:
+fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
+fleet-agent service start
+fleet-agent service install                 # again: no --user, no --mechanism
+#   MUST say it removed the existing Windows service, MUST register the task, and
+#   MUST leave the agent running — it was running when this command started.
+fleet-agent service status
+#     Then the account spellings this program itself produces, which no runner
+#     has an SCM to be handed:
+fleet-agent service install --dry-run --user ".\LocalSystem"
+#   MUST resolve a Windows service, and MUST warn that every command the agent
+#   runs will run as the machine. A task here, or silence, is the #99 hypothesis.
+fleet-agent service install --dry-run --mechanism task --user ".\NetworkService"
+#   MUST refuse: a logon trigger fires when an account logs on, and this one
+#   never does.
+fleet-agent service install --dry-run --mechanism service --user "$env:COMPUTERNAME\$env:USERNAME"
+#   MUST say the service runs in session 0 whoever it runs as, and MUST name
+#   `service status` as what answers whether the profile was loaded.
+fleet-agent service uninstall
+```
+
+Then the rest of the walkthrough:
 
 ```powershell
 fleet-agent service install --dry-run       # changes nothing; says which mechanism

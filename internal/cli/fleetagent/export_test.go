@@ -1014,9 +1014,11 @@ func ReadStartFailureForTest(stateDir string) (*StartFailureForTest, error) {
 // StartFailurePathForTest is the file that record lives in.
 func StartFailurePathForTest(stateDir string) string { return startFailurePath(stateDir) }
 
-// StartupFailureMessageForTest is the message a managed daemon hands the
+// ManagedFailureMessageForTest is the message a managed daemon hands the
 // platform's service manager's own log.
-func StartupFailureMessageForTest(err error) string { return startupFailureMessage(err) }
+func ManagedFailureMessageForTest(started bool, err error) string {
+	return managedFailureMessage(started, err)
+}
 
 // StartFailureNotesForTest is what `service status` prints about a start that
 // failed, composed from a supplied record.
