@@ -267,25 +267,17 @@ while true; do sleep 0.05; done`
 	require.NoError(t, err, "the TERM handler should have run")
 }
 
-func TestProcessGroup_SignalAfterExit(t *testing.T) {
-	t.Parallel()
-
-	group, err := platform.NewProcessGroup(platform.GroupConfig{})
-	require.NoError(t, err)
-	defer group.Close()
-
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
-	group.ConfigureCommand(cmd)
-	require.NoError(t, cmd.Start())
-	require.NoError(t, group.Adopt(cmd.Process))
-	require.NoError(t, cmd.Wait())
-
-	// Once the group is empty the kernel has nothing to signal. A clean error
-	// is required here — #14 depends on this not being a panic and not being
-	// a signal delivered to whatever inherited the pid.
-	err = group.Signal(platform.SignalTerm)
-	require.ErrorIs(t, err, platform.ErrProcessNotFound)
-}
+// unallocatablePID is larger than any pid either kernel can hand out: Linux
+// caps pid_max at 2^22 and Darwin at 99999. Every syscall below that takes it
+// therefore answers ESRCH, on every run, on any host.
+//
+// A pid that *cannot* exist, rather than one that merely does not exist right
+// now, and the difference is #82. A reaped pid is released, and the kernel is
+// free to give it to somebody else — see
+// TestProcessGroup_SignalAfterExitReachesWhatOutlivedTheLeader for what that
+// did to the test this replaced. There is no pid that nothing will ever occupy,
+// so the assertion moves to a number outside the space instead.
+const unallocatablePID = 1 << 30
 
 // TestProcessGroup_UnisolatedSignalReportsTheLeader states the cross-platform
 // rule the Windows implementation was corrected to match: when the group
@@ -298,6 +290,17 @@ func TestProcessGroup_SignalAfterExit(t *testing.T) {
 // whose Adopt failed reported a live, unreached process as killed. Pinning the
 // rule here as well as there keeps the two from drifting apart again, on the
 // two runners where it is cheapest to check.
+//
+// It carries what #14 needs from a group that is gone, too, because the state
+// is the same one: a clean error, not a panic, and not a signal delivered to
+// whatever inherited the pid. That last claim is the one the test this replaced
+// could not actually make. It reaped a real child and signalled the pgid that
+// released, so "nothing was delivered" held only while nothing else on the host
+// had been handed that id — an assertion about the machine rather than about
+// this package. Aiming at a pid the kernel cannot allocate makes it true by
+// construction, and it is the shape the Windows half of this rule already uses:
+// Adopt is handed a bare os.Process rather than a child that was started and
+// reaped.
 func TestProcessGroup_UnisolatedSignalReportsTheLeader(t *testing.T) {
 	t.Parallel()
 
@@ -305,16 +308,139 @@ func TestProcessGroup_UnisolatedSignalReportsTheLeader(t *testing.T) {
 	require.NoError(t, err)
 	defer group.Close()
 
-	// ConfigureCommand deliberately not called, so the child never leaves the
-	// test binary's own group and Adopt leaves Isolated false.
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
-	require.NoError(t, cmd.Start())
-	require.NoError(t, group.Adopt(cmd.Process))
+	// ConfigureCommand deliberately not called, so no session was ever asked
+	// for and Adopt must record what it found rather than wait for one.
+	require.NoError(t, group.Adopt(&os.Process{Pid: unallocatablePID}),
+		"a pid the kernel does not know is the fast-exiting-child case, not an adoption failure")
 	require.False(t, group.Isolated())
-	require.NoError(t, cmd.Wait())
+	require.Equal(t, unallocatablePID, group.PID())
 
-	require.ErrorIs(t, group.Signal(platform.SignalTerm), platform.ErrProcessNotFound,
+	require.NotPanics(t, func() {
+		err = group.Signal(platform.SignalTerm)
+	}, "#14 depends on this being an error rather than a crash")
+	require.ErrorIs(t, err, platform.ErrProcessNotFound,
 		"the leader is gone and nothing else was ever in this group, so this must not read as success")
+	require.ErrorIs(t, group.Kill(), platform.ErrProcessNotFound,
+		"the escalation step answers the same way, or a stop loop cannot tell that it is finished")
+}
+
+// TestProcessGroup_SignalAfterExitReachesWhatOutlivedTheLeader is the half of
+// the exit case that can be asserted at all, and it also records why the other
+// half is not written here — so that it does not come back, because it was
+// here, and it was #82.
+//
+// The tempting shape is to spawn a child, reap it, and assert that signalling
+// its group reports ErrProcessNotFound. It fails under load in well under a
+// tenth of a second — EPERM, not ESRCH — because reaping the leader releases
+// the group id and the kernel had already handed it to something else by the
+// time the signal went out. That is not a margin anyone can widen: it is the
+// pid-as-identity hazard this repository has been bitten by four times, sitting
+// inside a test that asserts the product does not make that assumption. Worse
+// than flaky, the same call delivers the signal when the new occupant happens
+// to be signallable.
+//
+// What is a fact is the rule underneath it: a group id belongs to its members
+// until the last of them has been reaped, so a group that has outlived its
+// leader is still there and still reachable. That is the state ExecService's
+// watcher and the supervisor's stop path signal from, and the live descendant
+// is also what makes the id un-recyclable for the length of this test.
+func TestProcessGroup_SignalAfterExitReachesWhatOutlivedTheLeader(t *testing.T) {
+	tree := startTree(t)
+
+	// Kill the leader alone and reap it. Its group id survives, because the
+	// grandchild it left behind is still in that group.
+	require.NoError(t, syscall.Kill(tree.leader, syscall.SIGKILL))
+	requireReaped(t, tree, 10*time.Second)
+	require.Equal(t, tree.leader, tree.group.GroupID())
+
+	// The signal still lands, on a leader that no longer exists.
+	require.NoError(t, tree.group.Signal(platform.SignalTerm),
+		"the group outlived its leader, so signalling it must not read as a group that is gone")
+	require.ErrorIs(t, waitForTreeExit(t, tree, 10*time.Second), io.EOF,
+		"the descendant that kept the group alive should have taken the signal")
+}
+
+// TestProcessGroup_AdoptKeepsTheGroupOfAChildThatBeatItToTheExit is the same
+// defect as TestPTY_WithProcessGroup, in the form that actually reproduces on
+// macOS, and it needs no load at all to show.
+//
+// Darwin's getpgid(2) answers ESRCH for a process that has exited and has not
+// been reaped; Linux answers with the group. Adopt read that failure as "the
+// group did not take" and recorded isolated = false — so the same command was
+// isolated on one platform and not on the other, and on macOS a leader that
+// exits quickly lost the post-exec sweep that is the only thing reaching the
+// grandchild it left behind.
+//
+// The child here is held to exactly that state — exited, not reaped — by the
+// pipe rather than by a sleep, so it is the state on both platforms and on
+// every run.
+func TestProcessGroup_AdoptKeepsTheGroupOfAChildThatBeatItToTheExit(t *testing.T) {
+	t.Parallel()
+
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+	defer group.Close()
+
+	readEnd, writeEnd, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = readEnd.Close() })
+
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd.ExtraFiles = []*os.File{writeEnd}
+	group.ConfigureCommand(cmd)
+	require.NoError(t, cmd.Start())
+	require.NoError(t, writeEnd.Close())
+	t.Cleanup(func() { _ = cmd.Wait() })
+
+	// EOF on the inherited pipe is the child being gone. Nothing has reaped it,
+	// so its pid is still its own and this is not the recycling hazard.
+	require.NoError(t, readEnd.SetReadDeadline(time.Now().Add(30*time.Second)))
+	_, err = readEnd.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF, "the child should have exited and closed the pipe")
+
+	require.NoError(t, group.Adopt(cmd.Process))
+	require.True(t, group.Isolated(),
+		"the child was configured for its own session and Start succeeded, so it had one; "+
+			"whether getpgid still answers for it is a platform detail, not the answer")
+	require.Equal(t, cmd.Process.Pid, group.GroupID())
+}
+
+// TestProcessGroup_AdoptReportsAGroupThatNeverTook is the second half of #82,
+// through the API a caller uses.
+//
+// Adopt used to return nil whatever it found, so a child that was configured
+// for its own session and did not get one was recorded as unisolated and never
+// mentioned again. What follows from that is silent: Signal degrades to the
+// bare leader pid, the post-exec sweep is skipped because it is gated on
+// Isolated, and a command's descendants outlive the RPC with nothing in the log
+// to say the guarantee did not hold. All three call sites already log a warning
+// when Adopt fails — this is what makes them fire.
+//
+// The session is requested and then taken away again before Start, which is the
+// state a lost race leaves behind and the only way to reach it on purpose.
+func TestProcessGroup_AdoptReportsAGroupThatNeverTook(t *testing.T) {
+	t.Parallel()
+
+	group, err := platform.NewProcessGroup(platform.GroupConfig{})
+	require.NoError(t, err)
+	defer group.Close()
+
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
+	group.ConfigureCommand(cmd)
+	cmd.SysProcAttr.Setsid = false
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	err = group.Adopt(cmd.Process)
+	require.Error(t, err, "a session was configured and the child is not in one; saying nothing is the defect")
+	require.ErrorContains(t, err, strconv.Itoa(cmd.Process.Pid))
+	require.False(t, group.Isolated())
+	require.Equal(t, cmd.Process.Pid, group.PID(),
+		"the command is running and its pid is the one thing left to act on, so it is still recorded")
+	requireAlive(t, cmd.Process.Pid)
 }
 
 func TestProcessGroup_SignalBeforeAdopt(t *testing.T) {
