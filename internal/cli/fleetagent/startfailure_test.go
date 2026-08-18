@@ -2,9 +2,9 @@ package fleetagent_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/cli/fleetagent"
 )
 
@@ -50,32 +51,6 @@ func refusedConfig(t *testing.T) (configPath, stateDir string) {
 			"audit:\n  path: "+filepath.ToSlash(filepath.Join(dir, "logs", "audit.jsonl"))+"\n"), 0o600))
 	t.Setenv("FLEET_AGENT_CONFIG", configPath)
 	return configPath, stateDir
-}
-
-// servableConfig is the same thing on an address the guard allows, so that the
-// managed path can be driven all the way to a listener.
-func servableConfig(t *testing.T) (configPath, stateDir, address string) {
-	t.Helper()
-	dir := t.TempDir()
-	stateDir = filepath.Join(dir, "state")
-	configPath = filepath.Join(dir, "agent.yaml")
-	address = net.JoinHostPort("127.0.0.1", freePort(t))
-	require.NoError(t, os.WriteFile(configPath, []byte(
-		"name: test-host\nlisten: "+address+"\n"+
-			"state_dir: "+filepath.ToSlash(stateDir)+"\n"+
-			"audit:\n  path: "+filepath.ToSlash(filepath.Join(dir, "logs", "audit.jsonl"))+"\n"), 0o600))
-	t.Setenv("FLEET_AGENT_CONFIG", configPath)
-	return configPath, stateDir, address
-}
-
-// accepting reports whether something is listening on addr.
-func accepting(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, time.Second)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 // A daemon started by a service manager and refusing to serve tells the manager
@@ -156,12 +131,16 @@ func TestServe_UnderAServiceManagerAFailureToStartIsReportedNotDiscarded(t *test
 // the stale record is its own wrong answer: an operator who fixed the config and
 // restarted would be told by `status` that the fix had not taken.
 func TestServe_UnderAServiceManagerItServesUntilTheManagerStopsIt(t *testing.T) {
-	configPath, stateDir, address := servableConfig(t)
+	// A complete installation, because the claim is that the daemon *serves*
+	// under the manager, and that is a Health call rather than an open socket.
+	// agent.New binds the listener before Serve is ever called, so a scenario
+	// that dialled the port passed with the whole serving half deleted.
+	ea := newEnrolledAgent(t, t.TempDir())
 
 	// What the last failed start left behind. This start has to remove it.
-	require.NoError(t, fleetagent.WriteStartFailureForTest(stateDir, fleetagent.StartFailureForTest{
+	require.NoError(t, fleetagent.WriteStartFailureForTest(ea.stateDir, fleetagent.StartFailureForTest{
 		At:      time.Now().UTC().Add(-time.Hour),
-		Config:  configPath,
+		Config:  ea.configPath,
 		Version: "0.1.0",
 		Error:   "an earlier refusal, already fixed",
 	}))
@@ -171,12 +150,15 @@ func TestServe_UnderAServiceManagerItServesUntilTheManagerStopsIt(t *testing.T) 
 	defer stop()
 
 	codes := make(chan int, 1)
-	go func() { codes <- fleetagent.Main([]string{"serve", "--config", configPath}, io.Discard) }()
+	go func() { codes <- fleetagent.Main([]string{"serve", "--config", ea.configPath}, io.Discard) }()
 
-	require.Eventually(t, func() bool { return accepting(address) }, 30*time.Second, 50*time.Millisecond,
-		"the daemon the manager started never opened its listener")
-	assert.NoFileExists(t, fleetagent.StartFailurePathForTest(stateDir),
-		"the listener is open, so this start did not fail, and last time's record is a fault an operator has already fixed")
+	hostClient := waitServing(t, ea)
+	resp, err := hostClient.Health(context.Background(), &sandboxdv1.HealthRequest{})
+	require.NoError(t, err, "the daemon the manager started has to answer, not merely hold a socket")
+	assert.Equal(t, sandboxdv1.HealthResponse_STATUS_SERVING, resp.GetStatus())
+
+	assert.NoFileExists(t, fleetagent.StartFailurePathForTest(ea.stateDir),
+		"this daemon is serving, so the last failed start's record is a fault an operator has already fixed")
 
 	stop()
 	select {
