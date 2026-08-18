@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -19,19 +16,6 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
-)
-
-// maxSandboxNameLength bounds a name accepted by fleet_add. It matches the
-// bound enrollment applies to the one identifier an unauthenticated host can
-// put into a certificate subject, so a name added here is a name that could
-// have been enrolled.
-const maxSandboxNameLength = 128
-
-// Bounds on the labels fleet_add accepts. See [checkLabels].
-const (
-	maxLabels           = 32
-	maxLabelKeyLength   = 64
-	maxLabelValueLength = 256
 )
 
 // enrollmentHint is what an empty fleet gets told. Adding a sandbox is an
@@ -366,10 +350,14 @@ type AddArgs struct {
 	Labels map[string]string `json:"labels,omitempty" jsonschema:"free-form labels, e.g. {\"arch\":\"arm64\"}"`
 	// Insecure registers a sandbox whose agent runs without mTLS.
 	//
-	// It has to be said here because it cannot be discovered: an agent serving
-	// plaintext and one refusing a handshake look the same to a dialer that has
-	// not been told which it is talking to. Registering the wrong value costs a
-	// failed connection, never a silent downgrade.
+	// It has to be said here because no single dial can discover it: an agent
+	// serving plaintext and one refusing a handshake look the same to a dialer
+	// that has not been told which it is talking to. `fleetctl add` narrows that
+	// by trying both postures before it writes, which is worth the two dials for
+	// an operator who is watching and can act on a refusal — but it only ever
+	// confirms a host that is up, so the argument stays required either way.
+	// Registering the wrong value costs a failed connection, never a silent
+	// downgrade.
 	Insecure bool `json:"insecure,omitempty" jsonschema:"the agent on this host runs with tls.enabled false; connect to it without mTLS, which is only safe on a network that authenticates its peers"`
 }
 
@@ -389,138 +377,29 @@ type AddResult struct {
 	Note string `json:"note"`
 }
 
+// sandboxAdd is the model's half of registering a sandbox. `fleetctl add` is
+// the operator's, and both go through [registry.Registry.Register] — one set of
+// bounds, one refusal to overwrite, one account of what registering did not do.
+// What this handler adds is the model's vocabulary: the remedy names the tool a
+// model can call, not the command an operator types.
 func (r *Registrar) sandboxAdd(_ context.Context, _ *mcp.CallToolRequest, in AddArgs) (AddResult, string, error) {
-	name := strings.TrimSpace(in.Name)
-	address := strings.TrimSpace(in.Address)
-
-	// Every check runs before the registry is touched, so a malformed call
-	// cannot leave a half-registered sandbox behind.
-	if err := checkSandboxName(name); err != nil {
-		return AddResult{}, "", err
-	}
-	if err := checkAddress(address); err != nil {
-		return AddResult{}, "", err
-	}
-	if err := checkLabels(in.Labels); err != nil {
-		return AddResult{}, "", err
-	}
-
-	err := r.deps.Fleet.Add(registry.Sandbox{Name: name, Address: address, Labels: in.Labels, Insecure: in.Insecure})
+	reg, err := r.deps.Fleet.Register(registry.Sandbox{
+		Name: in.Name, Address: in.Address, Labels: in.Labels, Insecure: in.Insecure,
+	})
+	var duplicate *registry.DuplicateError
 	switch {
-	case errors.Is(err, registry.ErrExists):
-		existing, getErr := r.deps.Fleet.Get(name)
-		if getErr != nil {
-			return AddResult{}, "", err
-		}
-		return AddResult{}, "", fmt.Errorf("sandbox %q is already registered at %s. Remove it with fleet_remove first if the address has changed; registering does not overwrite",
-			name, existing.Address)
+	case errors.As(err, &duplicate):
+		return AddResult{}, "", fmt.Errorf("%w. Remove it with fleet_remove first if the address has changed", duplicate)
 	case err != nil:
 		return AddResult{}, "", err
 	}
 
-	note := "Registered locally only. This does not enroll the host: the agent must already hold a certificate from this fleet's CA, or calls to it will fail the mTLS handshake."
-	if in.Insecure {
-		// A different sentence, not a suffix. The mTLS note tells the caller
-		// what still has to happen for this entry to work; this one tells them
-		// what will never happen for it, which is the more important half.
-		note = "Registered locally only, and without mTLS: no client certificate will be presented to this host and its agent verifies none, so nothing in this fleet authenticates either end. That is only safe if the network between them does — a tailnet, a WireGuard mesh, a tight VPC. The agent must be running with tls.enabled false, or calls to it will fail."
-	}
 	return AddResult{
-		Address: address,
-		Handle:  selection.HandleFor(name),
-		Auth:    client.Target{Insecure: in.Insecure}.AuthName(),
-		Note:    note,
-	}, name, nil
-}
-
-// checkSandboxName bounds the identifier that becomes a registry key and a
-// certificate subject.
-func checkSandboxName(name string) error {
-	if name == "" {
-		return errors.New("name is required")
-	}
-	if len(name) > maxSandboxNameLength {
-		return fmt.Errorf("name is %d bytes, limit is %d", len(name), maxSandboxNameLength)
-	}
-	for _, r := range name {
-		// Printable, non-space ASCII: a sandbox name is typed on a command
-		// line and printed in a table.
-		if r <= ' ' || r > '~' {
-			return fmt.Errorf("name contains an invalid character %q; use printable ASCII with no spaces", r)
-		}
-	}
-	if strings.HasPrefix(name, "sbx_") {
-		return fmt.Errorf("name %q collides with the handle prefix sbx_; choose another", name)
-	}
-	return nil
-}
-
-// checkLabels bounds the free-form metadata a fleet_add call attaches.
-//
-// Labels are the one part of the call with no shape of their own, and they are
-// paid for twice: once in the registry file that every later operation rewrites
-// whole, and again in every fleet_list result, which lands in model context
-// on every fleet check. The labels enrollment attaches come from the operator's
-// token and are the operator's business; these come from the model, so they are
-// bounded here, before the registry is touched.
-func checkLabels(labels map[string]string) error {
-	if len(labels) > maxLabels {
-		return fmt.Errorf("%d labels given, limit is %d", len(labels), maxLabels)
-	}
-	for key, value := range labels {
-		if key == "" {
-			return errors.New(`a label key is empty; labels are key=value metadata, e.g. {"arch":"arm64"}`)
-		}
-		if len(key) > maxLabelKeyLength {
-			return fmt.Errorf("label key %q is %d bytes, limit is %d", compact(key), len(key), maxLabelKeyLength)
-		}
-		for _, r := range key {
-			// A key is typed into the label filter as key=value and printed in
-			// a table, so it carries the same restriction a name does.
-			if r <= ' ' || r > '~' {
-				return fmt.Errorf("label key %q contains an invalid character %q; use printable ASCII with no spaces",
-					compact(key), r)
-			}
-		}
-		if len(value) > maxLabelValueLength {
-			return fmt.Errorf("label %q has a %d-byte value, limit is %d", key, len(value), maxLabelValueLength)
-		}
-		for _, r := range value {
-			if !unicode.IsPrint(r) {
-				return fmt.Errorf("label %q has a value containing an unprintable character %q", key, r)
-			}
-		}
-	}
-	return nil
-}
-
-// checkAddress validates host:port before the registry is touched. The host
-// half becomes the TLS server name the agent's certificate is verified
-// against, so an address that is not host:port is a configuration error that
-// should be named as one here rather than surfacing later as a handshake
-// failure.
-func checkAddress(address string) error {
-	if address == "" {
-		return errors.New("address is required, as host:port")
-	}
-	if strings.Contains(address, "://") {
-		return fmt.Errorf("address %q looks like a URL; give host:port, e.g. build-box.internal:8722", address)
-	}
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("address %q is not host:port (e.g. build-box.internal:8722): %w", address, err)
-	}
-	if host == "" {
-		return fmt.Errorf("address %q names no host; the host half is what the agent's certificate is checked against", address)
-	}
-	if strings.ContainsAny(host, "/\\ ") {
-		return fmt.Errorf("address %q has an invalid host %q", address, host)
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("address %q has an invalid port %q; expected 1-65535", address, port)
-	}
-	return nil
+		Address: reg.Sandbox.Address,
+		Handle:  selection.HandleFor(reg.Sandbox.Name),
+		Auth:    client.TargetFor(reg.Sandbox).AuthName(),
+		Note:    reg.Note,
+	}, reg.Sandbox.Name, nil
 }
 
 // ------------------------------------------------------------- remove

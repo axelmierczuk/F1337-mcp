@@ -2,7 +2,6 @@ package tools
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,27 +86,6 @@ func TestParseLabelFilter(t *testing.T) {
 	}
 }
 
-// TestCheckAddress_RejectsWhatCannotBeDialed. The host half becomes the TLS
-// server name the agent's certificate is verified against, so an address that
-// is not host:port fails later as a handshake error naming neither.
-func TestCheckAddress_RejectsWhatCannotBeDialed(t *testing.T) {
-	for _, good := range []string{"build-box:8722", "build-box.internal:8722", "127.0.0.1:8722", "[::1]:8722", "host:65535"} {
-		assert.NoErrorf(t, checkAddress(good), "%q should be accepted", good)
-	}
-	for _, bad := range []string{"", "build-box", "build-box:", ":8722", "build-box:0", "build-box:65536", "build-box:-1", "https://build-box:8722", "build/box:8722", "build box:8722"} {
-		assert.Errorf(t, checkAddress(bad), "%q should be rejected", bad)
-	}
-}
-
-func TestCheckSandboxName(t *testing.T) {
-	for _, good := range []string{"build-box", "gpu_01", "a", "host.internal"} {
-		assert.NoErrorf(t, checkSandboxName(good), "%q should be accepted", good)
-	}
-	for _, bad := range []string{"", " ", "build box", "build\tbox", "café", "sbx_deadbeef"} {
-		assert.Errorf(t, checkSandboxName(bad), "%q should be rejected", bad)
-	}
-}
-
 // TestShortDetail keeps one unreachable sandbox from turning a twenty-machine
 // listing into a wall of text, and keeps gRPC's envelope out of what the model
 // reads.
@@ -149,33 +127,4 @@ func TestCompact(t *testing.T) {
 
 	multibyte := compact(strings.Repeat("é", 200))
 	assert.True(t, utf8.ValidString(multibyte), "truncation produced invalid UTF-8: %q", multibyte)
-}
-
-// TestCheckLabels guards the free-form half of a fleet_add call: the model
-// supplies it, the registry stores it, and every fleet_list result carries it.
-func TestCheckLabels(t *testing.T) {
-	assert.NoError(t, checkLabels(nil))
-	assert.NoError(t, checkLabels(map[string]string{"arch": "arm64", "owner": "platform team", "empty": ""}))
-
-	tooMany := map[string]string{}
-	for i := range maxLabels + 1 {
-		tooMany[strconv.Itoa(i)] = "v"
-	}
-	for name, labels := range map[string]map[string]string{
-		"too many":          tooMany,
-		"empty key":         {"": "v"},
-		"key with a space":  {"data centre": "west"},
-		"non-ASCII key":     {"café": "v"},
-		"oversized key":     {strings.Repeat("k", maxLabelKeyLength+1): "v"},
-		"oversized value":   {"k": strings.Repeat("v", maxLabelValueLength+1)},
-		"value with a tab":  {"k": "a\tb"},
-		"value with a line": {"k": "a\nb"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			err := checkLabels(labels)
-			require.Error(t, err)
-			assert.Contains(t, strings.ToLower(err.Error()), "label")
-			assert.Less(t, len(err.Error()), 512, "the rejection must not echo the input back whole")
-		})
-	}
 }

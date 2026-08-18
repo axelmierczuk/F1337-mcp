@@ -336,6 +336,18 @@ type healthView struct {
 	detail       string
 	agentVersion string
 	seenAt       time.Time
+	// answered records that the agent itself replied, as distinct from what it
+	// replied with.
+	//
+	// `list` does not need it: every outcome it renders is a word in the
+	// status column. `fleetctl add` does, because it asks a different
+	// question — "is something serving this address in the posture I was
+	// told?" — and the status alone cannot answer it. An agent may legally
+	// report STATUS_UNSPECIFIED, which renders as "unknown", the same word a
+	// probe that was never made produces. Registering a host on the strength
+	// of a probe that never happened is precisely the confusion add exists to
+	// prevent, so the fact is recorded rather than inferred from the word.
+	answered bool
 }
 
 // probeFleet probes every sandbox concurrently and returns what each said,
@@ -441,6 +453,7 @@ func probeOne(ctx context.Context, pool *client.Pool, sb registry.Sandbox, timeo
 		detail:       oneLine(resp.GetMessage()),
 		agentVersion: oneLine(resp.GetAgentVersion()),
 		seenAt:       time.Now(),
+		answered:     true,
 	}
 }
 
