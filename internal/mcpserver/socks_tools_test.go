@@ -105,6 +105,15 @@ func TestSocks_ReachesADestinationThroughTheSandbox(t *testing.T) {
 	assert.True(t, again.Existing)
 	assert.Equal(t, out.LocalPort, again.LocalPort)
 
+	// But a call that names a different local port is refused rather than
+	// answered with the port that is open: a caller that named one wants that
+	// one, and reporting the other as if it had been granted is how a model
+	// ends up pointing a client at a port nothing is listening on. Reverting
+	// that check left every test in this tree green.
+	moved := f.liveFails("fleet_socks", map[string]any{"local_port": out.LocalPort + 1})
+	assert.Contains(t, moved, "already proxied")
+	assert.Contains(t, moved, "stop=true", "and is told how to move it")
+
 	// Stopping it releases the listener, which is the half a caller can check.
 	stopped := liveOK[tools.SocksResult](f, "fleet_socks", map[string]any{"stop": true})
 	require.True(t, stopped.Stopped)

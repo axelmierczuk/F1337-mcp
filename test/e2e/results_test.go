@@ -174,10 +174,13 @@ type socksLine struct {
 }
 
 type socksResult struct {
-	Sandbox      string      `json:"sandbox"`
-	LocalAddress string      `json:"local_address"`
-	LocalPort    int         `json:"local_port"`
-	AllowedHosts []string    `json:"allowed_hosts"`
+	Sandbox      string   `json:"sandbox"`
+	LocalAddress string   `json:"local_address"`
+	LocalPort    int      `json:"local_port"`
+	AllowedHosts []string `json:"allowed_hosts"`
+	// Unrestricted is `fleetctl socks`'s own field: the one posture worth a
+	// script being able to check without parsing a sentence.
+	Unrestricted bool        `json:"unrestricted"`
 	Stopped      bool        `json:"stopped"`
 	Existing     bool        `json:"existing"`
 	Active       []socksLine `json:"active_proxies"`

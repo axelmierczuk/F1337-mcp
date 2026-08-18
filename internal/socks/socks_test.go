@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -261,17 +263,22 @@ func (c *socksClient) greet(t *testing.T, methods ...byte) byte {
 	return reply[1]
 }
 
-// request sends one request and returns the reply code.
-func (c *socksClient) request(t *testing.T, cmd byte, addrType byte, addr []byte, port int) byte {
-	t.Helper()
+// requestBytes builds one request on the wire. One spelling of the format, so
+// that a test asserting on what a request leaves unread is building the same
+// bytes the client above sends.
+func requestBytes(cmd byte, addrType byte, addr []byte, port int) []byte {
 	msg := []byte{version5, cmd, 0x00, addrType}
 	if addrType == addrDomain {
 		msg = append(msg, byte(len(addr)))
 	}
 	msg = append(msg, addr...)
-	msg = binary.BigEndian.AppendUint16(msg, uint16(port)) //nolint:gosec // a port in a test is well inside uint16
+	return binary.BigEndian.AppendUint16(msg, uint16(port)) //nolint:gosec // a port in a test is well inside uint16
+}
 
-	_, err := c.conn.Write(msg)
+// request sends one request and returns the reply code.
+func (c *socksClient) request(t *testing.T, cmd byte, addrType byte, addr []byte, port int) byte {
+	t.Helper()
+	_, err := c.conn.Write(requestBytes(cmd, addrType, addr, port))
 	require.NoError(t, err)
 
 	var reply [10]byte
@@ -346,6 +353,101 @@ func TestSocks_RefusesUDPAssociateSpelledTheWayTheRFCSpellsIt(t *testing.T) {
 	}
 	assert.Empty(t, connector.destinations(),
 		"a refused command must not reach the connector at all")
+}
+
+// Every request this answers is read to its end before it is answered.
+//
+// Closing a socket with unread bytes in its receive queue sends a reset rather
+// than a FIN, and a reset can discard the reply just written — which hands the
+// client the bare "connection reset" that answering with a reply code exists to
+// avoid. Round 2 found that for the command and fixed it there; the rule is the
+// same for every other request that gets an answer, and nothing pinned the rule
+// itself. Moving the command check back above the address fields left every
+// test in this tree green, and the empty-name case was still being answered
+// with two bytes of port on the wire behind it.
+//
+// Asserted by what is left unread: each request is followed by a sentinel byte,
+// which has to be the next thing readable once readRequest has returned. A
+// request judged early leaves its own tail there instead.
+func TestSocks_ReadsTheWholeRequestBeforeAnsweringIt(t *testing.T) {
+	const sentinel = 0x2a
+
+	// A CONNECT naming a version this proxy does not speak, which negotiate
+	// cannot have caught: the greeting said 5 and the request says otherwise.
+	wrongVersion := requestBytes(cmdConnect, addrIPv4, net.IPv4(10, 0, 4, 7).To4(), 443)
+	wrongVersion[0] = 0x04
+
+	for _, tc := range []struct {
+		name    string
+		request []byte
+		want    byte
+		// readPast says the whole request can be consumed before it is judged.
+		// Two cannot be, and are answered where they are found: nothing says how
+		// long an address type this does not implement is, and the fields behind
+		// a version it does not speak are not this grammar's to read.
+		readPast bool
+	}{
+		{
+			name:     "UDP ASSOCIATE spelled the way the RFC spells it",
+			request:  requestBytes(cmdUDPAssociate, addrIPv4, net.IPv4zero.To4(), 0),
+			want:     replyCommandNotSupported,
+			readPast: true,
+		},
+		{
+			name:     "BIND to a name",
+			request:  requestBytes(cmdBind, addrDomain, []byte("db.internal"), 5432),
+			want:     replyCommandNotSupported,
+			readPast: true,
+		},
+		{
+			name:     "an empty destination name",
+			request:  requestBytes(cmdConnect, addrDomain, nil, 5432),
+			want:     replyAddressNotSupported,
+			readPast: true,
+		},
+		{
+			name:     "a destination port of zero",
+			request:  requestBytes(cmdConnect, addrIPv4, net.IPv4(10, 0, 4, 7).To4(), 0),
+			want:     replyGeneralFailure,
+			readPast: true,
+		},
+		{
+			name:    "an address type this does not implement",
+			request: requestBytes(cmdConnect, 0x07, []byte{1, 2, 3, 4}, 443),
+			want:    replyAddressNotSupported,
+		},
+		{
+			name:    "a request naming another version",
+			request: wrongVersion,
+			want:    replyGeneralFailure,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer func() { _ = client.Close() }()
+			defer func() { _ = server.Close() }()
+
+			// net.Pipe is unbuffered, so this returns only once every byte has
+			// been read — which is the point: what is still pending is what the
+			// request left unread.
+			go func() { _, _ = client.Write(append(tc.request, sentinel)) }()
+
+			_, err := readRequest(server)
+			var reqErr *requestError
+			require.ErrorAs(t, err, &reqErr, "a request this answers carries a reply code")
+			require.Equal(t, tc.want, reqErr.code)
+
+			if !tc.readPast {
+				return
+			}
+			require.NoError(t, server.SetReadDeadline(time.Now().Add(10*time.Second)))
+			var next [1]byte
+			_, err = io.ReadFull(server, next[:])
+			require.NoError(t, err)
+			assert.Equal(t, byte(sentinel), next[0],
+				"the request was answered with part of itself still unread; closing over those bytes sends a reset that can discard the reply")
+		})
+	}
 }
 
 // An address family this does not implement is refused with the code for it,
@@ -704,6 +806,50 @@ func TestSocks_DropsAClientThatNeverSpeaks(t *testing.T) {
 		"the read hit this test's own deadline, so the proxy had not closed the connection")
 }
 
+// And it is cleared before a single byte is carried.
+//
+// The deadline is a leak fix for a client that connects and says nothing, and
+// it must not outlive the handshake it bounds: a proxied connection may be idle
+// for hours, and one that died exactly handshakeTimeout after it was accepted
+// would take the database session, the keep-alive and the slow download with
+// it — reported to the client as a truncated response, from a proxy that looks
+// healthy. Nothing else here notices, because every other connection in this
+// tree finishes in milliseconds: deleting the SetDeadline that clears it left
+// every test in the tree green.
+//
+// Watched on a proxy whose copy of the timeout has been shortened, so the wait
+// is a fraction of a second rather than thirty of them.
+func TestSocks_ClearsTheHandshakeDeadlineBeforeCarrying(t *testing.T) {
+	const timeout = 500 * time.Millisecond
+
+	destination := destinationServer(t)
+	host, portStr, err := net.SplitHostPort(destination)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	// Set before the accept loop starts, as in the test above: a connection
+	// reads this, so writing it afterwards is a race.
+	server := startProxy(t, Options{Connect: (&dialingConnector{}).connect}, func(s *Server) {
+		s.handshakeTimeout = timeout
+	})
+
+	c := dialProxy(t, server.Addr())
+	require.Equal(t, byte(authNone), c.greet(t, authNone))
+	require.Equal(t, byte(replySuccess), c.request(t, cmdConnect, addrDomain, []byte(host), port))
+
+	// Comfortably past the deadline this connection was accepted under. A proxy
+	// that left it in place has already closed the socket by now.
+	time.Sleep(3 * timeout)
+
+	_, err = c.conn.Write([]byte("carried well after the handshake deadline\n"))
+	require.NoError(t, err, "the proxy dropped an idle connection when its handshake deadline expired")
+
+	got, err := bufio.NewReader(c.conn).ReadString('\n')
+	require.NoError(t, err, "the proxy dropped an idle connection when its handshake deadline expired; the deadline bounds the handshake, not the connection")
+	assert.Equal(t, "CARRIED WELL AFTER THE HANDSHAKE DEADLINE\n", got)
+}
+
 // And tearing the proxy down must not wait for that deadline.
 //
 // A handshake parked in a read is not waiting on a context, so cancelling one
@@ -746,6 +892,130 @@ func TestSocks_CloseDoesNotWaitForAParkedHandshake(t *testing.T) {
 		t.Fatalf("Close waited for a parked handshake; it must close the socket rather than only cancelling the context")
 	}
 	wg.Wait()
+}
+
+// --------------------------------------------------------- the accept loop
+
+// This package carries its own copy of the retry that
+// internal/mcpserver/tools's forward listener has, and only that copy was
+// tested: removing the retry from this one — giving up on the first accept
+// failure — left every test in this tree green. What it costs is the same
+// thing there, on a proxy rather than a forward: a workstation that hits its
+// descriptor limit for a second, which is what EMFILE is and which the kernel
+// hands straight back through Accept, would leave a proxy that is still listed
+// as open, still holding its port, and permanently deaf.
+
+// flakyListener fails a fixed number of accepts before reporting that it is
+// closed, which is how the loop ends.
+type flakyListener struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls++
+	if l.failures > 0 {
+		l.failures--
+		return nil, &net.OpError{Op: "accept", Err: syscall.EMFILE}
+	}
+	return nil, net.ErrClosed
+}
+
+func (l *flakyListener) Close() error   { return nil }
+func (l *flakyListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1} }
+
+func (l *flakyListener) accepts() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
+// serverOn builds a proxy around a listener a test supplies, which Listen
+// cannot: everything below is about what the accept loop does when accepting
+// fails, and a real listener does not fail on demand.
+func serverOn(listener net.Listener) *Server {
+	return &Server{
+		listener:         listener,
+		opts:             Options{Connect: (&dialingConnector{}).connect},
+		log:              slog.New(slog.DiscardHandler),
+		handshakeTimeout: handshakeTimeout,
+	}
+}
+
+func TestSocks_AcceptLoopRetriesATransientFailure(t *testing.T) {
+	lis := &flakyListener{failures: 3}
+	server := serverOn(lis)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.Serve(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the accept loop never returned")
+	}
+
+	assert.Equal(t, 4, lis.accepts(),
+		"the loop must retry a transient failure and stop only when the listener is closed")
+	assert.Contains(t, server.Stats().LastError, "accepting a local connection",
+		"the failure must be visible in the proxy's listing rather than only in a log")
+	require.NoError(t, server.Close())
+}
+
+// deafListener never recovers and never reports itself closed: a descriptor
+// limit that does not clear.
+type deafListener struct{ flakyListener }
+
+func (l *deafListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls++
+	return nil, &net.OpError{Op: "accept", Err: syscall.EMFILE}
+}
+
+// And a proxy torn down while its accept loop is backing off comes apart at
+// once.
+//
+// Close is what the MCP server's shutdown and `fleetctl socks`'s Ctrl-C both go
+// through, and it joins the accept loop — so a backoff that only waited out its
+// timer would hold both for up to the cap, on a listener that has already been
+// closed. It is the same claim the parked handshake has: the retry is what
+// makes a transient failure survivable, and the cancellation is what stops it
+// making teardown wait.
+func TestSocks_CloseDuringAnAcceptBackoffReturnsAtOnce(t *testing.T) {
+	lis := &deafListener{}
+	server := serverOn(lis)
+
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		server.Serve(context.Background())
+	}()
+
+	// Let it climb to the cap, so a loop that waited out its timer would be
+	// waiting out the longest one.
+	require.Eventually(t, func() bool { return lis.accepts() > 8 }, 20*time.Second, 5*time.Millisecond,
+		"the loop must keep retrying a failure that does not clear")
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		require.NoError(t, server.Close())
+	}()
+	// Comfortably under the backoff it is sitting in, and comfortably over
+	// anything a teardown of a closed fake listener needs: a failure here is a
+	// Close that waited out the timer rather than a slow machine.
+	select {
+	case <-closed:
+	case <-time.After(maxAcceptBackoff / 2):
+		t.Fatal("closing a proxy waited out its accept loop's backoff; the retry must be cancellable, not merely timed")
+	}
+	<-served
 }
 
 // ------------------------------------------------------------- teardown

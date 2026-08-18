@@ -254,7 +254,39 @@ func socksNote(sandbox, address string, allowedHosts []string) string {
 	if len(allowedHosts) == 0 {
 		return fmt.Sprintf("Proxying through %s at %s. This agent's forward.allowed_hosts is empty, so the proxy reaches ANY host %s's network reaches.", sandbox, address, sandbox)
 	}
-	return fmt.Sprintf("Proxying through %s at %s. It reaches %s and nothing else.", sandbox, address, strings.Join(allowedHosts, ", "))
+	return fmt.Sprintf("Proxying through %s at %s. It reaches %s and nothing else.", sandbox, address, strings.Join(safeHosts(allowedHosts), ", "))
+}
+
+// safeHosts makes the agent's allow list safe to print.
+//
+// Every entry in it is a string the agent supplied, and this command prints it
+// into the banner that says what the proxy just opened may reach — next to the
+// line saying whether it is bounded at all. A terminal escape in an entry
+// rewrites that: an erase sequence takes the warning above it off the screen, a
+// carriage return overwrites it, and what is left reads as a narrower proxy
+// than the one now listening. That is the same reason every other
+// agent-supplied string this CLI renders goes through safeText; see
+// fillHostInfo, which does it for allowed_roots, which is this field's exact
+// analogue.
+//
+// The list keeps its length: how many entries there are is what decides whether
+// this proxy is announced as unrestricted, so an entry that was nothing but
+// escapes has to survive as an empty one rather than vanish into a shorter list
+// that would announce the wrong posture.
+//
+// The --json document reports allowed_hosts verbatim, which is right: a JSON
+// encoder escapes a control character rather than acting on it, and a script
+// comparing the field against the agent's configuration needs what the
+// configuration says.
+func safeHosts(hosts []string) []string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	out := make([]string, len(hosts))
+	for i, host := range hosts {
+		out[i] = safeText(host)
+	}
+	return out
 }
 
 // warnUnrestricted repeats the one line that must not be silenced by a flag.
@@ -297,7 +329,7 @@ func printSocksBanner(p *cli.Printer, r socksResult) {
 		p.Printf("CIDR blocks it should reach in forward.allowed_hosts on that agent.\n")
 		p.Printf("Every connection is recorded in the agent's audit log.\n")
 	} else {
-		p.Printf("The agent permits: %s\n", socks.DescribeAllowList(r.AllowedHosts))
+		p.Printf("The agent permits: %s\n", socks.DescribeAllowList(safeHosts(r.AllowedHosts)))
 		p.Printf("Anything else is refused by the agent and recorded in its audit log.\n")
 	}
 	if len(r.Allow) > 0 {

@@ -36,27 +36,6 @@ type session struct {
 	// working directory unless told otherwise, so a test that pulls needs to
 	// know where "here" is.
 	cwd string
-
-	// stopped guards stop, which the cleanup calls and a scenario may have
-	// called first.
-	stopped bool
-}
-
-// stop closes the session, which closes the stdio transport and ends the
-// fleet-mcp process behind it.
-//
-// A scenario calls it when the server going away is the thing under test — a
-// listener the server owns has to be released with it — and the cleanup calls
-// it otherwise. Idempotent, so both can.
-func (s *session) stop(t *testing.T) {
-	t.Helper()
-	if s.stopped {
-		return
-	}
-	s.stopped = true
-	if err := s.client.Close(); err != nil {
-		t.Logf("closing the MCP session: %v", err)
-	}
 }
 
 // connect starts fleet-mcp against this fleet's config directory and completes
@@ -95,7 +74,9 @@ func (f *fleet) connectAt(t *testing.T, configDir, cwdName string) *session {
 
 	s := &session{t: t, fleet: f, client: cs, errs: errs, cwd: cwd}
 	t.Cleanup(func() {
-		s.stop(t)
+		if err := cs.Close(); err != nil {
+			t.Logf("closing the MCP session: %v", err)
+		}
 		if t.Failed() {
 			t.Logf("fleet-mcp stderr:\n%s", errs.String())
 		}

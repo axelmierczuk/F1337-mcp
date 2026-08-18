@@ -185,6 +185,17 @@ func TestFleetSocksRefusesAnUnrestrictedAgent(t *testing.T) {
 	}
 	proxy.stop(t)
 
+	// And --json does not silence that. The document says it in a field, which
+	// is right for the script and invisible to the person watching the
+	// terminal, so the same fact goes to stderr — where it cannot land in the
+	// middle of the document a consumer is parsing.
+	//
+	// This is the only place the command is run with --json. The assertion that
+	// the warning exists calls the function that composes it, which is true of a
+	// build where nothing calls that function: deleting the call from the
+	// command left every test in the tree green, including this suite.
+	requireUnrestrictedJSONWarning(t, f, unrestricted)
+
 	// And the narrowed agent serves the model, reaching what it was narrowed
 	// to.
 	const body = "reachable because an operator said which hosts are"
@@ -269,6 +280,54 @@ func TestSocksProxyIsReleasedWithItsSandbox(t *testing.T) {
 	port := out.LocalAddress[strings.LastIndex(out.LocalAddress, ":")+1:]
 	if !portIsFree(t, port) {
 		t.Fatalf("port %s was not released when its sandbox was removed", port)
+	}
+}
+
+// requireUnrestrictedJSONWarning runs `fleetctl socks --json` against an agent
+// that permits every host and requires both halves of the answer: the field a
+// script reads, and the line a person does.
+func requireUnrestrictedJSONWarning(t *testing.T, f *fleet, a *agent) {
+	t.Helper()
+
+	port := freePort(t)
+	p := start(t, "fleetctl socks --json "+a.name, bins.fleetctl,
+		[]string{"socks", a.name, "--json", "--port", strconv.Itoa(port)},
+		procOptions{env: f.ctlEnv()})
+	address := "127.0.0.1:" + strconv.Itoa(port)
+
+	var doc socksResult
+	waitFor(t, 30*time.Second, "the --json document to be emitted", func() (bool, string) {
+		if !p.running() {
+			t.Fatalf("fleetctl socks --json exited:\nstdout:\n%s\nstderr:\n%s", p.stdout(), p.stderr())
+		}
+		if err := json.Unmarshal([]byte(p.stdout()), &doc); err != nil {
+			return false, "no complete document yet:\n" + p.stdout()
+		}
+		return true, ""
+	})
+
+	if doc.LocalAddress != address {
+		t.Fatalf("the document reports local_address %q, want %q", doc.LocalAddress, address)
+	}
+	if !doc.Unrestricted {
+		t.Fatalf("the document does not report an unrestricted proxy as one: %+v", doc)
+	}
+	// The warning a person reads, on the stream that is not carrying the
+	// document.
+	if !contains(p.stderr(), "ANY host "+a.name) {
+		t.Fatalf("--json silenced the warning that this proxy reaches any host %s can:\nstderr:\n%s", a.name, p.stderr())
+	}
+	if contains(p.stdout(), "warning:") {
+		t.Fatalf("the warning landed in the document a consumer is parsing:\n%s", p.stdout())
+	}
+
+	// And it shuts itself down on a signal in this mode too, which is a
+	// different path: --json returns as soon as Serve does rather than printing
+	// a closing summary, so the summary socksProxy.stop looks for is not there
+	// to look for.
+	p.terminate(t)
+	if p.waitErr != nil {
+		t.Fatalf("fleetctl socks --json exited with %v rather than shutting down on its own terms:\nstderr:\n%s", p.waitErr, p.stderr())
 	}
 }
 

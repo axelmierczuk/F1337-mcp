@@ -513,9 +513,15 @@ func (e *requestError) Error() string { return e.msg }
 // them unread in the receive buffer, and closing a socket with unread data
 // sends a reset rather than a FIN — which can discard the reply that was just
 // written, leaving the client with exactly the bare "connection reset" this
-// package answers reply codes in order to avoid. An address type this does not
-// implement is the one thing it cannot read past, because nothing says how long
-// that address is; it is answered where it is found.
+// package answers reply codes in order to avoid. That applies to every request
+// this answers, not only to the unsupported command it was first noticed for:
+// an empty destination name is a well-formed request with a port still on the
+// wire behind it.
+//
+// Two things cannot be read past, and are answered where they are found: a
+// version this does not speak, whose remaining fields are not this grammar's,
+// and an address type this does not implement, because nothing says how long
+// that address is.
 func readRequest(conn net.Conn) (Destination, error) {
 	var header [4]byte
 	if _, err := io.ReadFull(conn, header[:]); err != nil {
@@ -553,12 +559,10 @@ func readRequest(conn net.Conn) (Destination, error) {
 		if _, err := io.ReadFull(conn, length[:]); err != nil {
 			return Destination{}, fmt.Errorf("reading the destination name length: %w", err)
 		}
-		if length[0] == 0 {
-			return Destination{}, &requestError{
-				code: replyAddressNotSupported,
-				msg:  "the SOCKS request carried an empty destination name",
-			}
-		}
+		// A zero length is judged below with everything else, rather than
+		// answered here: the port is still on the wire behind it, and a reply
+		// written over an unread port is the reset this function reads the whole
+		// request to avoid.
 		raw := make([]byte, int(length[0]))
 		if _, err := io.ReadFull(conn, raw); err != nil {
 			return Destination{}, fmt.Errorf("reading the destination name: %w", err)
@@ -590,6 +594,16 @@ func readRequest(conn net.Conn) (Destination, error) {
 		return Destination{}, &requestError{
 			code: replyCommandNotSupported,
 			msg:  fmt.Sprintf("this proxy implements CONNECT only; the client asked for %s", commandName(cmd)),
+		}
+	}
+
+	// An empty name is judged after the command, for the same reason the port
+	// is: a client asking for a command this does not implement is answered
+	// about the command whatever its destination fields hold.
+	if dst.Name && dst.Host == "" {
+		return Destination{}, &requestError{
+			code: replyAddressNotSupported,
+			msg:  "the SOCKS request carried an empty destination name",
 		}
 	}
 

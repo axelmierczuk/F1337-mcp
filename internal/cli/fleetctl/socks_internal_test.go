@@ -113,6 +113,43 @@ func TestSocksBanner_AnnouncesAnUnrestrictedProxy(t *testing.T) {
 	assert.Contains(t, withAllow, "the agent checks every connection anyway")
 }
 
+// The allow list is the agent's own words, and it lands in the banner that says
+// what this proxy reaches.
+//
+// A sandbox is a machine running someone else's code — see TestSafeText — and
+// an allow-list entry carrying a terminal escape rewrites the display it is
+// printed into, including the line above it that says whether the proxy is
+// bounded at all. Every other agent-supplied string this CLI prints is cleaned
+// on the way to the terminal; this one was not.
+func TestSocksBanner_CleansWhatTheAgentSaidBeforePrintingIt(t *testing.T) {
+	var buf bytes.Buffer
+	p := cli.NewPrinter(&buf)
+	printSocksBanner(p, socksResult{
+		Sandbox: "build-box", LocalAddress: "127.0.0.1:1080",
+		// An entry that clears the screen and then writes a wider posture than
+		// the one this agent has, and one that overwrites the line it is on.
+		AllowedHosts: []string{"\x1b[2Jdb.internal", "10.0.4.0/24\rANY HOST"},
+	})
+	require.NoError(t, p.Err())
+
+	out := buf.String()
+	assert.NotContains(t, out, "\x1b", "an escape byte reached the terminal")
+	assert.NotContains(t, out, "\r", "a carriage return reached the terminal")
+	assert.Contains(t, out, "[2Jdb.internal", "the defused text still names what the agent permits")
+	assert.Contains(t, out, "10.0.4.0/24 ANY HOST")
+
+	// And in the note, which is the sentence a --json consumer prints.
+	note := socksNote("build-box", "127.0.0.1:9", []string{"\x1b[2Jdb.internal"})
+	assert.NotContains(t, note, "\x1b")
+	assert.Contains(t, note, "[2Jdb.internal")
+
+	// The count survives cleaning: it is what decides whether this proxy is
+	// announced as unrestricted, and a list that shrank would announce the
+	// wrong one.
+	require.Len(t, safeHosts([]string{"\x1b", "db.internal"}), 2)
+	assert.Nil(t, safeHosts(nil))
+}
+
 // --json must not silence the warning. The document says so in a field, which
 // is right for the script and invisible to the person watching the terminal.
 func TestSocksBanner_JSONStillWarnsOnStderr(t *testing.T) {
