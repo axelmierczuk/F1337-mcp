@@ -58,6 +58,11 @@ CHECK_TAGS := integration
 # be spelled out alongside it.
 CHECK_EXTRA_PKGS := ./test/e2e/testdata/helpers
 
+# Which is an explicit list of the things a wildcard cannot find, and so is
+# exactly the kind of list that rots: put a second package under testdata and
+# every checker goes quiet about it again, which is #60 with a different path.
+# check-extra-pkgs below holds the list to the tree rather than trusting it.
+
 .DEFAULT_GOAL := help
 
 ## help: list available targets
@@ -202,13 +207,50 @@ vet:
 		GOOS=$$os CGO_ENABLED=0 go vet -tags '$(CHECK_TAGS)' ./... $(CHECK_EXTRA_PKGS) || exit 1; \
 	done
 
+## check-extra-pkgs: fail if a package outside every `...` pattern is outside the gate
+#
+# The hole #60 was about is not that a package was skipped; it is that the gate
+# reported clean on a package it had never opened, so nobody knew. A hand-kept
+# list of the packages `./...` cannot reach has the same failure mode the moment
+# someone adds one, so the list is checked against the tree rather than trusted.
+#
+# CI is checked too, and it is the half that matters: its vet and lint steps
+# name these paths inline rather than reading this variable, and CI is the gate
+# that blocks a merge. `make check` does not run there, so this is the last
+# place the two can be held together before a push.
+#
+# It cannot see the other shape of the same hole — a file whose build tag no
+# GOOS in CHECK_GOOSES satisfies, which is compiled by nothing and needs a
+# constraint solver rather than a path list. See svcpid_other.go.
+.PHONY: check-extra-pkgs
+check-extra-pkgs:
+	@missing=""; \
+	for dir in $$(git ls-files '*.go' | grep -E '(^|/)(testdata|vendor|[._][^/]*)/' | sed 's|/[^/]*$$||' | sort -u); do \
+		case " $(CHECK_EXTRA_PKGS) " in \
+			*" ./$$dir "*) ;; \
+			*) missing="$$missing ./$$dir" ;; \
+		esac; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "no ... pattern reaches these packages, and CHECK_EXTRA_PKGS does not name them:$$missing"; \
+		echo "add them to CHECK_EXTRA_PKGS here, and to the vet and lint steps in .github/workflows/ci.yml"; \
+		exit 1; \
+	fi; \
+	for pkg in $(CHECK_EXTRA_PKGS); do \
+		grep -q -- "$$pkg" .github/workflows/ci.yml || { \
+			echo "CHECK_EXTRA_PKGS names $$pkg but no step in .github/workflows/ci.yml does,"; \
+			echo "so it is outside the gate that actually blocks a merge"; \
+			exit 1; \
+		}; \
+	done
+
 ## check: the local gate — what CI runs, across every GOOS
 #
 # CI's own lint job runs on one runner, so it sees one GOOS too; the test
 # matrix is what catches the rest, after a push. Running all three here means
 # finding it before.
 .PHONY: check
-check: proto-lint proto-check vet lint test
+check: proto-lint proto-check check-extra-pkgs vet lint test
 
 ## clean: remove build output
 .PHONY: clean
