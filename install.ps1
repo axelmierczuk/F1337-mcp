@@ -247,7 +247,7 @@ This means the download was corrupted or tampered with. Not installing.
   Installed. Nothing else was configured: no CA, no certificate, no service.
 
   If the network between this host and your workstation already authenticates
-  its peers — a tailnet, a WireGuard mesh, a tight VPC — write an agent.yaml
+  its peers (a tailnet, a WireGuard mesh, a tight VPC), write an agent.yaml
   naming this host, a listen address on that network, and:
 
     tls:
