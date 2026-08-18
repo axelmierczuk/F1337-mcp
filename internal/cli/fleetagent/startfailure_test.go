@@ -205,7 +205,7 @@ func TestServe_UnderAServiceManagerItServesUntilTheManagerStopsIt(t *testing.T) 
 // interactive, so kardianos is not in it at all: there is no manager to hand the
 // failure to, and this record is the only place the reason exists.
 func TestServeAndStatus_TheReasonAFailedStartSurvivesTheProcess(t *testing.T) {
-	configPath, _ := refusedConfig(t)
+	configPath, stateDir := refusedConfig(t)
 
 	// No --config: the daemon discovers one, exactly as `serve` typed by hand
 	// does, and the record has to name the config it *resolved* rather than the
@@ -225,7 +225,19 @@ func TestServeAndStatus_TheReasonAFailedStartSurvivesTheProcess(t *testing.T) {
 		"the daemon's own words, not a paraphrase of them")
 	assert.Contains(t, text, "0.0.0.0:8722", "and the address, which is the thing to change")
 	assert.Contains(t, text, "--allow-unauthenticated-public", "and the remedy it came with")
-	assert.Contains(t, text, configPath, "and the file to edit")
+
+	// The file to edit, which is the only actionable thing in the record — and
+	// asserted against the record and against the line the failure block prints,
+	// because `status` names a discovered config of its own two lines earlier.
+	// Matched loosely, this assertion passed with the record naming nothing at
+	// all: the mutation that stopped it recording the resolved path left the
+	// whole suite green.
+	rec, err := fleetagent.ReadStartFailureForTest(stateDir)
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, configPath, rec.Config,
+		"`serve` was given no --config, so the record has to name the one the daemon resolved")
+	assert.Contains(t, text, "  config:  "+configPath, "and the failure block has to print it")
 }
 
 // `service status` on a host whose agent failed to start, driven from the argv,
