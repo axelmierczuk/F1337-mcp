@@ -10,6 +10,10 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden frames in testdata/")
@@ -488,4 +492,31 @@ func TestWrapAdvancesThroughItsInput(t *testing.T) {
 	frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
 	require.Equal(t, 1, strings.Count(frame, "roots: none - this"), "the warning is drawn more than once")
 	require.Contains(t, frame, "unconfined", "the wrap broke a word it had room to keep whole")
+}
+
+// TestOneFailureReadsTheSameWayEverywhere.
+//
+// The panes used to print the raw gRPC error while the fleet row printed the
+// mapped one, so an unreachable sandbox was described two ways on one screen —
+// five wrapped lines of "transport: Error while dialing…" beside a row saying
+// "no answer within the timeout" about the same event.
+func TestOneFailureReadsTheSameWayEverywhere(t *testing.T) {
+	t.Parallel()
+
+	unreachable := status.Error(codes.Unavailable, `connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:49001: connect: connection refused"`)
+
+	// Wide enough for the fleet pane's DETAIL column, which is where the row's
+	// half of the comparison is.
+	m := demoModel(140, 40)
+	m.sandboxes[0].Health, m.sandboxes[0].Detail = client.HealthUnreachable, probeDetail(unreachable)
+	m.processes = nil
+	m.logs = Logs{}
+	m, _ = m.Step(processesMsg{sandbox: "alpha", err: unreachable})
+	m, _ = m.Step(detailMsg{sandbox: "alpha", err: unreachable})
+
+	frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+	require.NotContains(t, frame, "transport:", "a raw gRPC error reached a pane")
+	require.NotContains(t, frame, "rpc error")
+	require.GreaterOrEqual(t, strings.Count(frame, "no answer within the timeout"), 2,
+		"the panes and the fleet row do not describe the failure the same way")
 }

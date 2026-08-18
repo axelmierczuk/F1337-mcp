@@ -174,7 +174,7 @@ func renderHeader(m Model, t Theme, g Glyphs, l Layout) string {
 	counts := fleetSummary(m.sandboxes)
 	right := counts
 	if m.sbState.err != nil {
-		right = "fleet: " + oneLine(m.sbState.err.Error())
+		right = "fleet: " + paneError(m.sbState.err)
 	}
 	gap := l.Width - ansi.StringWidth(left) - ansi.StringWidth(right) - 2
 	if gap < 1 {
@@ -497,7 +497,7 @@ func processBody(m Model, t Theme, g Glyphs, w, h int) []string {
 	}
 	if len(m.processes) == 0 {
 		if m.procState.err != nil {
-			return wrapStyled(t.Bad, oneLine(m.procState.err.Error()), w, h)
+			return wrapStyled(t.Bad, paneError(m.procState.err), w, h)
 		}
 		return []string{t.Dim.apply("no supervised processes on " + safe(sb.Name))}
 	}
@@ -595,7 +595,7 @@ func logBody(m Model, t Theme, g Glyphs, w, h int) []string {
 	}
 	if len(m.logs.Lines) == 0 {
 		if m.logState.err != nil {
-			return wrapStyled(t.Bad, oneLine(m.logState.err.Error()), w, h)
+			return wrapStyled(t.Bad, paneError(m.logState.err), w, h)
 		}
 		if m.logFor.processID != p.ID {
 			return []string{t.Dim.apply("reading " + safe(p.Name) + "'s output" + g.Ellipsis)}
@@ -717,7 +717,7 @@ func detailLines(m Model, t Theme, g Glyphs, w int) []string {
 		}
 	}
 	if m.detailState.err != nil {
-		out = append(out, wrapStyled(t.Bad, oneLine(m.detailState.err.Error()), w, 2)...)
+		out = append(out, wrapStyled(t.Bad, paneError(m.detailState.err), w, 2)...)
 	}
 	return out
 }
@@ -879,6 +879,23 @@ func wrap(s string, w, h int) []string {
 // cost is a string copy of text that is about to be copied anyway; the failure
 // it prevents is a sandbox repositioning the operator's cursor.
 func safe(s string) string { return cli.SafeText(s) }
+
+// paneError renders why a pane has nothing to show, in the vocabulary
+// internal/client defines.
+//
+// Through the same mapping the fleet pane's DETAIL column uses, so one sandbox
+// that is not answering reads the same way everywhere on the screen. Left raw,
+// the panes reported the same failure as `client: sandbox unreachable:
+// connection error: desc = "transport: Error while dialing: dial tcp
+// 127.0.0.1:49001: connect: connection refused": rpc error: code = Unavailable
+// …`, five wrapped lines of it, next to a fleet row that said "no answer within
+// the timeout" about the identical event.
+func paneError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return probeDetail(err)
+}
 
 // oneLine makes an error safe and short enough for a pane.
 func oneLine(msg string) string { return cli.Clip(cli.SafeText(msg), 200) }
