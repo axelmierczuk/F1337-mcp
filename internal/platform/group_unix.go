@@ -621,7 +621,7 @@ func (g *ProcessGroup) collect(sweep bool, wait func() error) (groupErr, waitErr
 }
 
 // collectLeader performs a collection this call could not order anything
-// against, and closes the group as soon as it has.
+// against, and gives the group up as soon as it has.
 //
 // The window it leaves is between wait4 returning inside wait and the mark
 // below: a signal in exactly that gap is aimed at the leader through its

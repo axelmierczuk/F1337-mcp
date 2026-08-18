@@ -129,12 +129,24 @@ func helperMain(mode string, args []string) int {
 		return spawnHelper(spawnSpec{pidFile: arg(args, ""), childMode: "sleep", holdStdout: true})
 
 	case "spawn-exit-holding-stdout-detached":
-		// spawn-exit-holding-stdout-detached <pidfile>: the same, except the
-		// grandchild leaves the command's process group before it starts
-		// holding the pipe. The sweep aims at the group, so this one is out of
-		// its reach and the drain is the only thing that ends the wait. Unix
-		// only: a Windows grandchild is in the job whether it likes it or not.
-		return spawnHelper(spawnSpec{pidFile: arg(args, ""), childMode: "sleep", holdStdout: true, detach: true})
+		// spawn-exit-holding-stdout-detached <pidfile> [seconds]: the same,
+		// except the grandchild leaves the command's process group before it
+		// starts holding the pipe. The sweep aims at the group, so this one is
+		// out of its reach and the drain is the only thing that ends the wait.
+		// Unix only: a Windows grandchild is in the job whether it likes it or
+		// not.
+		//
+		// seconds is how long it holds the pipe, default the usual forever. A
+		// scenario that needs the wait to end on its own rather than on the
+		// drain sets it short — that is the only way for a call to outlive the
+		// collection and still return a result.
+		return spawnHelper(spawnSpec{
+			pidFile:    arg(args, ""),
+			childMode:  "sleep",
+			childArg:   argAt(args, 1, "600"),
+			holdStdout: true,
+			detach:     true,
+		})
 
 	case "ignore-term-spawn":
 		// ignore-term-spawn <pidfile>: a tree in which every process declines
@@ -187,11 +199,13 @@ func helperMain(mode string, args []string) int {
 	}
 }
 
-// arg returns the helper's first argument, or a default. Every mode takes at
-// most one.
-func arg(args []string, fallback string) string {
-	if len(args) > 0 {
-		return args[0]
+// arg returns the helper's first argument, or a default.
+func arg(args []string, fallback string) string { return argAt(args, 0, fallback) }
+
+// argAt returns the helper's nth argument, or a default.
+func argAt(args []string, n int, fallback string) string {
+	if len(args) > n {
+		return args[n]
 	}
 	return fallback
 }
@@ -202,6 +216,9 @@ type spawnSpec struct {
 	pidFile string
 	// childMode is the helper mode the grandchild runs.
 	childMode string
+	// childArg is the argument it runs with; empty means the mode's own
+	// default.
+	childArg string
 	// wait keeps this process alive after the grandchild is running.
 	wait bool
 	// holdStdout hands the grandchild this process's stdout.
@@ -240,7 +257,11 @@ func spawnHelper(spec spawnSpec) int {
 	if err != nil {
 		return 1
 	}
-	child := osexec.Command(self, "600") //nolint:gosec // the test binary re-executing itself
+	childArg := spec.childArg
+	if childArg == "" {
+		childArg = "600"
+	}
+	child := osexec.Command(self, childArg) //nolint:gosec // the test binary re-executing itself
 	child.Env = append(os.Environ(), helperEnvFor(spec.childMode))
 	child.Stdout = nil
 	if spec.holdStdout {

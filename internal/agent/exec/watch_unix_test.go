@@ -11,6 +11,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/durationpb"
+
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
 // These are #105: the timeout watcher signals the same process group that the
@@ -41,13 +44,20 @@ func TestWatch_DoesNotSignalAGroupWhoseLeaderHasBeenCollected(t *testing.T) {
 	w := h.svc.watch(context.Background(), group, time.Millisecond, make(chan struct{}))
 	<-w.finished
 
-	require.True(t, w.timedOut.Load(), "the watcher did not decide to kill anything, so it signalled nothing for a second reason")
+	// The watcher did decide to signal — the line below is written by the call
+	// that tried — and the group refused it.
 	require.Contains(t, h.logs.String(), `signal=TERM`,
-		"the escalation's first signal went out to an id the collection had already given back")
-	require.Contains(t, h.logs.String(), `signal=KILL`,
-		"the escalation's second signal went out to an id the collection had already given back")
+		"the watcher never signalled anything, so it reached the id for a second reason")
+	require.NotContains(t, h.logs.String(), `signal=KILL`,
+		"the escalation carried on after the refusal; there is nothing left to escalate to and the second signal is refused for the same reason")
 	require.NotContains(t, h.logs.String(), "could not signal the process group",
 		"a refusal is the ordinary answer here and must not be reported as a failure to stop the command")
+
+	// And the command is not recorded as one the agent killed. It had already
+	// finished, which is exactly what the refusal establishes and what the
+	// select on done above it cannot see.
+	require.False(t, w.timedOut.Load(),
+		"the audit record would say the agent timed out a command that had already exited on its own")
 }
 
 // And the call an operator makes is what gets there.
@@ -55,34 +65,55 @@ func TestWatch_DoesNotSignalAGroupWhoseLeaderHasBeenCollected(t *testing.T) {
 // The test above drives the watcher directly, which proves nothing on its own:
 // the shape this repository has shipped most often is a fix asserted by calling
 // the repaired function, with nothing asserting that the path a caller takes
-// reaches it. This is fleet_exec's own handler, with a request whose timeout
-// expires while the command is over and its group already collected.
+// reaches it. This is fleet_exec's own handler, on the other of the two events
+// that make it signal — the caller going away — because that one can be
+// triggered at an instant the test chooses rather than waited for.
 //
-// The interleaving is built out of the two facts #91 recorded rather than
-// waited for. The command exits at once and leaves a descendant holding its
+// Nothing here is timed. The interleaving is built out of the two facts #91
+// recorded: the command exits at once and leaves a descendant holding its
 // stdout, and that descendant is outside the group, so the sweep cannot reach
-// it: os/exec's Wait then blocks on the copiers for the whole of Cmd.WaitDelay,
-// which is what keeps done open for seconds after the leader has been
-// collected. The timeout and the grace are set well inside that, so both of the
-// watcher's signals are decided on while the group id belongs to the kernel.
+// it and os/exec's Wait stays parked on the copiers. The test then *watches*
+// for the leader's pid to stop existing — which is the collection, because a
+// process that has exited and not been collected still holds its pid — and only
+// then cancels the call. So the signal is decided on after the group id has
+// been released, by construction rather than by luck.
 //
-// What is asserted is the daemon's own record of the refusal, which is the fact
-// that distinguishes this from the same run with the guard removed: there, both
-// signals go out, kill(-pgid) succeeds, and nothing anywhere says so.
-func TestExec_TheTimeoutsSignalsAreNotSentToAGroupTheWaitHasCollected(t *testing.T) {
+// Two facts are asserted. The daemon says it refused to signal, which is what
+// distinguishes this from the same run with the guard removed — there, the
+// signal goes out, kill(-pgid) succeeds and nothing anywhere says so. And the
+// result does not claim the command was cancelled: it had already finished, and
+// a record that says otherwise says the agent killed something it did not.
+func TestExec_TheWatchersSignalIsNotSentToAGroupTheWaitHasCollected(t *testing.T) {
 	h := newHarness(t)
-	// Both well inside the drain below, so the escalation happens while the
-	// wait is still parked on the descendant's pipe. Nothing here is asserted
-	// on how long anything took.
-	h.svc.killGrace = 300 * time.Millisecond
-	h.svc.ioDrain = 2 * time.Second
 
 	pidFile := filepath.Join(t.TempDir(), "detached.pid")
-	req := helperReq("spawn-exit-holding-stdout-detached", pidFile)
-	req.Timeout = durationpb.New(400 * time.Millisecond)
+	// The grandchild holds the output pipe for long enough that the wait is
+	// still parked when the call is cancelled, and lets go long before the
+	// drain that would otherwise end the call — so the handler returns with a
+	// result rather than giving up on a stalled stream.
+	req := helperReq("spawn-exit-holding-stdout-detached", pidFile, "1")
+	req.Timeout = durationpb.New(30 * time.Second)
 
-	stream, err := h.run(t, req)
-	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := newFakeStream(ctx)
+	returned := make(chan error, 1)
+	go func() { returned <- h.svc.Exec(req, stream) }()
+
+	leader, grandchild := readPIDs(t, pidFile)
+	waitForPID(t, "the command's leader to be collected", func() bool {
+		// A process that has exited and not been collected still holds its pid,
+		// so this stops being true at the collection and at nothing else.
+		return !platform.ProcessExists(leader)
+	})
+
+	cancel()
+	select {
+	case err := <-returned:
+		require.NoError(t, err)
+	case <-time.After(60 * time.Second):
+		t.Fatal("Exec did not return; the handler is wedged")
+	}
 
 	res := stream.result()
 	require.NotNil(t, res)
@@ -91,10 +122,28 @@ func TestExec_TheTimeoutsSignalsAreNotSentToAGroupTheWaitHasCollected(t *testing
 	require.False(t, res.GetSignaled())
 
 	require.Contains(t, h.logs.String(), "the command had already been collected, so the timeout's signal was not sent",
-		"the timeout's kill went out to a process group id this call had already released; on a developer's machine that is whatever session holds the number now")
+		"the signal went out to a process group id this call had already released; on a developer's machine that is whatever session holds the number now")
 
-	// The descendant is out of the sweep's reach by construction — that is what
-	// keeps the wait parked — so nothing else takes it with it.
-	_, grandchild := readPIDs(t, pidFile)
+	records := h.records(t)
+	require.Len(t, records, 1)
+	require.Equal(t, policy.OutcomeOK, records[0].Outcome,
+		"the record says the agent killed a command that had already finished on its own")
+
 	requireKilled(t, grandchild)
+}
+
+// waitForPID polls a fact about a pid until it holds. Every wait in this file
+// is on something observed rather than on a duration; the deadline is only a
+// bound on the failure.
+func waitForPID(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }

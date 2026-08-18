@@ -214,22 +214,3 @@ func TestReap_DoesNotSignalAGroupIDTheWaitHasReleased(t *testing.T) {
 	require.Contains(t, logs.String(), "the teardown's kill was not sent",
 		"the teardown signalled the group itself rather than through the guard, which is the only thing that knows whether the id is still the session's")
 }
-
-// requireDiedOfSIGTERM kills a process the test expects to have been left
-// alone, and reads back which signal arrived.
-//
-// It is the only thing that settles it. A process that has been sent SIGKILL is
-// not distinguishable from a running one by asking whether its pid exists — the
-// answer is yes either way until somebody reaps the zombie — so this kills it
-// deliberately, with a different signal. A kill that went out first is already
-// pending and wins.
-func requireDiedOfSIGTERM(t *testing.T, cmd *pty.Cmd, whatItMeans string) {
-	t.Helper()
-
-	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
-	_ = cmd.Wait()
-	require.NotNil(t, cmd.ProcessState)
-	sig, signalled := terminatingSignal(cmd.ProcessState)
-	require.True(t, signalled)
-	require.Equal(t, "SIGTERM", sig, whatItMeans)
-}

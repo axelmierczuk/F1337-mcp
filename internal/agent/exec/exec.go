@@ -702,17 +702,31 @@ func (s *Service) watch(ctx context.Context, group *platform.ProcessGroup, timeo
 		default:
 		}
 
-		s.signalTree(group.Signal(platform.SignalTerm), "TERM")
+		if s.signalTree(group.Signal(platform.SignalTerm), "TERM") {
+			// The command had already been collected, so nothing was killed and
+			// nothing is left to escalate to. Both halves of that matter: the
+			// record must not say the agent killed a command that had finished
+			// on its own — which is what the guard above is for and what it
+			// cannot always see, because done closes only once Wait has
+			// returned — and a second signal would be refused for the same
+			// reason this one was.
+			//
+			// The drain below is still owed. A collected command is not a
+			// finished call: Wait can still be parked on a copier inside the
+			// caller's Send, and that is the one thing WaitDelay does not bound.
+			w.timedOut.Store(false)
+			w.cancelled.Store(false)
+		} else {
+			grace := time.NewTimer(s.killGrace)
+			defer grace.Stop()
+			select {
+			case <-done:
+				return
+			case <-grace.C:
+			}
 
-		grace := time.NewTimer(s.killGrace)
-		defer grace.Stop()
-		select {
-		case <-done:
-			return
-		case <-grace.C:
+			s.signalTree(group.Kill(), "KILL")
 		}
-
-		s.signalTree(group.Kill(), "KILL")
 
 		// The process is gone, so Wait returns in milliseconds — unless
 		// something downstream of the output pipes is stuck, which is the case
@@ -743,26 +757,31 @@ func (s *Service) watch(ctx context.Context, group *platform.ProcessGroup, timeo
 //   - ErrGroupReleased: the command was collected while this goroutine was
 //     deciding to signal it, so the signal was not sent. That is #105's
 //     interleaving arriving and being refused rather than delivered to whatever
-//     the kernel gave the group id to next — see watch. It is logged because a
-//     result that says timed_out with nothing killed on the host is otherwise a
-//     puzzle, and DEBUG because it is the ordinary ending of a race rather than
+//     the kernel gave the group id to next — see watch. It is reported back
+//     because it is also the answer to a question the watcher cannot settle for
+//     itself: a command whose group has been released is a command that
+//     finished, so nothing was killed and the record must not say otherwise.
+//     Logged at DEBUG because it is the ordinary ending of a race rather than
 //     something an operator has to act on.
 //   - ErrProcessNotFound on its own: the group emptied between the decision and
 //     the signal. Nothing to say and nothing to do.
 //   - anything else: the command is still running and the agent could not stop
 //     it, which is the caller's timeout not being honoured.
 //
-// ErrGroupReleased is tested for first because it wraps ErrProcessNotFound.
-func (s *Service) signalTree(err error, signal string) {
+// ErrGroupReleased is tested for first because it wraps ErrProcessNotFound, and
+// it is the one answer the caller acts on: released is what it reports.
+func (s *Service) signalTree(err error, signal string) (released bool) {
 	switch {
 	case err == nil:
 	case errors.Is(err, platform.ErrGroupReleased):
 		s.log.Debug("the command had already been collected, so the timeout's signal was not sent",
 			"signal", signal)
+		return true
 	case errors.Is(err, platform.ErrProcessNotFound):
 	default:
 		s.log.Warn("could not signal the process group", "signal", signal, "error", err)
 	}
+	return false
 }
 
 // fail records a refused request and returns the error the caller sees.

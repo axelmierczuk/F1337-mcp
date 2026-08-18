@@ -4,8 +4,11 @@ package e2e
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -315,4 +318,110 @@ func TestExecSweepsADescendantThatOutlivedItsCommand(t *testing.T) {
 		t.Fatalf("the agent died sweeping the process group:\n%s", a.logs())
 	}
 	s.ok("fleet_exec", map[string]any{"argv": []string{"true"}})
+}
+
+// TestExecTimeoutDoesNotSignalACommandItHasAlreadyCollected is #105 through the
+// tool an operator calls.
+//
+// The command exits on its own while a descendant it left outside its process
+// group is still holding the command's stdout. os/exec's Wait does not return
+// until the output copiers do, so the agent has collected the leader — which on
+// Unix hands the process group id back to the kernel — and is still waiting,
+// with the timeout watcher still watching a call it has every reason to believe
+// is running. The watcher's SIGTERM used to go out into that window, to a
+// number the kernel was free to have given to somebody else's session.
+//
+// Three facts are asserted and none of them is a duration:
+//
+//   - the result says the command was not timed out. It exited 0 on its own,
+//     and a record that says otherwise says the agent killed something it did
+//     not — which is the half of this the caller can see.
+//   - the agent says it refused to signal. That is the only thing that
+//     distinguishes this run from the same one with the guard removed, where
+//     the signal goes out and kill(-pgid) reports success.
+//   - a process group the agent never started is still there, and so is the
+//     agent.
+//
+// The three durations are margins on a two-second window and are the fixture
+// rather than the assertion: the command exits a second before its timeout, and
+// the agent's own drain (2s, internal/agent/exec's defaultIODrain) keeps the
+// call alive a second past it. A failure here on a loaded machine is worth
+// checking against the agent's log before it is read as a defect — the log says
+// what the watcher decided and when.
+func TestExecTimeoutDoesNotSignalACommandItHasAlreadyCollected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no process group id to release: the group holds a job object and a pinned leader handle, and a signal after the wait is as well aimed as one before it")
+	}
+
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+	s := f.connect(t)
+	s.ok("fleet_select", map[string]any{"name": a.name})
+
+	// Its own session leader, started before the command and expected to be
+	// there after it. Its only job is to hold a process group the watcher must
+	// not signal.
+	bystander := start(t, "bystander", bins.helpers, []string{"sleep"}, procOptions{})
+
+	pidFile := filepath.Join(t.TempDir(), "linger.pids")
+	res := structured[execResult](t, s.okAs("fleet_exec", map[string]any{
+		"argv":            []string{bins.helpers, "linger", "1", pidFile},
+		"timeout_seconds": 2,
+	}, callOptions{timeout: 120 * time.Second}))
+
+	leader, holder := parsePIDFile(t, pidFile)
+	t.Cleanup(func() { killPID(holder) })
+
+	if res.TimedOut {
+		t.Fatalf("a command that exited on its own a second before its timeout is reported as timed out; "+
+			"the watcher signalled a group its own wait had already collected and recorded a kill that did not happen: %+v\n%s",
+			res, a.logs())
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("the command exited %d rather than on its own terms; something reached it: %+v", res.ExitCode, res)
+	}
+
+	if !contains(a.logs(), "the command had already been collected, so the timeout's signal was not sent") {
+		t.Fatalf("the agent does not say it refused to signal, so the watcher either never fired — which makes this "+
+			"scenario about nothing — or fired and was obeyed, which is the defect:\n%s", a.logs())
+	}
+
+	// The leader's pid is the group id the watcher would have signalled.
+	// Nothing is asserted about it: it belongs to the kernel now, which is the
+	// whole point, and asking about it is asking about whoever holds it.
+	t.Logf("the command's leader was pid %d; its group id went back to the kernel when the agent collected it", leader)
+
+	if !bystander.running() || !processAlive(bystander.pid()) {
+		t.Fatalf("a process group outside the command's did not survive the timeout: pid %d, which the agent never started, was killed",
+			bystander.pid())
+	}
+	if !a.proc.running() {
+		t.Fatalf("the agent died signalling the process group:\n%s", a.logs())
+	}
+	s.ok("fleet_exec", map[string]any{"argv": []string{"true"}})
+}
+
+// parsePIDFile reads the two pids a helper wrote, waiting for the write rather
+// than assuming it has landed.
+func parsePIDFile(t *testing.T, path string) (first, second int) {
+	t.Helper()
+
+	waitFor(t, 30*time.Second, "the command to write its pids to "+path, func() (bool, string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false, err.Error()
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) != 2 {
+			return false, "the file holds " + strconv.Quote(string(data))
+		}
+		a, err1 := strconv.Atoi(fields[0])
+		b, err2 := strconv.Atoi(fields[1])
+		if err1 != nil || err2 != nil {
+			return false, "the file holds " + strconv.Quote(string(data))
+		}
+		first, second = a, b
+		return true, ""
+	})
+	return first, second
 }

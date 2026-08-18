@@ -98,13 +98,18 @@ func TestPIDReuse_TheTimeoutWatcherDoesNotSignalTheProcessThatTookTheID(t *testi
 	w := h.svc.watch(context.Background(), group, time.Millisecond, make(chan struct{}))
 	<-w.finished
 
-	require.True(t, w.timedOut.Load(), "the watcher never decided to kill anything, so it signalled nothing for the wrong reason")
-	require.Contains(t, h.logs.String(), "signal=TERM", "the escalation's first signal was never decided on")
-	require.Contains(t, h.logs.String(), "signal=KILL", "the escalation's second signal was never decided on")
-	require.ErrorIs(t, group.Kill(), platform.ErrGroupReleased)
-
+	// The harm, first and on its own. Everything below explains it.
 	requireStillRunning(t, bystander.Process.Pid,
 		"the timeout watcher killed a process group it never started: on a developer's machine that is their editor or their build")
+
+	// How it was prevented, in the daemon's own words, and the group agreeing.
+	// The line is written by the call that tried to signal, so it is also what
+	// says the watcher decided to: a watcher that timed out on nothing would
+	// leave the bystander alive for a reason this test is not about.
+	require.Contains(t, h.logs.String(), "signal=TERM", "the escalation's signal was never decided on")
+	require.False(t, w.timedOut.Load(),
+		"the record would say the agent timed out a command that had already exited on its own")
+	require.ErrorIs(t, group.Kill(), platform.ErrGroupReleased)
 
 	// And the control, which is what stops the assertion above being a test of
 	// nothing: the same id, reached by the same call, from a group that still
