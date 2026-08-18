@@ -125,6 +125,11 @@ func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRe
 			Enabled:      s.deps.Config.Forward.IsEnabled(),
 			SocksEnabled: s.deps.Config.Forward.SocksEnabled,
 			AllowedHosts: s.deps.Config.Forward.AllowedHosts,
+			// Answered here rather than left to be derived from the list
+			// above: "unrestricted" has a spelling the list cannot show, and a
+			// caller re-deriving it would carry a copy of the rule that says
+			// so. See ForwardPolicy.unrestricted in host.proto.
+			Unrestricted: s.deps.Config.Forward.SocksReachesAnyHost(),
 		},
 	}
 	if req.GetIncludeToolchains() {

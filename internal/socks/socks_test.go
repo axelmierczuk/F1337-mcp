@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1076,6 +1077,125 @@ func TestSocks_CloseReleasesEverythingAndIsIdempotent(t *testing.T) {
 		_ = conn.Close()
 	}
 	goleak.VerifyNone(t, baseline)
+}
+
+// Close returns only once every connection it cancelled has finished.
+//
+// The join is the whole of what Close promises beyond "the port is free", and
+// it is what two callers above it are built on. internal/mcpserver's shutdown
+// releases its closers in reverse so that the registrar's Close — which reaches
+// this one — joins the goroutines carrying connections *before* the client pool
+// under them is closed; fleet_remove does the same thing per sandbox, tearing
+// the proxy down and then dropping the pooled channel it was carrying
+// connections over. Both are correct only if this function does not return
+// early, and both would fail the same way: every connection in flight dying on
+// a transport pulled out from under it, reported to a client as a truncated
+// response.
+//
+// Nothing asserted it. Removing s.wg.Wait() from Close left every test in this
+// repository green, and so did dropping the Add/Done around the per-connection
+// goroutine entirely — because every other assertion here is about a *state*
+// that arrives shortly afterwards, and goleak retries. So this asserts the
+// ordering directly: a connector that takes a measurable moment to unwind after
+// its context ends, and a flag that has to be set by the time Close returns
+// rather than soon after.
+func TestSocks_CloseJoinsTheConnectionsItCancelled(t *testing.T) {
+	// Long enough that a Close which did not join is measurably early, short
+	// enough to pay on every run. A slow machine can only make this pass.
+	const unwind = 300 * time.Millisecond
+
+	connector := &parkedConnector{carrying: make(chan struct{}), unwind: unwind}
+	server, err := Listen(0, Options{Connect: connector.connect})
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		server.Serve(context.Background())
+	}()
+
+	c := dialProxy(t, server.Addr())
+	require.Equal(t, byte(authNone), c.greet(t, authNone))
+	require.Equal(t, byte(replySuccess), c.request(t, cmdConnect, addrDomain, []byte("held.invalid"), 5432))
+
+	select {
+	case <-connector.carrying:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the connection never reached the connector, so there is nothing here for Close to join")
+	}
+
+	require.NoError(t, server.Close())
+
+	assert.True(t, connector.finished.Load(),
+		"Close returned while a connection was still unwinding: the MCP server closes the client pool immediately after this, and fleet_remove drops the channel these connections are carried over")
+	assert.Zero(t, server.Stats().OpenNow,
+		"and a proxy that has been closed is carrying nothing, at the moment Close returns rather than shortly after")
+	wg.Wait()
+}
+
+// parkedConnector carries one connection, holds it until the proxy's context
+// ends, and then takes a moment to unwind — which is what a real one does, with
+// two pumps and a gRPC stream to release.
+type parkedConnector struct {
+	// carrying is closed once the connection is being carried, so the test
+	// closes a proxy that genuinely has something in flight.
+	carrying chan struct{}
+	unwind   time.Duration
+	finished atomic.Bool
+}
+
+func (c *parkedConnector) connect(ctx context.Context, _ net.Conn, _ Destination, accepted func() error) error {
+	if err := accepted(); err != nil {
+		return err
+	}
+	close(c.carrying)
+	<-ctx.Done()
+	time.Sleep(c.unwind)
+	c.finished.Store(true)
+	return ctx.Err()
+}
+
+// Serving a proxy that is already closed must not reach its listener.
+//
+// The guard in Serve is what makes Close-then-Serve correct by construction
+// rather than by what the listener happens to do: a net.TCPListener answers a
+// closed accept with net.ErrClosed, which ends the loop, so the ordering was
+// only ever right by luck — and the loop would also have installed a cancel
+// nobody would ever call. A listener that parks instead is how that is asserted
+// without depending on the luck.
+func TestSocks_ServeOnAClosedProxyNeverAccepts(t *testing.T) {
+	lis := &parkedListener{released: make(chan struct{})}
+	t.Cleanup(func() { close(lis.released) })
+	server := serverOn(lis)
+	require.NoError(t, server.Close())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.Serve(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve parked in Accept on a proxy that was already closed")
+	}
+	assert.Zero(t, lis.accepts(), "a closed proxy must not accept, whatever its listener would have answered")
+}
+
+// parkedListener blocks in Accept until the test releases it, which no real
+// listener does after Close — that is the point.
+type parkedListener struct {
+	flakyListener
+	released chan struct{}
+}
+
+func (l *parkedListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	l.calls++
+	l.mu.Unlock()
+	<-l.released
+	return nil, net.ErrClosed
 }
 
 // Closing before serving begins must stop the proxy rather than racing it.

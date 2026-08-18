@@ -393,6 +393,24 @@ recorded.
   and `fleet_socks` refuses to open a proxy on those terms at all. See
   [the model's proxy](#the-models-proxy).
 
+  **"Unrestricted" has a second spelling, and it is treated as the same thing.**
+  An `allowed_hosts` of `["0.0.0.0/0"]` — or `["::/0"]` — has entries, reads as
+  a narrowing, and permits every host of that family the machine can reach. It
+  is also what an operator writes when they want the lab-box posture and have
+  been told to list CIDR blocks, which is exactly what `fleet_socks`'s refusal
+  tells them. So the agent judges the two together: a block covering its whole
+  address family raises the same warning as an empty list, and is refused by
+  `fleet_socks` the same way.
+
+  The judgement is the agent's, reported as `ForwardPolicy.unrestricted` rather
+  than re-derived on the workstation from the list — a caller re-deriving it
+  would carry a copy of the rule, and the copy is what drifts. Blocks that add
+  up to everything without any one of them covering everything (`0.0.0.0/1`
+  and `128.0.0.0/1`) are not caught, deliberately: this names the plausible
+  mistake rather than doing CIDR arithmetic that would still miss the next
+  spelling. It is a description either way — what the agent will actually reach
+  is decided per connection, from the same configuration.
+
 An operator who lists a host has accepted that the agent will connect to it on
 any caller's request. The agent says so in its log at every start, and warns
 separately if it was told to do that with the audit log switched off — the two
@@ -428,7 +446,7 @@ lab and a cloud VPC is a set nobody has enumerated.
 reachable network once, and the model works inside it. So the two callers are
 deliberately not symmetric:
 
-| | `socks_enabled: false` | on, `allowed_hosts` set | on, `allowed_hosts` empty |
+| | `socks_enabled: false` | on, `allowed_hosts` narrows something | on, `allowed_hosts` empty or covering everything |
 | --- | --- | --- | --- |
 | `fleetctl socks` | refused, naming the setting | serves, listing the hosts | serves, with an unmissable banner |
 | `fleet_socks` | refused, naming the setting | serves, reporting the hosts in its result | **refused** |

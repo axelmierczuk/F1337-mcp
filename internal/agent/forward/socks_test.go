@@ -358,6 +358,19 @@ func TestSocks_StartupLogAnnouncesAnUnrestrictedProxy(t *testing.T) {
 	// And a block written as its own network has nothing to answer for.
 	exact := warnings(agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{"10.0.4.0/24"}}, true)
 	assert.NotContains(t, exact, "wider than")
+
+	// The one that reads as a narrowing and is not one. A /0 is a valid,
+	// deliberate-looking entry and it permits every host of its family — so an
+	// allow list holding one is the unrestricted posture wearing the shape of a
+	// bounded one, and the loudest line this agent has went unsaid for it while
+	// firing for the empty list that means exactly the same thing.
+	covering := warnings(agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{"0.0.0.0/0"}}, true)
+	assert.Contains(t, covering, "THIS AGENT WILL PROXY TO ANY HOST IT CAN REACH")
+	assert.Contains(t, covering, "0.0.0.0/0")
+	assert.NotContains(t, covering, "forward.allowed_hosts is empty",
+		"the list is not empty here; a reason that said so would send an operator looking for a line that is in front of them")
+	assert.NotContains(t, covering, "narrowed by the allow list",
+		"a list that covers everything must never be reported as a narrowing")
 }
 
 // And the daemon says it, not merely the function that composes it.
@@ -401,4 +414,39 @@ func TestSocks_StartupPostureReachesTheDaemonsLog(t *testing.T) {
 		"an operator learns what their mask actually permits from the daemon's own log, or nowhere")
 	assert.Contains(t, log.String(), "10.0.4.0/24")
 	assert.Contains(t, log.String(), "SOCKS proxying is permitted")
+}
+
+// And the loudest line reaches it for both spellings of "unrestricted".
+//
+// Same reasoning as the test above, for the case that motivated the second
+// spelling: an allow list of ["0.0.0.0/0"] is what an operator writes when they
+// mean "everywhere", and it went through the *narrowed* branch — logged as
+// "SOCKS proxying is permitted, narrowed by the allow list", with the warning
+// this whole log exists for unsaid.
+func TestSocks_StartupPostureAnnouncesACoveringBlockThroughTheDaemon(t *testing.T) {
+	var log bytes.Buffer
+	auditLog := policy.NewAudit(policy.AuditConfig{
+		Path:    filepath.Join(t.TempDir(), "audit.jsonl"),
+		Sandbox: "test-box",
+		Enabled: true,
+	})
+	t.Cleanup(func() { _ = auditLog.Close() })
+
+	enabled := true
+	_, err := New(agent.Deps{
+		Config: &agent.Config{Forward: agent.ForwardConfig{
+			Enabled:      &enabled,
+			SocksEnabled: true,
+			AllowedHosts: []string{"0.0.0.0/0"},
+		}},
+		Log:     slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Status:  agent.NewStatus(),
+		Audit:   auditLog,
+		Version: "test",
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, log.String(), "THIS AGENT WILL PROXY TO ANY HOST IT CAN REACH")
+	assert.Contains(t, log.String(), "0.0.0.0/0")
+	assert.NotContains(t, log.String(), "narrowed by the allow list")
 }

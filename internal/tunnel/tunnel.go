@@ -246,6 +246,19 @@ func openFailure(err error, doing string) error {
 		kind = FailureDenied
 	case codes.InvalidArgument:
 		kind = FailureUnknown
+		// A name the agent could not resolve arrives as InvalidArgument, and it
+		// is the same event a dial that failed to resolve reports through
+		// ForwardOpened.error — which classifyDialFailure already reads as
+		// unreachable. Which of the two paths a given name takes is decided by
+		// something a client cannot see: a name *on* the allow list is dialed
+		// by name and fails in the dialer, and a name that is not is resolved
+		// first and fails here. Left alone, the same unresolvable name reaches
+		// a SOCKS client as "host unreachable" or as "general server failure"
+		// depending on the agent's allow list, which is a client sent to debug
+		// the wrong layer for a reason nothing in front of it explains.
+		if looksUnresolvable(status.Convert(err).Message()) {
+			kind = FailureUnreachable
+		}
 	}
 	return &OpenError{
 		Kind:    kind,
@@ -262,16 +275,29 @@ func openFailure(err error, doing string) error {
 // with consequences: every branch below produces a failure, and the caller's
 // own message is the agent's sentence either way.
 func classifyDialFailure(message string) FailureKind {
-	for _, unreachable := range []string{
-		"could not be resolved", "no such host", "resolved to no addresses", "unreachable",
-	} {
-		if strings.Contains(message, unreachable) {
-			return FailureUnreachable
-		}
+	if looksUnresolvable(message) {
+		return FailureUnreachable
 	}
 	// Anything else is reported as a target that did not answer, which is what
 	// it nearly always is and what a SOCKS client renders most usefully.
 	return FailureRefused
+}
+
+// looksUnresolvable reads the agent's own sentence for a name that went
+// nowhere.
+//
+// Shared by the two paths a resolution failure can take, so that the same event
+// gets the same reply code whichever one it came back on. It is a hint, never a
+// decision with consequences: both callers produce a failure either way.
+func looksUnresolvable(message string) bool {
+	for _, unreachable := range []string{
+		"could not be resolved", "no such host", "resolved to no addresses", "unreachable",
+	} {
+		if strings.Contains(message, unreachable) {
+			return true
+		}
+	}
+	return false
 }
 
 // Sender is the send half of the client stream, narrowed so a test can drive

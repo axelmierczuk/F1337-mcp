@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/socks"
 )
 
@@ -87,4 +88,52 @@ func TestSocksManager_RefusesToOpenAProxyOnceClosed(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shutting down")
 	assert.Empty(t, m.list())
+}
+
+// checkSocksPolicy asks the agent whether a proxy through it would be bounded
+// by anything, and refuses when the answer is no.
+//
+// The answer arrives two ways, and both have to be honoured. An agent that
+// reports ForwardPolicy.unrestricted is the one whose configuration this rule
+// was written against — it knows the spellings a caller cannot see, notably an
+// allowed_hosts of ["0.0.0.0/0"]. An agent built before that field reports it
+// as false whatever its configuration is, so an empty allow list is still read
+// here as what it has always meant: reading only the flag would turn this
+// refusal off for every agent in a mixed fleet, which is the direction that
+// must not fail.
+func TestCheckSocksPolicy_RefusesEverySpellingOfUnrestricted(t *testing.T) {
+	refused := func(t *testing.T, policy *sandboxdv1.ForwardPolicy) string {
+		t.Helper()
+		err := checkSocksPolicy("lab-box", policy)
+		require.Error(t, err, "fleet_socks must not open a proxy through an agent bounded by nothing")
+		return err.Error()
+	}
+
+	t.Run("an empty allow list, from an agent that says so", func(t *testing.T) {
+		msg := refused(t, &sandboxdv1.ForwardPolicy{Enabled: true, SocksEnabled: true, Unrestricted: true})
+		assert.Contains(t, msg, "is empty")
+	})
+
+	t.Run("an empty allow list, from an agent older than the field", func(t *testing.T) {
+		// unrestricted defaults to false on the wire, so this is what a skewed
+		// fleet looks like. It must still be refused.
+		msg := refused(t, &sandboxdv1.ForwardPolicy{Enabled: true, SocksEnabled: true})
+		assert.Contains(t, msg, "is empty")
+	})
+
+	t.Run("an allow list that covers everything", func(t *testing.T) {
+		msg := refused(t, &sandboxdv1.ForwardPolicy{
+			Enabled: true, SocksEnabled: true,
+			AllowedHosts: []string{"0.0.0.0/0"}, Unrestricted: true,
+		})
+		assert.Contains(t, msg, "0.0.0.0/0",
+			"the refusal names the entry, because an operator told their list is empty will not find this line")
+		assert.NotContains(t, msg, "is empty")
+	})
+
+	t.Run("a genuinely narrowed agent", func(t *testing.T) {
+		require.NoError(t, checkSocksPolicy("build-box", &sandboxdv1.ForwardPolicy{
+			Enabled: true, SocksEnabled: true, AllowedHosts: []string{"10.0.4.0/24"},
+		}))
+	})
 }

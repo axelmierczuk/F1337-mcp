@@ -132,16 +132,7 @@ func newSocksCommand(out io.Writer) *cobra.Command {
 			}
 			defer func() { _ = server.Close() }()
 
-			result := socksResult{
-				Sandbox:      sb.Name,
-				Address:      sb.Address,
-				LocalAddress: server.Addr(),
-				LocalPort:    server.Port(),
-				AllowedHosts: policy.GetAllowedHosts(),
-				Unrestricted: len(policy.GetAllowedHosts()) == 0,
-				Allow:        allow,
-				Note:         socksNote(sb.Name, server.Addr(), policy.GetAllowedHosts()),
-			}
+			result := newSocksResult(sb, server, policy, allow)
 			o := flags.output(out)
 			if err := o.Emit(result, func(p *cli.Printer) { printSocksBanner(p, result) }); err != nil {
 				return err
@@ -158,6 +149,34 @@ func newSocksCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().StringArrayVar(&allow, "allow", nil,
 		"narrow destinations on this side: a host, host:port, or CIDR block; repeatable. A block is matched against an address the client asked for, never against a name that resolves into it — resolving here is what a proxy exists not to do. Does not replace the agent's own allow list")
 	return cmd
+}
+
+// newSocksResult assembles the document and the banner's material.
+//
+// It is a function rather than a literal in RunE because every field here is
+// one a test has to be able to check against the same inputs the command has:
+// which of the two addresses the note names, and which of the two spellings of
+// "unrestricted" the banner is driven by. Composed in RunE, both were only ever
+// asserted against values a test wrote itself.
+func newSocksResult(sb registry.Sandbox, server *socks.Server, policy *sandboxdv1.ForwardPolicy, allow []string) socksResult {
+	// Both spellings, and the agent's own answer for the second: an
+	// allowed_hosts of ["0.0.0.0/0"] narrows nothing and reads as narrowing, so
+	// a banner driven by the list's length alone would list it as a bound.
+	// The empty case is kept here too, for an agent older than the field.
+	unrestricted := len(policy.GetAllowedHosts()) == 0 || policy.GetUnrestricted()
+	return socksResult{
+		Sandbox:      sb.Name,
+		Address:      sb.Address,
+		LocalAddress: server.Addr(),
+		LocalPort:    server.Port(),
+		AllowedHosts: policy.GetAllowedHosts(),
+		Unrestricted: unrestricted,
+		Allow:        allow,
+		// The sandbox's address, not the local listener's: the sentence is
+		// about which machine the connections are made from, and local_address
+		// is a field of its own two lines up.
+		Note: socksNote(sb.Name, sb.Address, unrestricted, policy.GetAllowedHosts()),
+	}
 }
 
 // serveSocks runs the proxy until the operator stops it.
@@ -250,8 +269,18 @@ func checkSocksPolicy(sandbox string, policy *sandboxdv1.ForwardPolicy) error {
 }
 
 // socksNote is the one sentence a reader of the JSON document needs.
-func socksNote(sandbox, address string, allowedHosts []string) string {
-	if len(allowedHosts) == 0 {
+//
+// address is the sandbox's, which is what "through %s at %s" is about; the
+// local listener is local_address, and naming it here would report the
+// workstation's own loopback as the machine the connections come from.
+func socksNote(sandbox, address string, unrestricted bool, allowedHosts []string) string {
+	if unrestricted {
+		if len(allowedHosts) > 0 {
+			// Narrowed on its face and not at all: say which entry, or an
+			// operator reads "ANY host" next to a list and believes the list.
+			return fmt.Sprintf("Proxying through %s at %s. This agent's forward.allowed_hosts (%s) covers every host, so the proxy reaches ANY host %s's network reaches.",
+				sandbox, address, strings.Join(safeHosts(allowedHosts), ", "), sandbox)
+		}
 		return fmt.Sprintf("Proxying through %s at %s. This agent's forward.allowed_hosts is empty, so the proxy reaches ANY host %s's network reaches.", sandbox, address, sandbox)
 	}
 	return fmt.Sprintf("Proxying through %s at %s. It reaches %s and nothing else.", sandbox, address, strings.Join(safeHosts(allowedHosts), ", "))
@@ -305,7 +334,15 @@ func warnUnrestricted(stderr io.Writer, o *output, r socksResult) {
 		return
 	}
 	p := cli.NewPrinter(stderr)
-	p.Printf("warning: this proxy reaches ANY host %s can. Its agent's forward.allowed_hosts is empty.\n", r.Sandbox)
+	if len(r.AllowedHosts) > 0 {
+		// Narrowed on its face and not at all. The entry has to be named for
+		// the same reason the banner names it: a warning that said "is empty"
+		// next to a list an operator wrote would read as a bug in the warning.
+		p.Printf("warning: this proxy reaches ANY host %s can. Its agent's forward.allowed_hosts is %s, which covers every host.\n",
+			r.Sandbox, socks.DescribeAllowList(safeHosts(r.AllowedHosts)))
+	} else {
+		p.Printf("warning: this proxy reaches ANY host %s can. Its agent's forward.allowed_hosts is empty.\n", r.Sandbox)
+	}
 	p.Printf("warning: list the hosts, addresses or CIDR blocks it should reach in forward.allowed_hosts on that agent.\n")
 	// Deliberately unchecked: a stderr that cannot be written to must not stop
 	// a proxy the operator asked for, and the failure would be reported to the
@@ -323,10 +360,22 @@ func printSocksBanner(p *cli.Printer, r socksResult) {
 		// do this loses nothing by reading it; one who did not has this as the
 		// only place they will find out before something uses it.
 		p.Printf("THIS PROXY REACHES ANY HOST %s CAN.\n", strings.ToUpper(r.Sandbox))
-		p.Printf("Its agent's forward.allowed_hosts is empty, so there is nothing narrowing where\n")
-		p.Printf("connections through this proxy may go. That is a reasonable choice for a\n")
-		p.Printf("throwaway lab box and a poor one anywhere else — list the hosts, addresses or\n")
-		p.Printf("CIDR blocks it should reach in forward.allowed_hosts on that agent.\n")
+		if len(r.AllowedHosts) > 0 {
+			// The agent has an allow list and it covers everything — a
+			// `0.0.0.0/0` or a `::/0`. Naming the entry is the whole point: an
+			// operator who reads "any host" above a list they wrote themselves
+			// will believe the list unless this says which line is the reason.
+			p.Printf("Its agent's forward.allowed_hosts is %s, which covers every host it can\n",
+				socks.DescribeAllowList(safeHosts(r.AllowedHosts)))
+			p.Printf("reach, so there is nothing narrowing where connections through this proxy\n")
+			p.Printf("may go.\n")
+		} else {
+			p.Printf("Its agent's forward.allowed_hosts is empty, so there is nothing narrowing\n")
+			p.Printf("where connections through this proxy may go.\n")
+		}
+		p.Printf("That is a reasonable choice for a throwaway lab box and a poor one anywhere\n")
+		p.Printf("else — list the hosts, addresses or CIDR blocks it should reach in\n")
+		p.Printf("forward.allowed_hosts on that agent.\n")
 		p.Printf("Every connection is recorded in the agent's audit log.\n")
 	} else {
 		p.Printf("The agent permits: %s\n", socks.DescribeAllowList(safeHosts(r.AllowedHosts)))

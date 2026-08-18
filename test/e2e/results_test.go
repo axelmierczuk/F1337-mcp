@@ -174,7 +174,9 @@ type socksLine struct {
 }
 
 type socksResult struct {
-	Sandbox      string   `json:"sandbox"`
+	Sandbox string `json:"sandbox"`
+	// Address is the sandbox's, which is what the note's sentence is about.
+	Address      string   `json:"address"`
 	LocalAddress string   `json:"local_address"`
 	LocalPort    int      `json:"local_port"`
 	AllowedHosts []string `json:"allowed_hosts"`

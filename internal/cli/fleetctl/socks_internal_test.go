@@ -2,7 +2,9 @@ package fleetctl
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/cli"
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
+	"github.com/axelmierczuk/fleet-mcp/internal/socks"
 )
 
 // `fleetctl socks` opening a proxy end to end needs a real agent, and
@@ -103,6 +106,22 @@ func TestSocksBanner_AnnouncesAnUnrestrictedProxy(t *testing.T) {
 		assert.Contains(t, out, "resolved on")
 	}
 
+	// An allow list that covers everything is the case the two halves of this
+	// banner disagree about: it has entries, and it narrows nothing. The
+	// warning has to fire *and* name the entry — an operator who reads "ANY
+	// HOST" over a list they wrote themselves will believe the list unless the
+	// line below says which one is the reason.
+	covering := banner(socksResult{
+		Sandbox: "lab-box", LocalAddress: "127.0.0.1:1080",
+		AllowedHosts: []string{"0.0.0.0/0"}, Unrestricted: true,
+	})
+	assert.Contains(t, covering, "THIS PROXY REACHES ANY HOST LAB-BOX CAN.")
+	assert.Contains(t, covering, "0.0.0.0/0")
+	assert.NotContains(t, covering, "is empty",
+		"the agent's allow list is not empty here; saying so sends the operator looking for a line that is in front of them")
+	assert.NotContains(t, covering, "The agent permits:",
+		"a list that covers everything must never be printed as a bound")
+
 	// Client-side narrowing is reported as the convenience it is, never as a
 	// boundary: an operator who read it as one would stop narrowing the agent.
 	withAllow := banner(socksResult{
@@ -139,7 +158,7 @@ func TestSocksBanner_CleansWhatTheAgentSaidBeforePrintingIt(t *testing.T) {
 	assert.Contains(t, out, "10.0.4.0/24 ANY HOST")
 
 	// And in the note, which is the sentence a --json consumer prints.
-	note := socksNote("build-box", "127.0.0.1:9", []string{"\x1b[2Jdb.internal"})
+	note := socksNote("build-box", "10.0.0.9:8722", false, []string{"\x1b[2Jdb.internal"})
 	assert.NotContains(t, note, "\x1b")
 	assert.Contains(t, note, "[2Jdb.internal")
 
@@ -165,6 +184,13 @@ func TestSocksBanner_JSONStillWarnsOnStderr(t *testing.T) {
 
 	assert.Empty(t, warn(true, socksResult{Sandbox: "build-box", AllowedHosts: []string{"db.internal"}}),
 		"an operator who narrowed it has nothing to be warned about")
+
+	// And the covering-block case names the entry rather than claiming the list
+	// is empty.
+	covering := warn(true, socksResult{Sandbox: "lab-box", AllowedHosts: []string{"0.0.0.0/0"}, Unrestricted: true})
+	assert.Contains(t, covering, "ANY host lab-box can")
+	assert.Contains(t, covering, "0.0.0.0/0")
+	assert.NotContains(t, covering, "is empty")
 	assert.Empty(t, warn(false, unrestricted),
 		"human output carries it in the banner; a second copy would be noise")
 }
@@ -172,10 +198,71 @@ func TestSocksBanner_JSONStillWarnsOnStderr(t *testing.T) {
 // The note is what a --json consumer reads instead of the banner, so it has to
 // carry the same fact.
 func TestSocksNote_SaysWhetherTheProxyIsBounded(t *testing.T) {
-	assert.Contains(t, socksNote("lab-box", "10.0.0.9:8722", nil), "ANY host")
-	bounded := socksNote("build-box", "10.0.0.9:8722", []string{"db.internal"})
+	assert.Contains(t, socksNote("lab-box", "10.0.0.9:8722", true, nil), "ANY host")
+	bounded := socksNote("build-box", "10.0.0.9:8722", false, []string{"db.internal"})
 	assert.Contains(t, bounded, "db.internal")
 	assert.NotContains(t, bounded, "ANY host")
+
+	// An allow list that covers everything is the case where the two halves of
+	// the sentence disagree: it has entries and it narrows nothing, so the note
+	// has to say both or a reader believes the list.
+	covering := socksNote("lab-box", "10.0.0.9:8722", true, []string{"0.0.0.0/0"})
+	assert.Contains(t, covering, "ANY host")
+	assert.Contains(t, covering, "0.0.0.0/0")
+}
+
+// The document the command actually emits, assembled from the same three
+// things RunE has: the sandbox, the listener, and what the agent said.
+//
+// Composed inline in RunE, every field here was asserted only against values a
+// test wrote itself — which is how the note came to name the local listener in
+// a sentence that is about the machine the connections are made from, with the
+// sandbox's own address sitting unused in the field next to it.
+func TestSocksResult_IsAssembledFromWhatTheCommandHas(t *testing.T) {
+	sb := registry.Sandbox{Name: "build-box", Address: "10.0.0.9:8722"}
+	server, err := socks.Listen(0, socks.Options{Connect: func(context.Context, net.Conn, socks.Destination, func() error) error {
+		return nil
+	}})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+
+	t.Run("narrowed", func(t *testing.T) {
+		r := newSocksResult(sb, server, &sandboxdv1.ForwardPolicy{
+			Enabled: true, SocksEnabled: true, AllowedHosts: []string{"db.internal"},
+		}, []string{"db.internal:5432"})
+
+		assert.Equal(t, sb.Address, r.Address)
+		assert.Equal(t, server.Addr(), r.LocalAddress)
+		assert.Equal(t, server.Port(), r.LocalPort)
+		assert.False(t, r.Unrestricted)
+		assert.Equal(t, []string{"db.internal:5432"}, r.Allow)
+		assert.Contains(t, r.Note, sb.Address,
+			"the note says which machine the connections are made from, which is the sandbox's address and not this workstation's listener")
+		assert.NotContains(t, r.Note, r.LocalAddress,
+			"local_address is a field of its own; repeating it here reads as the sandbox being at 127.0.0.1")
+	})
+
+	t.Run("an allow list that covers everything", func(t *testing.T) {
+		// The agent's own verdict, which is the only place the rule lives. A
+		// result that re-derived it from the list's length would call this
+		// narrowed and print the list as a bound.
+		r := newSocksResult(sb, server, &sandboxdv1.ForwardPolicy{
+			Enabled: true, SocksEnabled: true, AllowedHosts: []string{"0.0.0.0/0"}, Unrestricted: true,
+		}, nil)
+
+		require.True(t, r.Unrestricted,
+			"an allow list of 0.0.0.0/0 narrows nothing, and the agent says so; a banner driven by the list's length would announce a bounded proxy")
+		assert.Contains(t, r.Note, "ANY host")
+	})
+
+	t.Run("an agent older than the unrestricted field", func(t *testing.T) {
+		// It reports an empty list and nothing else, and that shape has to keep
+		// reading as unrestricted: the flag defaults to false on the wire.
+		r := newSocksResult(sb, server, &sandboxdv1.ForwardPolicy{
+			Enabled: true, SocksEnabled: true,
+		}, nil)
+		assert.True(t, r.Unrestricted)
+	})
 }
 
 // Naming the sandbox is optional only where it cannot be ambiguous. Guessing

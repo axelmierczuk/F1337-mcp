@@ -18,8 +18,10 @@ import (
 	"go.uber.org/goleak"
 	"golang.org/x/net/proxy"
 
+	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
 	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
+	"github.com/axelmierczuk/fleet-mcp/internal/socks"
 )
 
 // fleet_socks against the real agent services, over bufconn, with a real SOCKS
@@ -53,6 +55,33 @@ func TestSocks_RefusesAnAgentThatPermitsEveryHost(t *testing.T) {
 	assert.Empty(t, activeProxies(t, f), "a refused proxy must leave no listener")
 }
 
+// And an allow list that covers everything, which is the same grant written so
+// that it looks like a narrowing.
+//
+// This is the gate the whole asymmetry leans on, and until now it was the
+// length of a list: `allowed_hosts: ["0.0.0.0/0"]` has a length of one, so the
+// tool served it, the agent's loudest startup line stayed quiet, and both
+// clients printed the entry as a bound. It is also the shape an operator
+// arrives at from the refusal's own remedy, which asks them to "list the hosts,
+// addresses or CIDR blocks the proxy should reach".
+//
+// The judgement is the agent's, over the wire in ForwardPolicy.unrestricted:
+// this fixture runs the real HostService over the real config, so what is under
+// test is the agent's answer rather than this file's opinion of it.
+func TestSocks_RefusesAnAllowListThatCoversEveryHost(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{
+		socksEnabled:        true,
+		forwardAllowedHosts: []string{"0.0.0.0/0"},
+	})
+
+	msg := f.liveFails("fleet_socks", nil)
+	assert.Contains(t, msg, "0.0.0.0/0",
+		"the refusal has to name the entry; an operator told their list is empty will go looking for a line that is in front of them")
+	assert.Contains(t, msg, "any host")
+	assert.Contains(t, msg, "fleetctl socks")
+	assert.Empty(t, activeProxies(t, f), "a refused proxy must leave no listener")
+}
+
 // And the other two postures an agent can be in.
 func TestSocks_RefusesAnAgentThatDoesNotProxy(t *testing.T) {
 	f := newLiveFixture(t, liveAgentOptions{forwardAllowedHosts: []string{"db.internal"}})
@@ -67,6 +96,83 @@ func TestSocks_RefusesAnAgentThatDoesNotForwardAtAll(t *testing.T) {
 
 	msg := f.liveFails("fleet_socks", nil)
 	assert.Contains(t, msg, "forward.enabled")
+}
+
+// ------------------------------------------------- the boundary itself
+
+// The gate the whole feature rests on, met by a real SOCKS client on a proxy
+// the workstation-side preflight never saw.
+//
+// Both halves of this are thoroughly tested and they never meet. The agent's
+// refusal is asserted against a ForwardOpen built by hand in
+// internal/agent/forward; the field that selects it is asserted against a
+// recording stream in internal/socks; and every scenario that puts a real
+// client in front of a real agent goes through fleet_socks or `fleetctl socks`,
+// both of which refuse this configuration on the workstation before a listener
+// exists. So the composition — a proxy actually running against an agent that
+// does not serve one — was asserted by nothing, and it is the one this PR calls
+// the boundary: "enforced per connection on the far side, where no caller can
+// skip it".
+//
+// The preflight is skipped here deliberately. It is the guardrail, and a
+// guardrail is exactly what a caller that did not go through this MCP server
+// would not have — a hand-written SOCKS client pointed at socks.ForwardConnector
+// is a caller of this repository's own shipping code with no preflight in it.
+//
+// The allow list is non-empty and names the destination, so what refuses the
+// connection can only be the capability gate: an agent that judged this as a
+// forward would permit it, dial it, and answer 0x00.
+func TestSocks_AnAgentThatDoesNotProxyRefusesTheConnectionItself(t *testing.T) {
+	destination := startLineServer(t)
+	f := newLiveFixture(t, liveAgentOptions{
+		// socks_enabled is off — the shipped default — and the allow list
+		// permits the destination for forwarding.
+		forwardAllowedHosts: []string{"localhost"},
+	})
+
+	// The shipping connector against the real agent, behind a real listener,
+	// with no policy preflight anywhere in front of it.
+	server, err := socks.Listen(0, socks.Options{
+		Connect: socks.ForwardConnector(sandboxdv1.NewForwardServiceClient(f.agent.conn)),
+	})
+	require.NoError(t, err)
+	var serving sync.WaitGroup
+	serving.Add(1)
+	go func() {
+		defer serving.Done()
+		server.Serve(t.Context())
+	}()
+	t.Cleanup(func() {
+		require.NoError(t, server.Close())
+		serving.Wait()
+	})
+
+	_, portStr, err := net.SplitHostPort(destination)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	code := connectThroughProxy(t, server.Addr(), "localhost", port)
+	require.Equal(t, byte(0x02), code,
+		"an agent with forward.socks_enabled false must refuse a proxied connection to a host its allow list permits: the refusal is about the capability, not the destination")
+
+	// And it is recorded against the setting, which is what makes "somebody
+	// pointed a proxy at an agent that does not serve one" a line an operator
+	// can find.
+	var denied *policy.Record
+	eventually(t, 30*time.Second, "the refusal to reach the audit log", func() bool {
+		for _, rec := range auditRecords(t, f.agent.auditPath) {
+			if rec.Outcome == policy.OutcomeDenied {
+				denied = &rec
+				return true
+			}
+		}
+		return false
+	})
+	require.NotNil(t, denied)
+	assert.Equal(t, "forward.socks_enabled", denied.Rule)
+	assert.Equal(t, "localhost", denied.RemoteHost)
+	assert.Equal(t, uint32(port), denied.RemotePort)
 }
 
 // ------------------------------------------------------------- the tool
@@ -157,6 +263,29 @@ func TestSocks_ResolvesTheDestinationNameOnTheAgent(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// And a name that goes nowhere reads the same whether or not the agent's allow
+// list happens to name it.
+//
+// The test above uses an agent that *lists* the unresolvable name, so the agent
+// dials it and the failure comes back in ForwardOpened.error. A name that is
+// not listed takes the other path — resolved first, refused as an
+// InvalidArgument status — and reached a client as 0x01 "general server
+// failure" for exactly the same typo, with nothing in front of it to explain
+// why the same command answered differently against two agents.
+func TestSocks_AnUnresolvableNameIsUnreachableWhicheverPathReportsIt(t *testing.T) {
+	f := newLiveFixture(t, liveAgentOptions{
+		socksEnabled: true,
+		// The destination below is deliberately *not* on this list, so the
+		// agent resolves before it decides.
+		forwardAllowedHosts: []string{"db.internal"},
+	})
+	out := liveOK[tools.SocksResult](f, "fleet_socks", nil)
+
+	code := connectThroughProxy(t, out.LocalAddress, "nowhere.invalid", 80)
+	assert.Equal(t, byte(0x04), code,
+		"a name the agent could not resolve is host-unreachable on both of the agent's paths; 0x01 sends the client's operator looking at the proxy")
 }
 
 // A destination outside the agent's allow list is refused by the agent, told to

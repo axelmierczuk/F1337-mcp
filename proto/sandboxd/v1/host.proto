@@ -62,11 +62,26 @@ message ForwardPolicy {
   // (forward.allowed_hosts), as the operator wrote them.
   //
   // Empty is meaningful in two different ways depending on socks_enabled, and
-  // this is the field a caller reads to tell them apart: with it off, empty
-  // means "loopback only"; with it on, empty means "any host this machine can
-  // reach", which is the one configuration in which this agent is an
-  // unrestricted network pivot.
+  // socks_enabled is the field a caller reads to tell them apart: with it off,
+  // empty means "loopback only"; with it on, empty means "any host this
+  // machine can reach". Do not derive that second reading here — read
+  // `unrestricted`, which is the agent's own answer to the same question and
+  // covers the spelling this list cannot show.
   repeated string allowed_hosts = 3;
+  // Whether a proxy through this agent is bounded by nothing but the machine's
+  // own network.
+  //
+  // It is the agent's own judgement rather than something a caller derives
+  // from allowed_hosts, because "unrestricted" has more than one spelling: an
+  // empty list is one, and a list holding a block that covers its whole
+  // address family — `0.0.0.0/0` — is another that reads as narrowing and
+  // narrows nothing. A caller re-deriving it from the list would have to carry
+  // a copy of that rule, and the copy is what drifts; the agent is the half
+  // that already has to know.
+  //
+  // It is a description, never a boundary. What the agent will actually reach
+  // is decided per connection on the agent, from the same configuration.
+  bool unrestricted = 4;
 }
 
 message HealthRequest {}

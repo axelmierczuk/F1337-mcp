@@ -140,8 +140,20 @@ forward:
   # the fleet_socks tool refuses to open a proxy on those terms at all, because
   # "any host" is a decision an operator makes for themselves rather than one a
   # model inherits.
+  #
+  # An allowed_hosts of ["0.0.0.0/0"] is that same posture written so that it
+  # looks like a narrowing, and it is treated as the same thing: the warning
+  # fires, and fleet_socks refuses. A block that covers its whole address family
+  # narrows nothing, whatever the length of the list says.
   socks_enabled: false
-  # Concurrent forwarded connections this agent will carry.
+  # Concurrent connections this agent will carry over ForwardService — a port
+  # forward's and a proxy's alike, since both are one stream per connection.
+  #
+  # A proxy is what makes this number visible: a forward carries one client's
+  # connections to one port, and a proxy carries whatever is pointed at it, so a
+  # browser or a parallel fetch reaches this bound where a forward never would.
+  # The connection past it is refused rather than queued, and the caller is told
+  # which setting refused it.
   max_connections: 64
   # How long to wait for the sandbox-side port to accept.
   dial_timeout: "10s"

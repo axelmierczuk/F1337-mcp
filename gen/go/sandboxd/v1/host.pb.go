@@ -246,11 +246,26 @@ type ForwardPolicy struct {
 	// (forward.allowed_hosts), as the operator wrote them.
 	//
 	// Empty is meaningful in two different ways depending on socks_enabled, and
-	// this is the field a caller reads to tell them apart: with it off, empty
-	// means "loopback only"; with it on, empty means "any host this machine can
-	// reach", which is the one configuration in which this agent is an
-	// unrestricted network pivot.
-	AllowedHosts  []string `protobuf:"bytes,3,rep,name=allowed_hosts,json=allowedHosts,proto3" json:"allowed_hosts,omitempty"`
+	// socks_enabled is the field a caller reads to tell them apart: with it off,
+	// empty means "loopback only"; with it on, empty means "any host this
+	// machine can reach". Do not derive that second reading here — read
+	// `unrestricted`, which is the agent's own answer to the same question and
+	// covers the spelling this list cannot show.
+	AllowedHosts []string `protobuf:"bytes,3,rep,name=allowed_hosts,json=allowedHosts,proto3" json:"allowed_hosts,omitempty"`
+	// Whether a proxy through this agent is bounded by nothing but the machine's
+	// own network.
+	//
+	// It is the agent's own judgement rather than something a caller derives
+	// from allowed_hosts, because "unrestricted" has more than one spelling: an
+	// empty list is one, and a list holding a block that covers its whole
+	// address family — `0.0.0.0/0` — is another that reads as narrowing and
+	// narrows nothing. A caller re-deriving it from the list would have to carry
+	// a copy of that rule, and the copy is what drifts; the agent is the half
+	// that already has to know.
+	//
+	// It is a description, never a boundary. What the agent will actually reach
+	// is decided per connection on the agent, from the same configuration.
+	Unrestricted  bool `protobuf:"varint,4,opt,name=unrestricted,proto3" json:"unrestricted,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -304,6 +319,13 @@ func (x *ForwardPolicy) GetAllowedHosts() []string {
 		return x.AllowedHosts
 	}
 	return nil
+}
+
+func (x *ForwardPolicy) GetUnrestricted() bool {
+	if x != nil {
+		return x.Unrestricted
+	}
+	return false
 }
 
 type HealthRequest struct {
@@ -430,11 +452,12 @@ const file_sandboxd_v1_host_proto_rawDesc = "" +
 	"\n" +
 	"started_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x127\n" +
 	"\x17authenticated_principal\x18\a \x01(\tR\x16authenticatedPrincipal\x12A\n" +
-	"\x0eforward_policy\x18\b \x01(\v2\x1a.sandboxd.v1.ForwardPolicyR\rforwardPolicy\"s\n" +
+	"\x0eforward_policy\x18\b \x01(\v2\x1a.sandboxd.v1.ForwardPolicyR\rforwardPolicy\"\x97\x01\n" +
 	"\rForwardPolicy\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12#\n" +
 	"\rsocks_enabled\x18\x02 \x01(\bR\fsocksEnabled\x12#\n" +
-	"\rallowed_hosts\x18\x03 \x03(\tR\fallowedHosts\"\x0f\n" +
+	"\rallowed_hosts\x18\x03 \x03(\tR\fallowedHosts\x12\"\n" +
+	"\funrestricted\x18\x04 \x01(\bR\funrestricted\"\x0f\n" +
 	"\rHealthRequest\"\x98\x02\n" +
 	"\x0eHealthResponse\x12:\n" +
 	"\x06status\x18\x01 \x01(\x0e2\".sandboxd.v1.HealthResponse.StatusR\x06status\x12\x18\n" +

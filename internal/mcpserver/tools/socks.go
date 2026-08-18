@@ -426,13 +426,33 @@ func checkSocksPolicy(sandbox string, policy *sandboxdv1.ForwardPolicy) error {
 	if !policy.GetSocksEnabled() {
 		return fmt.Errorf("sandbox %s does not serve SOCKS proxying (forward.socks_enabled is false in its agent configuration). A proxy would let a caller reach every host that machine's network reaches, so it is off unless an operator turns it on — and an operator turning it on should also list the hosts, addresses or CIDR blocks it may reach in forward.allowed_hosts", sandbox)
 	}
-	if len(policy.GetAllowedHosts()) == 0 {
-		return fmt.Errorf("sandbox %s permits proxying to any host it can reach (forward.socks_enabled is true and forward.allowed_hosts is empty in its agent configuration), and fleet_socks will not open a proxy on those terms. "+
+	// Both spellings of "unrestricted". The empty list is checked here rather
+	// than only trusting the agent's own answer because an agent built before
+	// that field reports it as false, and an empty list is the shape this rule
+	// was written for: reading only the flag would turn the refusal off for
+	// every agent in a mixed fleet.
+	if len(policy.GetAllowedHosts()) == 0 || policy.GetUnrestricted() {
+		return fmt.Errorf("sandbox %s permits proxying to any host it can reach (%s), and fleet_socks will not open a proxy on those terms. "+
 			"A proxy reaches every host that machine's network reaches, which is a wider grant than every other tool here combined, and \"any host\" is a decision an operator made about their own workstation rather than one this tool inherits on your behalf. "+
-			"Ask the operator to list the hosts, addresses or CIDR blocks the proxy should reach in forward.allowed_hosts on that agent — `allowed_hosts: [\"db.internal\", \"10.0.4.0/24\"]`. "+
-			"`fleetctl socks %s` is the operator's own path and has no such rule", sandbox, sandbox)
+			"Ask the operator to list the hosts, addresses or CIDR blocks the proxy should reach in forward.allowed_hosts on that agent — `allowed_hosts: [\"db.internal\", \"10.0.4.0/24\"]`. A block covering everything, such as `0.0.0.0/0`, is the same grant written differently and is refused the same way. "+
+			"`fleetctl socks %s` is the operator's own path and has no such rule", sandbox, describeUnrestricted(policy), sandbox)
 	}
 	return nil
+}
+
+// describeUnrestricted names the configuration a refusal is about, so an
+// operator reading it can find the line rather than the setting.
+//
+// The two spellings need different sentences: one operator has written nothing
+// and has to add something, the other has written something that reads as a
+// narrowing and has to replace it. Telling the second one that their
+// allowed_hosts "is empty" would send them looking for a line that is right
+// there in front of them.
+func describeUnrestricted(policy *sandboxdv1.ForwardPolicy) string {
+	if hosts := policy.GetAllowedHosts(); len(hosts) > 0 {
+		return fmt.Sprintf("forward.socks_enabled is true and forward.allowed_hosts covers every host it can reach — %s — in its agent configuration", strings.Join(hosts, ", "))
+	}
+	return "forward.socks_enabled is true and forward.allowed_hosts is empty in its agent configuration"
 }
 
 // describeProxies renders the open proxies for an error message.

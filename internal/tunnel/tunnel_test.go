@@ -200,6 +200,36 @@ func TestOpenFailure_ReportsAPolicyRefusalAsDenied(t *testing.T) {
 	assert.Equal(t, FailureTransport, openErr.Kind, "an agent that did not answer is not the target refusing")
 }
 
+// A name that went nowhere is the same event whichever of the agent's two paths
+// reported it.
+//
+// Which path a name takes is decided by the agent's allow list, which is not
+// something a client can see: a listed name is dialed by name and its failure
+// arrives in ForwardOpened.error, and an unlisted one is resolved first and its
+// failure arrives as an InvalidArgument status. Classified differently, the
+// same `curl` gets "host unreachable" on one agent and "general server failure"
+// on the next, for the same typo.
+func TestOpenFailure_ReportsANameThatWentNowhereAsUnreachable(t *testing.T) {
+	var openErr *OpenError
+
+	unresolvable := openFailure(
+		status.Error(codes.InvalidArgument, `remote_host "db.internal" could not be resolved on the sandbox: lookup db.internal: no such host`),
+		"connecting to db.internal:5432")
+	require.ErrorAs(t, unresolvable, &openErr)
+	assert.Equal(t, FailureUnreachable, openErr.Kind,
+		"a name the agent could not resolve is unreachable however the agent reported it")
+
+	// And the other things InvalidArgument covers are not reachability at all,
+	// so they keep the code that says nothing about the network. Reporting a
+	// rejected port as "host unreachable" would be the same mistake pointed the
+	// other way.
+	rejected := openFailure(
+		status.Error(codes.InvalidArgument, "remote_port 0 is out of range; expected 1-65535"),
+		"connecting to db.internal:0")
+	require.ErrorAs(t, rejected, &openErr)
+	assert.Equal(t, FailureUnknown, openErr.Kind)
+}
+
 // Target.Label names the loopback default rather than leaving a blank host in
 // an error message.
 func TestTargetLabel(t *testing.T) {

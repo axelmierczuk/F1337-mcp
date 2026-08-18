@@ -312,6 +312,20 @@ func requireUnrestrictedJSONWarning(t *testing.T, f *fleet, a *agent) {
 	if !doc.Unrestricted {
 		t.Fatalf("the document does not report an unrestricted proxy as one: %+v", doc)
 	}
+	// The two addresses in this document are different machines, and the note's
+	// one sentence is about the far one. Composed inline in RunE it named the
+	// local listener, which reads as the sandbox being on this workstation's
+	// loopback — with the sandbox's own address sitting unused in the field
+	// above it.
+	if doc.Address != a.addr {
+		t.Fatalf("the document reports address %q, want the sandbox's %q", doc.Address, a.addr)
+	}
+	if !contains(doc.Note, a.addr) {
+		t.Fatalf("the note does not name the machine the connections are made from (%s):\n%s", a.addr, doc.Note)
+	}
+	if contains(doc.Note, doc.LocalAddress) {
+		t.Fatalf("the note names this workstation's listener where it means the sandbox:\n%s", doc.Note)
+	}
 	// The warning a person reads, on the stream that is not carrying the
 	// document.
 	if !contains(p.stderr(), "ANY host "+a.name) {

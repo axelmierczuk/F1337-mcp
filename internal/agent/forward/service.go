@@ -125,13 +125,20 @@ func logPosture(log *slog.Logger, cfg agent.ForwardConfig, audited bool) {
 	}
 
 	switch {
-	case cfg.SocksAllowsAnyHost():
+	case cfg.SocksReachesAnyHost():
 		// The loudest thing this agent has to say about itself. An unrestricted
 		// proxy reaches every host its network reaches, for anyone who can call
 		// it, and unlike every other capability here that is not bounded by
 		// what is installed on this machine.
+		//
+		// Said for both spellings of it. An empty allow list is the obvious
+		// one; a list holding a block that covers its whole address family is
+		// the one that reads as narrowing, and it is what an operator writes
+		// when they want the lab-box posture and have been told to list CIDR
+		// blocks. A warning that only fired for the first would go quiet for
+		// exactly the configuration somebody arrived at on purpose.
 		log.Warn("THIS AGENT WILL PROXY TO ANY HOST IT CAN REACH",
-			"reason", "forward.socks_enabled is true and forward.allowed_hosts is empty",
+			"reason", unrestrictedReason(cfg),
 			"consequence", "any caller can reach anything this machine's network reaches, through this agent",
 			"remedy", "list the hosts, addresses or CIDR blocks it should reach in forward.allowed_hosts",
 			"audited", audited)
@@ -161,6 +168,17 @@ func logPosture(log *slog.Logger, cfg agent.ForwardConfig, audited bool) {
 			"reason", "forward.allowed_hosts or forward.socks_enabled is set, and audit.enabled is false",
 			"consequence", "this agent will connect to other hosts on a caller's behalf and record nothing about it")
 	}
+}
+
+// unrestrictedReason names which spelling of "unrestricted" this agent is in,
+// because the remedy is not the same sentence for both: one operator has
+// written nothing and the other has written something that looks like a
+// narrowing.
+func unrestrictedReason(cfg agent.ForwardConfig) string {
+	if covering := cfg.FullCoverAllowedHosts(); len(covering) > 0 {
+		return "forward.socks_enabled is true and forward.allowed_hosts narrows nothing: " + strings.Join(covering, "; ")
+	}
+	return "forward.socks_enabled is true and forward.allowed_hosts is empty"
 }
 
 // Forward carries one TCP connection.

@@ -573,8 +573,10 @@ the result reports it, so a caller choosing destinations is not guessing.
 `socks_enabled: true` and an empty `allowed_hosts` will proxy anywhere its
 network reaches, and `fleet_socks` will not open a proxy on those terms — that
 is a decision an operator made about their own workstation, not one this tool
-inherits on a model's behalf. `fleetctl socks` has no such rule. The refusal
-names the setting and the one line of config that fixes it. See
+inherits on a model's behalf. An `allowed_hosts` that covers everything
+(`0.0.0.0/0`) is the same grant written differently and is refused the same way.
+`fleetctl socks` has no such rule. The refusal names the setting, the entry
+responsible, and the one line of config that fixes it. See
 [security.md](security.md#the-models-proxy) for why the two callers differ.
 
 **Every connection is audited**, on the same terms and in the same fields as a

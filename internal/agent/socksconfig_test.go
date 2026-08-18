@@ -153,6 +153,52 @@ func TestAllowedHosts_ABlockWiderThanItReadsIsReported(t *testing.T) {
 	assert.True(t, cfg.AddressAllowed(net.ParseIP("10.0.4.99")))
 }
 
+// An allow list holding a block that covers its whole address family narrows
+// nothing, and the length of the list is the only thing that could ever have
+// shown it.
+//
+// This is the shape an operator arrives at when they want the lab-box posture
+// and have been told — by fleet_socks's own refusal, in as many words — to
+// "list the hosts, addresses or CIDR blocks the proxy should reach". Written as
+// `0.0.0.0/0` it turned the agent's loudest startup line off and the tool's
+// refusal off with it, while permitting every IPv4 host the machine can reach.
+func TestAllowedHosts_ABlockCoveringEverythingIsNotANarrowing(t *testing.T) {
+	covering := agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{"0.0.0.0/0"}}
+	require.Len(t, covering.FullCoverAllowedHosts(), 1)
+	assert.Contains(t, covering.FullCoverAllowedHosts()[0], "0.0.0.0/0")
+	assert.Contains(t, covering.FullCoverAllowedHosts()[0], "IPv4")
+	assert.True(t, covering.SocksReachesAnyHost(),
+		"a proxy bounded by 0.0.0.0/0 is bounded by nothing, and the agent has to say so")
+	assert.False(t, covering.SocksAllowsAnyHost(),
+		"the dialing path is a different question: this list still resolves and checks, which is what keeps IPv6 out")
+
+	v6 := agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{"::/0"}}
+	require.Len(t, v6.FullCoverAllowedHosts(), 1)
+	assert.Contains(t, v6.FullCoverAllowedHosts()[0], "IPv6")
+	assert.True(t, v6.SocksReachesAnyHost())
+
+	// A genuinely narrowed list, and the two neighbouring spellings that are
+	// not /0 — including a half of the address space, which is deliberately not
+	// caught: this names the plausible mistake rather than doing CIDR
+	// arithmetic that would still miss the next one.
+	for _, entry := range []string{"10.0.4.0/24", "0.0.0.0/1", "10.0.4.7", "db.internal", "10.0.0.0/33"} {
+		cfg := agent.ForwardConfig{SocksEnabled: true, AllowedHosts: []string{entry}}
+		assert.Emptyf(t, cfg.FullCoverAllowedHosts(), "%q is not a block covering everything", entry)
+		assert.Falsef(t, cfg.SocksReachesAnyHost(), "%q narrows something", entry)
+	}
+
+	// And a covering block on an agent that does not proxy at all is not a
+	// proxy posture. It is #26's forwarding allow list, which this feature must
+	// not have widened.
+	forwardOnly := agent.ForwardConfig{AllowedHosts: []string{"0.0.0.0/0"}}
+	assert.False(t, forwardOnly.SocksReachesAnyHost())
+
+	// It is still only a description. The block permits what a block permits.
+	assert.True(t, covering.AddressAllowed(net.ParseIP("203.0.113.9")))
+	assert.False(t, covering.AddressAllowed(net.ParseIP("2001:db8::1")),
+		"an IPv4 block covers one family, which is what every other tool does with a mask")
+}
+
 // The shipped example documents the setting; this is what stops it drifting
 // from what the code accepts.
 func TestSocksConfig_ShippedExampleParses(t *testing.T) {
