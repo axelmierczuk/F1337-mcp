@@ -207,7 +207,10 @@ func TestServe_UnderAServiceManagerItServesUntilTheManagerStopsIt(t *testing.T) 
 func TestServeAndStatus_TheReasonAFailedStartSurvivesTheProcess(t *testing.T) {
 	configPath, _ := refusedConfig(t)
 
-	require.Equal(t, 1, fleetagent.Main([]string{"serve", "--config", configPath}, io.Discard),
+	// No --config: the daemon discovers one, exactly as `serve` typed by hand
+	// does, and the record has to name the config it *resolved* rather than the
+	// empty flag it was given — that path is the only actionable thing in it.
+	require.Equal(t, 1, fleetagent.Main([]string{"serve"}, io.Discard),
 		"a plaintext agent on 0.0.0.0 must refuse to serve")
 
 	defer fleetagent.PinInstalledForTest([]fleetagent.Mechanism{fleetagent.MechanismTask}, false)()
