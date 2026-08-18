@@ -79,7 +79,7 @@ func (s *Supervisor) adopt(p persisted) error {
 	r.workingDir = p.WorkingDir
 	r.env = p.Env
 	r.shell = p.Shell
-	r.probe = probeFromPersisted(p.Probe)
+	r.probe = probeFromPersisted(p.Probe, s.cfg.probeTimeout, s.cfg.probeInterval)
 	r.restartPolicy = parsePolicy(p.RestartPolicy)
 	r.maxRestarts = p.MaxRestarts
 	r.restartBackoff = time.Duration(p.RestartBackoffMS) * time.Millisecond
@@ -183,34 +183,48 @@ func (s *Supervisor) adopt(p persisted) error {
 			s.watchAdopted(r, exited)
 		}()
 	}
-	s.resumeProbe(r)
+	s.resumeReadiness(r)
 	r.persist()
 	return nil
 }
 
-// resumeProbe restarts the readiness probe of a re-adopted process that was
-// still being probed when the previous agent went away.
+// resumeReadiness decides the readiness of a re-adopted process that was still
+// being decided when the previous agent went away.
 //
-// STARTING is the state that says so: a process with a probe stays there until
-// the probe passes, and a record found in it describes a run whose readiness
-// nobody ever decided. Without this the decision is never made — the process
-// stays STARTING for the rest of its life, and a caller that waits for READY
-// waits forever for a server that has been serving since before the agent
-// restarted.
+// STARTING is the state that says so, and nothing else moves a record out of
+// it: a process with a probe stays there until the probe passes, and a record
+// found in it describes a run whose readiness nobody ever decided. Without this
+// the decision is never made — the process stays STARTING for the rest of its
+// life, and a caller that waits for READY waits forever for a server that has
+// been serving since before the agent restarted.
 //
-// This is the one place the pre-scan is the *only* possible source of evidence.
-// The process announced itself to the previous agent and will not announce
-// itself again, so the retained history is where that announcement is, and a
-// probe that ignored it would be watching for a line that has already been
-// printed. Bounding the scan to runFirstSeq is what keeps that from re-opening
-// #57 from the other side: the history also holds the runs before this one, and
-// their announcements are no more this run's evidence here than they are after
-// a restart.
-func (s *Supervisor) resumeProbe(r *record) {
+// For a probe, this is the one place the pre-scan is the *only* possible source
+// of evidence. The process announced itself to the previous agent and will not
+// announce itself again, so the retained history is where that announcement is,
+// and a probe that ignored it would be watching for a line that has already
+// been printed. Bounding the scan to runFirstSeq is what keeps that from
+// re-opening #57 from the other side: the history also holds the runs before
+// this one, and their announcements are no more this run's evidence here than
+// they are after a restart.
+func (s *Supervisor) resumeReadiness(r *record) {
 	r.mu.Lock()
 	probe, state, fromSeq := r.probe, r.state, r.runFirstSeq
 	r.mu.Unlock()
-	if probe == nil || state != sandboxdv1.ProcessState_PROCESS_STATE_STARTING {
+	if state != sandboxdv1.ProcessState_PROCESS_STATE_STARTING {
+		return
+	}
+	if probe == nil {
+		// STARTING with no probe is the instant between a spawn writing down
+		// which run it just started and the transition that says that run is
+		// up. It is a narrow window, but a record persisted inside it is a
+		// record with nothing left to decide, and leaving it STARTING would
+		// leave it there for as long as the process lived.
+		if err := r.setState(sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, nil); err != nil {
+			// The liveness poll got there first and found the process gone.
+			// The exit is the more recent fact; leave it alone.
+			s.log.Debug("a re-adopted process ended before it could be settled as running",
+				"process_id", r.id, "error", err)
+		}
 		return
 	}
 	s.log.Info("resuming a readiness probe that outlived the agent that started it",

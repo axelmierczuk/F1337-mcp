@@ -630,6 +630,19 @@ func (s *Supervisor) spawn(r *record, fresh bool) error {
 	probe := r.probe
 	r.mu.Unlock()
 
+	// Written down before the run is left to get on with it, because the three
+	// facts above are the run's identity and nothing else is going to record
+	// them. The state machine is already in STARTING — every caller of spawn
+	// put it there — so for a process with a probe the next transition is the
+	// probe's verdict, and a probe that times out has no verdict to make: the
+	// record would sit on disk naming the *previous* run's pid, start identity
+	// and log mark for as long as this run lived. An agent killed in that
+	// window hands the next one a record it cannot re-adopt — pid 0 on a first
+	// start, a dead pid after a restart — so a process that is serving is
+	// declared crashed, and the mark the resumed probe needs is the mark of a
+	// run that has already ended.
+	r.persist()
+
 	if capt != nil {
 		capt.start(exited)
 	}

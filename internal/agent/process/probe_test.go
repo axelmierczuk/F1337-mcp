@@ -168,6 +168,68 @@ func TestTheProbePreScanIsBoundedAtTheMarkAndNotBefore(t *testing.T) {
 		"the same line, printed by this run, is exactly what the pre-scan is for")
 }
 
+// TestTheMarkSurvivesTheRingTurningOver pins what the mark is made of.
+//
+// The retained buffer is a ring: it evicts, and the position of any given line
+// in it moves as it fills. A mark that named a position — an index, an offset
+// into the retained lines — would stop naming the same line the moment one was
+// evicted, and it can go wrong in either direction. Too wide and the pre-scan
+// credits this run with the last one's announcement, which is #57 back. Too
+// narrow and it skips past the line this run actually printed, and a process
+// that is serving never reports ready.
+//
+// A sequence number is neither, because it goes on meaning the same thing
+// after the line it named has left the ring. Both halves below run against a
+// ring that has already turned over.
+func TestTheMarkSurvivesTheRingTurningOver(t *testing.T) {
+	t.Parallel()
+
+	probe := testProbe(probeLogPattern, 200*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	// Eviction must not widen the bound. The run before this one is still in
+	// the ring, and its announcement is below the mark however the ring is
+	// packed.
+	{
+		buf := newLogBuffer(4, nil)
+		buf.append(sandboxdv1.Stream_STREAM_STDOUT, "starting up", time.Now(), false)       // 0
+		buf.append(sandboxdv1.Stream_STREAM_STDOUT, "listening on 3000", time.Now(), false) // 1
+		mark := buf.nextSequence()                                                          // 2
+		for i := range 3 {
+			buf.append(sandboxdv1.Stream_STREAM_STDOUT, "working "+strconv.Itoa(i), time.Now(), false)
+		}
+		oldest, ok := buf.oldestRetainedSeq()
+		require.True(t, ok)
+		require.Equal(t, uint64(1), oldest, "the ring has to have evicted a line, or this is not about eviction")
+
+		r := &record{buf: buf, changed: make(chan struct{})}
+		require.IsType(t, &probeTimeoutError{}, probe.run(context.Background(), r, mark, time.Second, time.Second),
+			"the only matching line in the ring belongs to the run before this one")
+	}
+
+	// And it must not narrow it. Same shape, except the first line this run
+	// printed is the announcement: a mark that had been a position would now be
+	// pointing past it.
+	{
+		buf := newLogBuffer(4, nil)
+		buf.append(sandboxdv1.Stream_STREAM_STDOUT, "starting up", time.Now(), false)  // 0
+		buf.append(sandboxdv1.Stream_STREAM_STDOUT, "and stopping", time.Now(), false) // 1
+		mark := buf.nextSequence()                                                     // 2
+		buf.append(sandboxdv1.Stream_STREAM_STDOUT, "listening on 3000", time.Now(), false)
+		for i := range 2 {
+			buf.append(sandboxdv1.Stream_STREAM_STDOUT, "serving "+strconv.Itoa(i), time.Now(), false)
+		}
+		oldest, ok := buf.oldestRetainedSeq()
+		require.True(t, ok)
+		require.Equal(t, uint64(1), oldest, "the ring has to have evicted a line, or this is not about eviction")
+
+		r := &record{buf: buf, changed: make(chan struct{})}
+		require.NoError(t, probe.run(context.Background(), r, mark, time.Second, time.Second),
+			"this run's own announcement is still in the ring and still above the mark")
+	}
+}
+
 // TestALogPatternProbeDoesNotMatchTheSupervisorsOwnNotes: log_pattern is
 // documented as matching a line on stdout or stderr, and the supervisor's
 // notes are neither.
@@ -210,13 +272,20 @@ func TestTCPProbeWaitsForSomethingToListen(t *testing.T) {
 	t.Parallel()
 	ts := newTestSupervisor(t)
 
-	port := freePort(t)
+	// A port neither loopback address answers on, which is a stronger
+	// requirement than freePort meets. freePort binds 127.0.0.1 and lets go, so
+	// it proves that one address was free a moment ago; the probe dials ::1 as
+	// well, and on a machine running several suites at once the number it hands
+	// back can be taken between the two. Asking again costs nothing and is the
+	// difference between a precondition and a race.
+	var port int
+	waitFor(t, 30*time.Second, "a loopback port nothing is listening on", func() bool {
+		port = freePort(t)
+		return !dialLoopback(context.Background(), uint32(port), 200*time.Millisecond) //nolint:gosec // a port is in range by construction
+	})
+
 	probe := testProbe(probeTCPPort, 5*time.Second)
 	probe.port = uint32(port) //nolint:gosec // a port is in range by construction
-
-	// Nothing is listening yet, and the probe must not report ready.
-	require.False(t, dialLoopback(context.Background(), probe.port, 200*time.Millisecond),
-		"nothing is listening on the port yet")
 
 	r, err := ts.startProbed("tcp-ready", probe, "listen", "150", strconv.Itoa(port))
 	require.NoError(t, err)
@@ -434,15 +503,42 @@ func TestProbeRoundTripsThroughTheRecord(t *testing.T) {
 		{kind: probeHTTPGet, url: "http://127.0.0.1:1/", timeout: time.Second, interval: time.Millisecond},
 		{kind: probeUptime, uptime: time.Second, timeout: 2 * time.Second, interval: time.Millisecond},
 	} {
-		back := probeFromPersisted(spec.persisted())
+		back := probeFromPersisted(spec.persisted(), time.Minute, time.Second)
 		require.NotNil(t, back)
 		require.Equal(t, spec.kind, back.kind)
 		require.Equal(t, spec.describe(), back.describe())
+		require.Equal(t, spec.timeout, back.timeout, "a persisted timeout is not overwritten by the default")
+		require.Equal(t, spec.interval, back.interval, "a persisted interval is not overwritten by the default")
 	}
 
 	require.Nil(t, (*probeSpec)(nil).persisted())
-	require.Nil(t, probeFromPersisted(nil))
-	require.Nil(t, probeFromPersisted(&persistedProbe{Kind: "something-else"}))
+	require.Nil(t, probeFromPersisted(nil, time.Minute, time.Second))
+	require.Nil(t, probeFromPersisted(&persistedProbe{Kind: "something-else"}, time.Minute, time.Second))
+}
+
+// TestAProbeReadOffDiskWithNoTimingsStillRuns is the crash loop that would not
+// have been a crash: re-adoption now runs a persisted probe on the startup
+// path, and a ticker of zero panics.
+//
+// A record naming a probe with no interval cannot be written by this agent, so
+// it arrives from an edit or a corruption. Left unguarded it takes the daemon
+// down on every start, and every start re-reads the same record — a crash loop
+// with nothing on the host able to break it, over a field nobody set.
+func TestAProbeReadOffDiskWithNoTimingsStillRuns(t *testing.T) {
+	t.Parallel()
+
+	spec := probeFromPersisted(&persistedProbe{Kind: "log_pattern", Pattern: "ready"},
+		300*time.Millisecond, 20*time.Millisecond)
+	require.NotNil(t, spec)
+	require.Positive(t, spec.interval, "a probe with no interval would panic time.NewTicker")
+	require.Positive(t, spec.timeout, "a probe with no timeout would give up before it looked")
+
+	buf := newLogBuffer(10, nil)
+	r := &record{buf: buf, changed: make(chan struct{})}
+	require.IsType(t, &probeTimeoutError{}, spec.run(context.Background(), r, 0, time.Second, time.Second))
+
+	buf.append(sandboxdv1.Stream_STREAM_STDOUT, "ready to serve", time.Now(), false)
+	require.NoError(t, spec.run(context.Background(), r, 0, time.Second, time.Second))
 }
 
 func mustCompile(t *testing.T, pattern string) *regexp.Regexp {

@@ -164,7 +164,17 @@ func (p *probeSpec) persisted() *persistedProbe {
 // probeFromPersisted rebuilds a probe read off disk. A pattern that no longer
 // compiles — it cannot, unless the record was hand-edited — drops the probe
 // rather than failing the whole re-adoption.
-func probeFromPersisted(p *persistedProbe) *probeSpec {
+//
+// The defaults are applied to the timings for the same reason probeFromProto
+// applies them: a probe runs a ticker, and a ticker of zero panics. A record
+// that names a probe but no interval cannot be written by this agent, so it
+// arrives only from an edit or a corruption — and re-adoption is now the path
+// that runs it, on startup, on a goroutine whose panic takes the daemon with
+// it. An agent that dies while re-adopting comes back and re-adopts the same
+// record, so the failure mode is not one crash but a crash loop nothing on the
+// host can break. A number the operator did not choose is a far better answer
+// than that.
+func probeFromPersisted(p *persistedProbe, defTimeout, defInterval time.Duration) *probeSpec {
 	if p == nil {
 		return nil
 	}
@@ -175,6 +185,12 @@ func probeFromPersisted(p *persistedProbe) *probeSpec {
 		uptime:     time.Duration(p.UptimeMS) * time.Millisecond,
 		timeout:    time.Duration(p.TimeoutMS) * time.Millisecond,
 		interval:   time.Duration(p.IntervalMS) * time.Millisecond,
+	}
+	if spec.interval <= 0 {
+		spec.interval = defInterval
+	}
+	if spec.timeout <= 0 {
+		spec.timeout = defTimeout
 	}
 	switch p.Kind {
 	case "log_pattern":

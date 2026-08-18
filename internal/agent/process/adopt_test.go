@@ -220,6 +220,206 @@ func TestReadoptionCarriesTheBoundaryBetweenRuns(t *testing.T) {
 	waitFor(t, 10*time.Second, "the re-adopted process to stop", func() bool { return !pidAlive(pid) })
 }
 
+// TestARunIsOnDiskBeforeItsProbeDecidesAnything is the durability half of the
+// mark, and of the two facts beside it.
+//
+// pid, start identity and the log mark are recorded at spawn because none of
+// them can be recovered afterwards. Recording them in memory is not enough: the
+// agent they have to survive is this one. The state machine is already in
+// STARTING by the time a run is spawned, so for a process with a probe the next
+// transition — the only thing that would otherwise write the record out — is
+// the probe's verdict, and a probe that times out has no verdict to make. The
+// record then sits on disk naming the *previous* run for as long as this one
+// lives: a dead pid after a restart, no pid at all on a first start.
+//
+// What that costs is the whole re-adoption path for exactly the processes this
+// branch taught it to handle. An agent killed while a probe is outstanding
+// hands the next one a record it cannot prove anything about, so a process that
+// is serving is written off as crashed — and the mark a resumed probe needs is
+// the mark of a run that already ended.
+func TestARunIsOnDiskBeforeItsProbeDecidesAnything(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	probe := testProbe(probeLogPattern, 300*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	marker := filepath.Join(t.TempDir(), "announced")
+	sup := newRawSupervisor(t, dir)
+	r, err := sup.start(startSpec{
+		argv:          helperArgv(t, "announce-once", marker, "listening on 3000"),
+		name:          "probed-and-unfinished",
+		env:           helperEnviron(),
+		probe:         probe,
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { killPID(t, int(r.status().GetPid())) })
+	require.NoError(t, sup.waitForReady(context.Background(), r))
+
+	// A second run of the same process, which never announces itself, so its
+	// probe gives up and nothing moves the state machine after the spawn. Its
+	// mark is above zero, which is what makes it distinguishable from the mark
+	// of the run before it.
+	require.NoError(t, sup.restart(r, time.Second))
+	require.IsType(t, &probeTimeoutError{}, sup.waitForReady(context.Background(), r))
+
+	r.mu.Lock()
+	pid, startID, mark, state := r.pid, r.startID, r.runFirstSeq, r.state
+	r.mu.Unlock()
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_STARTING, state)
+	require.Positive(t, mark, "the second run's output cannot begin at the start of the buffer")
+
+	// What the next agent would read if this one were killed right now.
+	stored := readRecord(t, dir, r.id)
+	require.Equal(t, pid, stored.PID, "the record names the pid of a run that is over")
+	require.Equal(t, startID, stored.StartID, "the record names the start identity of a run that is over")
+	require.Equal(t, mark, stored.RunFirstSeq, "the record names the log mark of a run that is over")
+
+	// And that record is enough to re-adopt on, which is the point of writing
+	// it: the two-fact test passes against the process that is actually
+	// running.
+	note, adopt := sup.adoptionDecision(stored, parseState(stored.State))
+	require.True(t, adopt, "a live run's own record must be re-adoptable: %s", note)
+}
+
+// TestAReadoptedProcessWithNoProbeDoesNotStayStarting closes the other half of
+// STARTING.
+//
+// A spawn writes the run down before the transition that says it is up, so
+// there is an instant in which a record on disk says STARTING for a process
+// that has no readiness probe and therefore nothing left to decide. Adoption
+// has to settle it: STARTING is only ever left by a probe's verdict, so a
+// record found there with no probe would sit in it for the rest of the
+// process's life, and every caller reading the state would be told a running
+// process is still coming up.
+func TestAReadoptedProcessWithNoProbeDoesNotStayStarting(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv:          helperArgv(t, "echo", "2000", "50", "tick"),
+		name:          "unprobed",
+		env:           helperEnviron(),
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+	id, pid := r.id, int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+	waitState(t, r, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING)
+	require.NoError(t, first.Close())
+
+	// The record as it stands in the window between the spawn recording its run
+	// and that run being marked up: everything real, the state one transition
+	// behind.
+	stored := readRecord(t, dir, id)
+	require.Equal(t, pid, stored.PID)
+	stored.State = stateName(sandboxdv1.ProcessState_PROCESS_STATE_STARTING)
+	writeRecord(t, dir, stored)
+
+	second := newRawSupervisor(t, dir)
+	adopted, ok := second.lookup(id)
+	require.True(t, ok)
+	require.Contains(t, adopted.status().GetAdoptionNote(), "re-adopted")
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, adopted.currentState(),
+		"a re-adopted process with no probe has nothing left to decide")
+	require.Equal(t, stateName(sandboxdv1.ProcessState_PROCESS_STATE_RUNNING), readRecord(t, dir, id).State,
+		"and the settled state is written down, so the next agent does not have to decide it again")
+}
+
+// writeRecord replaces a process's persisted record, for the tests that need
+// one in a state the supervisor only passes through.
+func writeRecord(t *testing.T, stateDir string, p persisted) {
+	t.Helper()
+	data, err := json.Marshal(p)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "processes", p.ID, recordFileName), data, 0o600))
+}
+
+// readRecord reads a process's persisted record straight off disk, without
+// going through the supervisor that wrote it.
+func readRecord(t *testing.T, stateDir, id string) persisted {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(stateDir, "processes", id, recordFileName))
+	require.NoError(t, err)
+	var p persisted
+	require.NoError(t, json.Unmarshal(data, &p))
+	return p
+}
+
+// TestRepeatedReadoptionKeepsTheBoundaryAndIgnoresItsOwnNotes carries the mark
+// through more than one agent, which is where the supervisor's own notes get
+// their chance.
+//
+// Every agent that re-adopts a still-silent run resumes its probe, and every
+// probe that gives up writes a note into the same log the next one pre-scans —
+// a note that quotes the pattern that gave up, and which lands *above* the
+// mark, because it is written during this run. So each re-adoption after the
+// first reads a history containing the previous one's failure, phrased in the
+// exact words it is watching for.
+//
+// The pattern is a plain string on purpose. `listening on \d+` cannot match the
+// note that quotes it — the note has the backslash in it, not a digit — so a
+// scenario written that way clears itself and asks nothing. `listening on` is
+// what a caller actually writes, and it appears in that note verbatim.
+func TestRepeatedReadoptionKeepsTheBoundaryAndIgnoresItsOwnNotes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	newProbe := func() *probeSpec {
+		p := testProbe(probeLogPattern, 300*time.Millisecond)
+		p.patternSrc = `listening on`
+		p.pattern = mustCompile(t, p.patternSrc)
+		return p
+	}
+
+	marker := filepath.Join(t.TempDir(), "announced")
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv:          helperArgv(t, "announce-once", marker, "listening on 3000"),
+		name:          "announces-once",
+		env:           helperEnviron(),
+		probe:         newProbe(),
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+	require.NoError(t, first.waitForReady(context.Background(), r))
+
+	require.NoError(t, first.restart(r, time.Second))
+	id, pid := r.id, int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+	require.IsType(t, &probeTimeoutError{}, first.waitForReady(context.Background(), r))
+	waitForLine(t, r, 20*time.Second, "restarted without announcing")
+	require.NoError(t, first.Close())
+
+	var last *record
+	for round := 1; round <= 3; round++ {
+		sup := newRawSupervisor(t, dir)
+		adopted, ok := sup.lookup(id)
+		require.True(t, ok, "round %d", round)
+		require.Contains(t, adopted.status().GetAdoptionNote(), "re-adopted", "round %d", round)
+
+		require.IsType(t, &probeTimeoutError{}, sup.waitForReady(context.Background(), adopted),
+			"round %d: the run being probed has never announced itself", round)
+		require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_STARTING, adopted.currentState(), "round %d", round)
+		require.Equal(t, 1, countLines(adopted, "listening on 3000"),
+			"round %d: the first run's announcement is in the history, and there is only ever one of it", round)
+		require.GreaterOrEqual(t, countLines(adopted, "did not pass within"), round,
+			"round %d: each round leaves behind a note quoting the pattern, or there is nothing here to be fooled by", round)
+
+		last = adopted
+		require.NoError(t, sup.Close())
+	}
+	// The mark itself made it across all three, unchanged: it is the second
+	// run's, not something each agent recomputed from the buffer it found.
+	require.Equal(t, readRecord(t, dir, id).RunFirstSeq, last.runFirstSeq)
+}
+
 // lastTick is the highest "tick N" index captured so far.
 func lastTick(t *testing.T, r *record) int {
 	t.Helper()
