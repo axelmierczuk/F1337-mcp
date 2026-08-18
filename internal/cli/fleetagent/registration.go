@@ -2,6 +2,7 @@ package fleetagent
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/kardianos/service"
 
@@ -34,17 +35,25 @@ func newRegistration(m Mechanism, params UnitParams, password string) (registrat
 	if m == MechanismTask {
 		return newScheduledTask(params)
 	}
-	// The SCM spells a local account differently from everything else on the
-	// host, and differently from the Task Scheduler. Applied here and nowhere
-	// else, so the account `install` prints and reasons about stays the one the
-	// operator typed.
-	scm := params
-	scm.User = serviceAccountName(params.User)
-	svc, err := service.New(&program{}, scm.ServiceConfigWithPassword(password))
+	svc, err := service.New(&program{}, scmServiceConfig(params, runtime.GOOS, password))
 	if err != nil {
 		return nil, fmt.Errorf("prepare service definition: %w", err)
 	}
 	return svc, nil
+}
+
+// scmServiceConfig is the definition `install` hands the service manager.
+//
+// Split out from newRegistration so the one thing in it that is not already a
+// pure function of UnitParams — the account, which the SCM spells differently
+// from everything else on the host and differently from the Task Scheduler —
+// can be asserted without a service manager. Applied here and nowhere else, so
+// the account `install` prints and reasons about stays the one the operator
+// typed.
+func scmServiceConfig(params UnitParams, goos, password string) *service.Config {
+	scm := params
+	scm.User = serviceAccountName(params.User, goos)
+	return scm.ServiceConfigWithPassword(password)
 }
 
 // controlRegistration and installedMechanisms are indirected so that the

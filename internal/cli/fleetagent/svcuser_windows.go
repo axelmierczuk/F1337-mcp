@@ -80,24 +80,6 @@ func ensureServiceUser(name string, _ bool) error {
 	return nil
 }
 
-// serviceAccountName is the form the SCM wants.
-//
-// CreateService resolves a bare name against the domain, not the machine, so a
-// local account has to be spelled `.\name` or the install fails on a
-// domain-joined host with an error about a nonexistent account. The task
-// scheduler wants the opposite — `.\name` is not a valid <UserId> — which is
-// why this is applied to the service configuration only and not to the account
-// the rest of `install` prints and reasons about.
-func serviceAccountName(name string) string {
-	if name == "" || runsInSessionZero(name) {
-		return name
-	}
-	if strings.ContainsAny(name, `\/@`) {
-		return name
-	}
-	return `.\` + name
-}
-
 // serviceAccessByOwnership records that access on Windows is governed by ACLs
 // rather than by an owner, so nothing an installer does to ownership grants it.
 const serviceAccessByOwnership = false

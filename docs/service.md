@@ -76,10 +76,38 @@ machine-bound LSA secret. Nothing here writes it to a file, an environment
 variable, or a log line, and nothing can read it back off the machine it was
 stored on.
 
+**The account also needs the "Log on as a service" right**, and nothing in this
+command grants it. `CreateService` stores the password; the privilege
+(`SeServiceLogonRight`) is separate, the Services MMC grants it as a side
+effect and the API does not, and without it the service installs cleanly and
+every start fails with **error 1069, "the service did not start due to a logon
+failure"** — the same shape as the error 5 below, from the other direction.
+`install` says so when it registers one. Granting it means `LsaAddAccountRights`,
+which is not something to hand-roll into an installer; do it with `secedit`, or
+under *Local Security Policy → Local Policies → User Rights Assignment → Log on
+as a service*.
+
 The account is still in session 0. Whether it sees its own per-user toolchains
 depends on whether its profile is loaded, which the SCM does not guarantee —
 so `service status` checks rather than assumes. See
 [When the agent is running and cannot work](#when-the-agent-is-running-and-cannot-work).
+
+### There is no third mechanism, and that is a decision
+
+The configuration neither of the two covers is "starts at boot with no logon,
+follows whoever is at the console, survives a reboot on an unattended machine".
+Reaching it means a `LocalSystem` launcher —
+`WTSGetActiveConsoleSessionId`, `WTSQueryUserToken`, a duplicated primary token
+with its session set, `CreateEnvironmentBlock` after `LoadUserProfile`, and
+session-change handling for fast user switching and RDP. It is deliberately not
+built. The reasoning is recorded in full on
+[PR #79](https://github.com/axelmierczuk/fleet-mcp/pull/79); in short, it is a
+standing privilege-escalation primitive on every host in the fleet, for the
+third-most-common configuration, written entirely in the part of the tree no
+runner here can execute. If that configuration is ever actually reported, the
+cheaper partial answer is a second trigger on the task — and the expensive one
+belongs in a separate binary with its own review, not in another branch of
+`service install`.
 
 ## The service account
 
@@ -229,9 +257,32 @@ Three answers, and the third is not a failure:
 - **unknown** — nothing is installed per-user, so there is nothing to conclude.
   A freshly imaged machine is not a broken one.
 
+There is one confined shape the probe cannot see, because it looks under the
+home directory the daemon was given and the daemon was given the wrong one: a
+service under a named account started with a built-in *service* profile —
+`C:\Windows\system32\config\systemprofile`, `C:\Windows\ServiceProfiles\...` or
+`C:\Users\Default` — has no profile of its own loaded at all, so the probe finds
+nothing to look for and answers `unknown`. `status` reads that pair of recorded
+facts, the ordinary account and the service profile, and reports it as unusable
+rather than as a machine with nothing installed.
+
 `status` reads the file back and refuses it unless the process that wrote it is
 still the process running — same pid *and* same start identity, so a reused pid
 cannot answer for a daemon that is gone.
+
+### What a script can branch on
+
+Three states, and the exit code separates two of them:
+
+| State | Exit | Headline |
+| --- | --- | --- |
+| Not installed | `0` | `service fleet-agent: not installed` |
+| Running and able to work | `0` | `service fleet-agent: running` |
+| Running and confined | `1` | `service fleet-agent: running, but unusable`, plus an `UNUSABLE` block |
+
+`1` is also what the command exits with when it fails for an ordinary reason, so
+a script that has to tell "unusable" from "status itself broke" matches the
+`UNUSABLE` block rather than the exit code alone.
 
 ## Hardening
 
@@ -445,5 +496,15 @@ above is what `schtasks /Query /TN fleet-agent /XML` prints back.
 **Not verified anywhere.** `service stop` under the task mechanism ends the task,
 and Task Scheduler terminates what the task started. Whether that reaches the
 job objects the supervisor puts each background process in has not been checked
-on a real Windows host; the documentation states the conservative reading, which
-is that supervised processes stop with the agent.
+on a real Windows host.
+
+The documentation states the conservative reading — supervised processes stop
+with the agent — and that is the right thing to print for two reasons. The first
+is that it is the likely behaviour: the definition this command registers sets
+`UseUnifiedSchedulingEngine`, whose task instances are managed through a job
+object, and terminating a job terminates every process in it *and* in every job
+nested inside it. The supervisor's own job objects are nested inside it, because
+nothing here starts a supervised process with `CREATE_BREAKAWAY_FROM_JOB`. The
+second is the cost of being wrong either way: an operator who believes the
+warning and is wrong runs `service start` again, and an operator who believes
+the opposite and is wrong loses every dev server in the fleet.

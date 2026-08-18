@@ -209,7 +209,7 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 		if serviceNeedsPassword(mechanism, runtime.GOOS, params.User) {
 			p.Printf("  install would prompt for %s's password and hand it to the SCM.\n", params.User)
 		}
-		for _, line := range mechanismNotes(mechanism, params.User) {
+		for _, line := range mechanismNotes(mechanism, runtime.GOOS, params.User) {
 			p.Println(line)
 		}
 		return p.Err()
@@ -319,7 +319,7 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	p.Printf("  state:     %s (left in place by uninstall)\n", params.StateDir)
 	p.Printf("  logs:      %s\n", params.LogDir)
 	p.Printf("  hardening: %s\n", params.Hardening)
-	for _, line := range mechanismNotes(mechanism, params.User) {
+	for _, line := range mechanismNotes(mechanism, runtime.GOOS, params.User) {
 		p.Println(line)
 	}
 	switch {
@@ -344,10 +344,15 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 // mechanismNotes is what an operator has to know about the mechanism they just
 // got, said at the moment they got it rather than only in a document.
 //
-// Both entries are things that will otherwise be discovered as a surprise: an
-// agent that vanishes at logout, and a `service stop` that takes every
-// supervised background process with it.
-func mechanismNotes(m Mechanism, account string) []string {
+// Every entry is something that will otherwise be discovered as a surprise: an
+// agent that vanishes at logout, a `service stop` that takes every supervised
+// background process with it, a built-in identity that cannot see a toolchain,
+// and a named account the SCM will refuse to log on.
+//
+// goos is a parameter for the same reason resolveMechanism's is: what an
+// operator is told is decided by the rule, not by which runner is asking, and
+// this is the only place either of the Windows-only notes is composed.
+func mechanismNotes(m Mechanism, goos, account string) []string {
 	if m == MechanismTask {
 		return []string{
 			"  NOTE: a logon-triggered task runs while " + account + " is logged on, and stops",
@@ -365,6 +370,25 @@ func mechanismNotes(m Mechanism, account string) []string {
 			"           the credentials in %APPDATA% that git and the registries read.",
 			"           `service status` will report it as unusable. If that is not what",
 			"           you meant, re-install with --mechanism task.",
+		}
+	}
+	if serviceNeedsPassword(m, goos, account) {
+		// The other half of the credentials the SCM needs, and the one nothing
+		// here can supply. CreateService takes the password and stores it; it
+		// does not grant the account the right to be logged on with it, which
+		// the Services MMC does and the API does not. Without it the service
+		// installs cleanly and every start fails with error 1069, "the service
+		// did not start due to a logon failure" — the same shape as the error 5
+		// this command now refuses, from the other direction, and granting it
+		// means LsaAddAccountRights, which is not a thing to hand-roll here.
+		return []string{
+			"  NOTE: " + account + " also needs the \"Log on as a service\" right, which the SCM",
+			"        stores the password for but does not grant. Without it every start",
+			"        fails with error 1069, a logon failure. Grant it with:",
+			"          secedit /export /cfg C:\\Windows\\Temp\\sec.cfg",
+			"          # add " + account + " to SeServiceLogonRight in that file, then",
+			"          secedit /configure /db secedit.sdb /cfg C:\\Windows\\Temp\\sec.cfg /areas USER_RIGHTS",
+			"        or add it under Local Security Policy > User Rights Assignment.",
 		}
 	}
 	return nil

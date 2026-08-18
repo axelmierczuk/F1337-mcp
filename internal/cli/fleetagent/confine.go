@@ -107,6 +107,33 @@ func confinementFor(rep *runtimeReport) *Confinement {
 			},
 		}
 
+	case rep.SessionZero && isServiceProfileHome(rep.Home):
+		// The one confined shape the probe cannot see, and the reason it
+		// cannot: it looks for per-user installs under the home directory the
+		// daemon was given, and the daemon was given the wrong one. A named
+		// account whose %USERPROFILE% is a built-in service profile is not
+		// running with its own profile at all — nothing under it, so the probe
+		// finds nothing to look for and answers "unknown", which everywhere
+		// else means "nothing to conclude" and here means "confined".
+		//
+		// Decided on the two facts the daemon recorded rather than on any
+		// belief about when the SCM loads a profile: an ordinary account
+		// running out of C:\Windows\ServiceProfiles is wrong however it got
+		// there.
+		return &Confinement{
+			Summary: "running, but unusable",
+			Detail: []string{
+				fmt.Sprintf("This agent is running in session 0 as %s, and the home directory it was", rep.Account),
+				fmt.Sprintf("started with is %s — a built-in service profile, not that", rep.Home),
+				"account's. Its profile was never loaded, so %APPDATA%, HKCU and everything",
+				"installed per-user are invisible to it whatever is on PATH.",
+			},
+			RemedyIntro: "Re-register it so it runs where the toolchains are:",
+			Remedy: []string{
+				"fleet-agent service install --mechanism task     # your session, your PATH",
+			},
+		}
+
 	case rep.Profile.Visibility == profileHidden:
 		return &Confinement{
 			Summary: "running, but unusable",
@@ -122,6 +149,34 @@ func confinementFor(rep *runtimeReport) *Confinement {
 		}
 	}
 	return nil
+}
+
+// serviceProfileHomes are the profile directories Windows hands a process that
+// is logged on as a service rather than as a person.
+//
+// Written with forward slashes and matched case-insensitively so the rule is a
+// pure function of the recorded string and is assertable from every runner. The
+// list is closed: these are the only directories Windows uses for the purpose,
+// and none of them is ever the right answer for a named account.
+var serviceProfileHomes = []string{
+	`/windows/system32/config/systemprofile`,
+	`/windows/serviceprofiles/localservice`,
+	`/windows/serviceprofiles/networkservice`,
+	`/users/default`,
+}
+
+// isServiceProfileHome reports whether home is one of those, or inside one.
+func isServiceProfileHome(home string) bool {
+	home = winClean(home)
+	if home == "" {
+		return false
+	}
+	for _, candidate := range serviceProfileHomes {
+		if strings.HasSuffix(home, candidate) || strings.Contains(home, candidate+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // hiddenDirsDetail names the per-user directories that exist and are not

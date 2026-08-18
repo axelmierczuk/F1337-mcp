@@ -89,6 +89,61 @@ func ServiceNeedsPasswordForTest(m Mechanism, goos, account string) bool {
 	return serviceNeedsPassword(m, goos, account)
 }
 
+// MechanismNotesForTest exposes what `install` tells an operator about the
+// mechanism it just gave them, with the platform supplied rather than read.
+//
+// Everything in here is a thing that would otherwise be found out afterwards:
+// an agent that vanishes at logout, a stop that kills every supervised process,
+// a built-in identity that cannot see a toolchain, and an account the SCM will
+// refuse to log on. Which of them applies is a rule, and a rule checked only on
+// a Windows runner is one two thirds of CI never sees.
+func MechanismNotesForTest(m Mechanism, goos, account string) []string {
+	return mechanismNotes(m, goos, account)
+}
+
+// SCMAccountForTest is the account `install` hands the service manager, taken
+// off the configuration it actually builds rather than off the rule underneath
+// it.
+//
+// CreateService reads a bare name as a domain account, so the difference
+// between `build` and `.\build` is the difference between an install that works
+// on a domain-joined host and one that fails naming an account that does not
+// exist. No runner here has a domain, or an SCM.
+func SCMAccountForTest(params UnitParams, goos, password string) string {
+	return scmServiceConfig(params, goos, password).UserName
+}
+
+// SCMPasswordForTest is the password that configuration carries, so that "the
+// SCM is the only thing that ever sees it" is a claim about a value something
+// asserted rather than about a parameter name.
+func SCMPasswordForTest(params UnitParams, goos, password string) (string, bool) {
+	value, ok := scmServiceConfig(params, goos, password).Option["Password"]
+	text, _ := value.(string)
+	return text, ok
+}
+
+// ScheduledTaskForTest is the Windows Scheduled Task lifecycle.
+type ScheduledTaskForTest interface {
+	Install() error
+	Uninstall() error
+	Start() error
+	Stop() error
+	Restart() error
+}
+
+// NewScheduledTaskForTest builds that lifecycle with the schtasks.exe
+// invocation replaced by run.
+//
+// This is the seam the audit of #79 asked for. Registering a task needs an
+// elevated token and a real Task Scheduler, so no runner here can let a single
+// one of these invocations happen — which left the argv, and the bytes of the
+// file the argv points schtasks at, asserted by nothing at all. run sees
+// exactly what schtasks.exe would, including the temp file, which still exists
+// while it is called.
+func NewScheduledTaskForTest(params UnitParams, run func(args ...string) error) ScheduledTaskForTest {
+	return &scheduledTask{params: params, run: run}
+}
+
 // InvokingServiceUserForTest exposes the default-account rule macOS has always
 // used and Windows now does, including its one refusal.
 func InvokingServiceUserForTest(current string) (string, error) {
@@ -126,6 +181,19 @@ type UserToolchainForTest = userToolchain
 func ProfileProbeForTest(home, pathEnv, goos string, tools []UserToolchainForTest) (visibility, ran string, unreachable []string) {
 	result := profileProbe{Home: home, Path: pathEnv, GOOS: goos, Tools: tools}.probe(context.Background())
 	return string(result.Visibility), result.Ran, result.Unreachable
+}
+
+// ProfileProbeBudgetForTest is the probe with an explicit deadline.
+//
+// The deadline is not a detail: the probe executes programs it found on disk,
+// on the daemon's start path, before the listener is bound. One of them
+// blocking — a shim waiting on a lock, a `node` on a stalled network mount —
+// would hang the daemon in a way the service manager reports as "failed to
+// start" and nothing explains. It has to be asserted that the bound is applied,
+// not that the constant is a sensible number.
+func ProfileProbeBudgetForTest(home, pathEnv, goos string, budget time.Duration, tools []UserToolchainForTest) (visibility, ran string) {
+	result := profileProbe{Home: home, Path: pathEnv, GOOS: goos, Budget: budget, Tools: tools}.probe(context.Background())
+	return string(result.Visibility), result.Ran
 }
 
 // Visibility values the probe reports, so a test names the same constants the

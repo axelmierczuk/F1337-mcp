@@ -122,6 +122,32 @@ func TestDefaultServiceUserIsNotASuperuser(t *testing.T) {
 	}
 }
 
+// The macOS half of that refusal, driven rather than reasoned about.
+//
+// macOS resolves the default from $SUDO_USER before anything else, and the
+// suite can set it — which is the only way to reach a rule that otherwise only
+// fires when the tests themselves run as root. Until #79 macOS had its own
+// inline copy of the refusal instead of the one every runner asserts, so
+// deleting that copy left the whole tree green and `sudo fleet-agent service
+// install` on a machine where SUDO_USER is root defaulting the agent, and every
+// command any model runs through it, to root.
+func TestDefaultServiceUser_DarwinRefusesRootFromSudoUser(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("$SUDO_USER is only consulted on macOS; Linux defaults to a dedicated system account and Windows has no sudo")
+	}
+
+	t.Setenv("SUDO_USER", "root")
+	_, err := fleetagent.DefaultServiceUserForTest()
+	require.Error(t, err, "sudo's own record of who ran the install must not become the service account when it says root")
+	assert.Contains(t, strings.ToLower(err.Error()), "refusing")
+	assert.Contains(t, err.Error(), "--user", "the refusal has to say how to proceed deliberately")
+
+	t.Setenv("SUDO_USER", "axel")
+	name, err := fleetagent.DefaultServiceUserForTest()
+	require.NoError(t, err, "and an ordinary account is exactly what it is for")
+	assert.Equal(t, "axel", name)
+}
+
 // `version` prints something identifiable, on every platform.
 func TestVersionCommand(t *testing.T) {
 	out := &bytes.Buffer{}

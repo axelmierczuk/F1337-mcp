@@ -386,3 +386,34 @@ func TestServe_RecordsWhatTheDaemonCanReach(t *testing.T) {
 		t.Fatal("serve did not exit after its context was cancelled")
 	}
 }
+
+// The record is written *before* agent.New binds the listener, and that
+// ordering is the reason anything may read it.
+//
+// Once the socket is open a client can dial, and `service status` — or the e2e
+// suite, which fatals when the record names a pid other than the daemon it is
+// asking about — would be reading whatever the previous daemon left in the
+// state directory. Writing it first makes "the port answers" imply "the report
+// describes this process": a happens-before rather than a guess about how long
+// a probe takes.
+//
+// Asserted by making agent.New fail. A port that is already bound is the one
+// failure that is entirely under a test's control, and it separates the two
+// orderings with no timing at all: written first, the record is on disk even
+// though the daemon never started; written second, it is never written.
+func TestServe_RecordsWhatItCanReachBeforeTheListenerOpens(t *testing.T) {
+	ea := newEnrolledAgent(t, t.TempDir())
+
+	// Take the port the config names, so agent.New cannot.
+	blocker, err := net.Listen("tcp", ea.address)
+	require.NoError(t, err)
+	defer func() { _ = blocker.Close() }()
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{"serve", "--config", ea.configPath}, out)
+	require.Equal(t, 1, code, "the listener could not be bound, so serve has to fail: %s", out.String())
+
+	_, err = os.Stat(filepath.Join(ea.stateDir, "runtime.json"))
+	require.NoError(t, err,
+		"the daemon has to record what it can reach before it binds; recorded afterwards, a reader that got in on the previous daemon's socket reads the previous daemon's record")
+}

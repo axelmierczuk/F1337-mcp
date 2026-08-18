@@ -101,6 +101,30 @@ func resolveMechanism(requested Mechanism, goos, account string) (Mechanism, err
 	}
 }
 
+// serviceAccountName is what the platform's service manager wants the account
+// spelled as.
+//
+// CreateService resolves a bare name against the domain, not the machine, so a
+// local account has to be spelled `.\name` or the install fails on a
+// domain-joined host with an error about a nonexistent account. The task
+// scheduler wants the opposite — `.\name` is not a valid <UserId> — which is
+// why this is applied to the service configuration only and not to the account
+// the rest of `install` prints and reasons about.
+//
+// goos is a parameter for the same reason resolveMechanism's is: the rule
+// decides whether a real install succeeds on a domain-joined host, no runner
+// here has one, and a rule that only compiles on Windows is a rule only the
+// Windows runner can check. Everywhere else the account is spelled as given.
+func serviceAccountName(name, goos string) string {
+	if goos != "windows" || name == "" || runsInSessionZero(name) {
+		return name
+	}
+	if strings.ContainsAny(name, `\/@`) {
+		return name
+	}
+	return `.\` + name
+}
+
 // serviceNeedsPassword reports whether the platform's service manager will
 // refuse to register this account without its password.
 //

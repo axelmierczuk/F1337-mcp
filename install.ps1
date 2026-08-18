@@ -140,7 +140,7 @@ if ($Service -eq 'auto') {
     $Service = if ($elevated) { 'yes' } else { 'no' }
 }
 if ($Service -eq 'yes' -and -not $elevated) {
-    throw 'Registering a Windows service requires an elevated PowerShell session.'
+    throw 'Registering the agent to start at logon requires an elevated PowerShell session: it writes a Scheduled Task or a Windows service and creates directories under ProgramData.'
 }
 
 $archive      = "fleet-agent_windows_$arch.zip"

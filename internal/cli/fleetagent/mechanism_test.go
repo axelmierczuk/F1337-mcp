@@ -190,3 +190,84 @@ func TestExecutableAccessAdvice(t *testing.T) {
 		assert.Contains(t, advice, "/usr/local/bin/fleet-agent", "goos %s", goos)
 	}
 }
+
+// The account `install` hands the SCM, which is not the account it prints.
+//
+// CreateService resolves a bare name against the *domain*, not the machine, so
+// `--user build` on a domain-joined host registers a service for CORP\build —
+// an account that does not exist — and the install fails naming it. The rule
+// was Windows-only code until #79, which meant the one runner that could check
+// it was the one nobody has a domain on.
+func TestSCMAccount_LocalAccountsAreSpelledForTheSCM(t *testing.T) {
+	scmAccount := func(goos, account string) string {
+		p := fleetagent.UnitParams{Executable: "fleet-agent.exe", ConfigPath: "agent.yaml", User: account}
+		return fleetagent.SCMAccountForTest(p, goos, "")
+	}
+
+	assert.Equal(t, `.\build`, scmAccount("windows", "build"),
+		"a bare name is a domain account to CreateService")
+
+	// Already qualified, in any of the three ways Windows qualifies a name.
+	for _, account := range []string{`CORP\build`, `.\build`, "build@corp.example"} {
+		assert.Equal(t, account, scmAccount("windows", account), "%s is already qualified", account)
+	}
+
+	// The built-in identities are spelled the way the SCM names them and must
+	// not be turned into local accounts that do not exist.
+	assert.Equal(t, `NT AUTHORITY\NetworkService`, scmAccount("windows", `NT AUTHORITY\NetworkService`))
+	assert.Equal(t, "LocalSystem", scmAccount("windows", "LocalSystem"))
+
+	// Everywhere else the account is what the operator typed: `.\fleet` is not
+	// a user systemd or launchd has ever heard of.
+	for _, goos := range []string{"linux", "darwin"} {
+		assert.Equal(t, "fleet", scmAccount(goos, "fleet"), "goos %s", goos)
+	}
+}
+
+// The password reaches the service manager and nothing else builds a copy of
+// it: it is set on the configuration only when there is one to set.
+func TestSCMConfig_CarriesThePasswordOnlyWhenThereIsOne(t *testing.T) {
+	p := fleetagent.UnitParams{Executable: "fleet-agent.exe", ConfigPath: "agent.yaml", User: "build"}
+
+	secret, ok := fleetagent.SCMPasswordForTest(p, "windows", "hunter2")
+	require.True(t, ok, "the SCM will not create a service under a named account without one")
+	assert.Equal(t, "hunter2", secret)
+
+	_, ok = fleetagent.SCMPasswordForTest(p, "windows", "")
+	assert.False(t, ok, "a built-in identity has no password, and an empty one is not a password")
+}
+
+// What `install` says at the moment it registers something, asserted from every
+// runner because the rule deciding it is a rule and not a platform.
+func TestMechanismNotes(t *testing.T) {
+	joined := func(m fleetagent.Mechanism, goos, account string) string {
+		return strings.Join(fleetagent.MechanismNotesForTest(m, goos, account), "\n")
+	}
+
+	// The task's two costs, both discovered as a surprise otherwise.
+	task := joined(fleetagent.MechanismTask, "windows", `WORKSTATION\axel`)
+	assert.Contains(t, task, `WORKSTATION\axel`)
+	assert.Contains(t, task, "log off", "an agent that stops at logout has to say so")
+	assert.Contains(t, task, "terminates what the",
+		"and that `service stop` takes the supervised background processes with it")
+
+	// A built-in identity is a working registration and a useless agent.
+	confined := joined(fleetagent.MechanismService, "windows", `NT AUTHORITY\NetworkService`)
+	assert.Contains(t, confined, "session 0")
+	assert.Contains(t, confined, "--mechanism task", "and it has to name what would work")
+
+	// A named account needs a right the SCM stores no password for. Without it
+	// the service installs cleanly and every start fails with error 1069 — the
+	// same shape as the error 5 install already refuses, from the other side.
+	named := joined(fleetagent.MechanismService, "windows", `WORKSTATION\build`)
+	assert.Contains(t, named, "Log on as a service")
+	assert.Contains(t, named, "1069", "the number an operator will search for")
+	assert.Contains(t, named, "secedit", "and a command that grants it")
+
+	// And nothing is said where nothing is true: systemd and launchd log an
+	// account on with neither a password nor a privilege.
+	for _, goos := range []string{"linux", "darwin"} {
+		assert.Empty(t, fleetagent.MechanismNotesForTest(fleetagent.MechanismService, goos, "fleet"),
+			"goos %s has nothing to warn about here", goos)
+	}
+}

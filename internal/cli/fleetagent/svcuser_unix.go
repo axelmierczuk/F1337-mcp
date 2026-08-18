@@ -64,17 +64,20 @@ func describeDefaultUser() string {
 // is the one the operator is sitting in front of — so that is what is used.
 func defaultServiceUser() (string, error) {
 	if runtime.GOOS == "darwin" {
-		if name := os.Getenv("SUDO_USER"); name != "" && name != "root" {
-			return name, nil
+		// invokingServiceUser, not a second copy of its rule. The refusal it
+		// carries is the one thing between `sudo fleet-agent service install`
+		// and an agent that runs every command a model issues as root, and
+		// macOS used to have its own inline version of it — reachable only
+		// from a suite running as root, therefore asserted by nothing, and
+		// free to drift from the Windows one its own comment says it shares.
+		if name := os.Getenv("SUDO_USER"); name != "" {
+			return invokingServiceUser(name)
 		}
 		current, err := user.Current()
 		if err != nil {
 			return "", fmt.Errorf("determine the invoking user; pass --user with the account the agent should run as: %w", err)
 		}
-		if current.Username == "root" {
-			return "", fmt.Errorf("refusing to default the service account to root: every command the agent runs would run as root.\n\nPass --user with a dedicated account, or --user root to accept that deliberately")
-		}
-		return current.Username, nil
+		return invokingServiceUser(current.Username)
 	}
 	return linuxServiceUser(accountExists), nil
 }
@@ -231,10 +234,6 @@ func lookupServiceIDs(name string) (uid, gid int, err error) {
 	}
 	return uid, gid, nil
 }
-
-// serviceAccountName is what the platform's service manager wants the account
-// spelled as. On Unix that is the account.
-func serviceAccountName(name string) string { return name }
 
 // currentAccount is how the platform names the account this process is running
 // as.
