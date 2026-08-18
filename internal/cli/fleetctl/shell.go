@@ -323,6 +323,23 @@ func (s *shellSession) run(ctx context.Context, cancel context.CancelFunc, open 
 	if err := s.send(&sandboxdv1.ShellRequest{
 		Event: &sandboxdv1.ShellRequest_Open{Open: open},
 	}); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return 0, err
+		}
+		// io.EOF from Send is not what went wrong. gRPC returns it whenever
+		// the *agent* has already ended the stream, and is explicit that the
+		// status it ended with is available only from Recv — so returning this
+		// error throws that status away.
+		//
+		// Two of ShellService's refusals are answered before its first Recv,
+		// shell.enabled and exec.enabled, which means they race this Send: the
+		// operator who lost that race was told "shell on box: EOF" for an
+		// agent that had said which setting turns the service off. Which one
+		// they got depended on whichever crossed the wire first, so the same
+		// command answered differently on a loaded machine.
+		if _, recvErr := s.stream.Recv(); recvErr != nil && !errors.Is(recvErr, io.EOF) {
+			return 0, recvErr
+		}
 		return 0, err
 	}
 

@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 )
@@ -379,6 +381,41 @@ func TestShellSession_ReportsAStreamThatEndedWithoutAStatus(t *testing.T) {
 	assert.Equal(t, sessionFailed, code)
 	assert.Contains(t, notes.String(), "without reporting its exit status")
 	assert.Equal(t, int32(1), term.restored.Load())
+}
+
+// A refusal that beat the open out of the door is what the operator is told.
+//
+// ShellService answers shell.enabled and exec.enabled without reading
+// anything, so its status can reach this end before this end's own ShellOpen
+// has left it. gRPC fails that Send with io.EOF and keeps the status back for
+// Recv, so a session that reported the Send error printed "shell on box: EOF"
+// for an agent that had named the setting exactly — and which of the two the
+// operator got was whichever crossed the wire first.
+//
+// The fake supplies both halves at once, so the losing order is the only order
+// here rather than the occasional one. What is asserted is that the agent's
+// own answer survives: the operator is told which setting to change.
+func TestShellSession_ReportsTheAgentsRefusalRatherThanTheEOFItCaused(t *testing.T) {
+	term := newFakeTerminal()
+	stream := newFakeStream()
+	// The agent ended the stream before this end's open went out...
+	stream.sendErr = io.EOF
+	// ...having ended it with the refusal that says which setting is off.
+	stream.recvErr = status.Error(codes.FailedPrecondition,
+		"this agent runs with shell.enabled: false, so ShellService is turned off")
+	close(stream.responses)
+
+	sess, _ := newSession(term, stream)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := sess.run(ctx, cancel, &sandboxdv1.ShellOpen{})
+	require.Error(t, err)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err),
+		"the io.EOF the agent's own answer caused was reported instead of the answer")
+	assert.Contains(t, status.Convert(err).Message(), "shell.enabled")
+	assert.Equal(t, int32(1), term.restored.Load(),
+		"a refusal still has to hand the terminal back")
 }
 
 // TestShellSession_RestoresTheTerminalWhenRenderingFails is the exit path the

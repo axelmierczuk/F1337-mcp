@@ -647,6 +647,17 @@ func TestExec_TheEscalationStartsWithSIGTERM(t *testing.T) {
 // Nothing asserted it. Every other grandchild in this file is started with no
 // pipes at all, so deleting WaitDelay left the package, and the end-to-end
 // suite, green.
+//
+// # The grandchild really holding the pipe is asserted, not assumed
+//
+// Everything below except the drain's own record is also true of a command
+// whose descendant inherited nothing: it exits, it is not timed out, its code
+// is zero, and the sweep takes the descendant with the call. The one thing
+// only this shape produces is os/exec returning ErrWaitDelay — which it does
+// only for a process that has exited while something still holds its pipes —
+// and the handler logs exactly there. Without that line asserted, deleting the
+// grandchild's inherited stdout left this test green while it measured
+// nothing, which is #70's mistake aimed at a fixture instead of a clock.
 func TestExec_ADescendantHoldingTheOutputPipeDoesNotHoldTheCall(t *testing.T) {
 	h := newHarness(t)
 
@@ -665,6 +676,15 @@ func TestExec_ADescendantHoldingTheOutputPipeDoesNotHoldTheCall(t *testing.T) {
 	require.False(t, res.GetTimedOut(),
 		"the command exited on its own; only its descendant still held the output pipe")
 	require.Equal(t, int32(0), res.GetExitCode())
+
+	// The drain is what ended the wait, and this is the handler's own record of
+	// it: os/exec reports ErrWaitDelay only for a process that exited while
+	// something still held its pipes, so this line is simultaneously the
+	// product behaviour under test and the proof the fixture established the
+	// shape it claims to. Everything else here is what a command with no
+	// descendant at all reports.
+	require.Contains(t, h.logs.String(), "stopped reading output after the process exited",
+		"the wait ended on the pipes closing rather than on the drain, so the grandchild never held the command's stdout and nothing above is about WaitDelay")
 
 	// And the descendant goes with the call like any other.
 	_, grandchild := readPIDs(t, pidFile)
