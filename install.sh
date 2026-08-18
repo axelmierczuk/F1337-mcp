@@ -821,40 +821,60 @@ Re-run with sudo, or pass --config-dir <path> for a directory this account owns.
 
 # ----------------------------------------------------------------- verify ----
 
+# connect_to reports whether something accepts a TCP connection at host:port.
+#
+# Three ways of asking, because there is no portable one and the wrong answer
+# here fails an install that worked. bash first: /dev/tcp is a shell builtin, it
+# needs nothing installed, and it cannot be a variant that does not support the
+# flag -- which busybox `nc` is, having no -z at all. Then python3, then nc.
+connect_to() {
+  if have bash && bash -c "exec 3<>/dev/tcp/$1/$2" >/dev/null 2>&1; then
+    return 0
+  fi
+  if have python3 && python3 -c "import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 3).close()" "$1" "$2" >/dev/null 2>&1; then
+    return 0
+  fi
+  if have nc && nc -z "$1" "$2" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+# have_probe reports whether this host has anything to ask that question with. A
+# host with none of the three is told the socket was not checked, rather than
+# having a working install failed by a missing tool.
+have_probe() {
+  have bash || have python3 || have nc
+}
+
 # probe_listener reports whether anything accepts a connection at the address
 # the config names.
 #
-# Deliberately not a claim about gRPC. There is no fleet client on this host —
-# the release archive carries the agent alone — so what can be established here
-# is that the manager reports a running daemon and that its socket answers.
-# `fleetctl add` on the workstation is what proves it serves, and it is the line
-# this installer ends by printing.
+# Deliberately not a claim about gRPC. The release archive carries the agent
+# alone, so there is no fleet client on this host to speak the protocol with;
+# what can be established here is that the manager reports a running daemon and
+# that its socket answers. `fleetctl add` on the workstation is what proves it
+# serves, and it is the line this installer ends by printing.
 probe_listener() {
-  _host="$(host_of "$LISTEN")"
-  _port="$(port_of "$LISTEN")"
-  case "$(classify_address "$_host")" in
-    wildcard) _host="127.0.0.1" ;;
+  _phost="$(host_of "$LISTEN")"
+  _pport="$(port_of "$LISTEN")"
+  case "$(classify_address "$_phost")" in
+    wildcard) _phost="127.0.0.1" ;;
   esac
+  if ! have_probe; then
+    warn "no bash, python3 or nc here, so nothing checked that ${LISTEN} is answering"
+    return 0
+  fi
   _tries=0
   while [ "$_tries" -lt 20 ]; do
-    if have nc; then
-      if nc -z "$_host" "$_port" >/dev/null 2>&1; then
-        log "${_host}:${_port} is accepting connections"
-        return 0
-      fi
-    elif have bash; then
-      if bash -c "exec 3<>/dev/tcp/${_host}/${_port}" >/dev/null 2>&1; then
-        log "${_host}:${_port} is accepting connections"
-        return 0
-      fi
-    else
-      warn "no nc and no bash here, so nothing checked that ${LISTEN} is answering"
+    if connect_to "$_phost" "$_pport"; then
+      log "${_phost}:${_pport} is accepting connections"
       return 0
     fi
     _tries=$((_tries + 1))
     sleep 1
   done
-  die "the agent is running and nothing is answering at ${_host}:${_port}.
+  die "the agent is running and nothing is answering at ${_phost}:${_pport}.
 Check the address in ${CONFIG_PATH} against the interfaces this host has, and
 read \`${BIN_PATH} service status\`."
 }
