@@ -541,6 +541,78 @@ func TestAProbeReadOffDiskWithNoTimingsStillRuns(t *testing.T) {
 	require.NoError(t, spec.run(context.Background(), r, 0, time.Second, time.Second))
 }
 
+// TestAReadinessAttemptCarriesTheBoundaryItWasStartedWith pins the reason the
+// mark travels on the attempt rather than being read off the record when the
+// probe wants it.
+//
+// A probeRun is one readiness attempt, bound to the run it was started for. The
+// record's mark is not: it is overwritten by the next spawn. So a probe that
+// read the record could — in the window between one run ending and the next one
+// starting — scan against the *next* run's boundary and conclude something
+// about a run that is already over. Which way that goes is not fixed either: it
+// can hide the evidence this run printed, as it does here, or credit this run
+// with a line it never printed.
+//
+// The window is small and the interleaving is not something a test can arrange
+// by hand, so the two marks are simply made to disagree: the attempt is started
+// for a run whose output begins at zero, against a record that has already
+// moved on. The attempt's answer is the one that has to win.
+func TestAReadinessAttemptCarriesTheBoundaryItWasStartedWith(t *testing.T) {
+	t.Parallel()
+	ts := newTestSupervisor(t)
+
+	r := ts.startHelper("boundary-on-the-attempt", "silent")
+	waitState(t, r, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING)
+
+	// What the run being probed printed, and a record whose mark belongs to a
+	// run after it.
+	r.buf.append(sandboxdv1.Stream_STREAM_STDOUT, "listening on 3000", time.Now(), false)
+	r.mu.Lock()
+	r.runFirstSeq = 1000
+	r.mu.Unlock()
+
+	probe := testProbe(probeLogPattern, 300*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	ts.startProbe(r, probe, 0)
+	require.NoError(t, ts.waitForReady(context.Background(), r),
+		"the attempt was started for the run whose output begins at 0, and that is the run it decides")
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_READY, r.currentState())
+}
+
+// TestAProbeWithNoIntervalDoesNotTakeTheDaemonWithIt is the last line of the
+// same defence, at the call that actually panics.
+//
+// Both constructors floor the interval, so a spec built by either cannot reach
+// time.NewTicker with a zero — and one of them is a record on disk, which is
+// the input nobody controls. What makes this worth a floor at the tick itself
+// rather than only at the two places a spec is made is where the panic lands:
+// re-adoption runs a persisted probe on the startup path, so the daemon dies,
+// comes back, re-reads the same record, and dies again. Nothing on the host
+// breaks that loop. A number the operator did not choose is a far better answer
+// than a machine whose agent will not stay up.
+func TestAProbeWithNoIntervalDoesNotTakeTheDaemonWithIt(t *testing.T) {
+	t.Parallel()
+
+	spec := &probeSpec{
+		kind:       probeLogPattern,
+		patternSrc: "ready",
+		pattern:    mustCompile(t, "ready"),
+		timeout:    200 * time.Millisecond,
+		// interval deliberately left at zero.
+	}
+
+	buf := newLogBuffer(10, nil)
+	r := &record{buf: buf, changed: make(chan struct{})}
+	require.IsType(t, &probeTimeoutError{}, spec.run(context.Background(), r, 0, time.Second, time.Second),
+		"a probe with no interval still runs, and still gives up when it finds nothing")
+
+	buf.append(sandboxdv1.Stream_STREAM_STDOUT, "ready to serve", time.Now(), false)
+	require.NoError(t, spec.run(context.Background(), r, 0, time.Second, time.Second),
+		"and it still passes on the line it was watching for")
+}
+
 func mustCompile(t *testing.T, pattern string) *regexp.Regexp {
 	t.Helper()
 	re, err := regexp.Compile(pattern)

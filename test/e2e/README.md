@@ -55,6 +55,7 @@ Everything except one scenario.
 | `TestProcessRestartKeepsItsIdentityAndComesBackReady` | A restart keeps the process id, passes its log-pattern probe again, serves again, keeps both runs' logs, and leaves the restart policy's budget alone. |
 | `TestALogPatternProbeWatchesTheRunItIsProbing` | A restarted run that never prints the pattern is reported as not ready, rather than matching the previous run's announcement out of the retained log (#57). |
 | `TestAReadoptedProcessIsReadyOnTheAnnouncementItAlreadyMade` | The other side of the same rule: a process re-adopted while it was still being probed is ready on the announcement it made to the agent that is gone, read out of the retained log rather than waited for again. |
+| `TestAnAgentKilledWhileProbingHandsTheRunOver` | The same handover from an agent that was SIGKILLed rather than stopped, while a probe was outstanding and nothing since the spawn had written the record. |
 | `TestProcessLogsFollowReturnsAtItsDeadline` | A following read of a process's logs is bounded. |
 | `TestSupervisedProcessSurvivesAndIsReadoptedAfterAnAgentCrash` | A supervised process outlives a SIGKILLed agent, the next agent re-adopts it, its logs survive, capture resumes, and a stop still reaches it. |
 | `TestStaleRecordIsOrphanedRatherThanSignalled` | A record whose pid exists but whose start identity does not match is orphaned, never signalled. |

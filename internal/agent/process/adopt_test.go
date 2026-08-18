@@ -27,12 +27,32 @@ import (
 // The re-adoption tests need exactly that: a supervisor that goes away while its
 // children keep running, which is what an agent upgrade looks like. Each test
 // kills the survivors itself.
-func newRawSupervisor(t *testing.T, dir string) *Supervisor {
+func newRawSupervisor(t *testing.T, dir string, tweak ...func(*supervisorConfig)) *Supervisor {
 	t.Helper()
-	sup, err := newSupervisor(testConfig(dir), testPolicy(t, 16), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := testConfig(dir)
+	for _, fn := range tweak {
+		fn(&cfg)
+	}
+	sup, err := newSupervisor(cfg, testPolicy(t, 16), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sup.Close() })
 	return sup
+}
+
+// snapshotStateDir copies a supervisor's state directory as it stands right
+// now, which is what a SIGKILLed agent leaves behind.
+//
+// An agent that is stopped writes every record again on the way out, so a test
+// that closes one and starts another over the same directory is asking about
+// the shutdown path, not the crash path — and a record only the shutdown wrote
+// correctly looks correct to it. Copying the directory out from under a
+// supervisor that is still running takes the state as it actually is at that
+// instant: whatever was persisted, and nothing else.
+func snapshotStateDir(t *testing.T, src string) string {
+	t.Helper()
+	dst := t.TempDir()
+	require.NoError(t, os.CopyFS(dst, os.DirFS(src)))
+	return dst
 }
 
 // TestReadoptionAcrossAnAgentRestart is the reason #15 exists: an agent upgrade
@@ -329,6 +349,170 @@ func TestAReadoptedProcessWithNoProbeDoesNotStayStarting(t *testing.T) {
 		"a re-adopted process with no probe has nothing left to decide")
 	require.Equal(t, stateName(sandboxdv1.ProcessState_PROCESS_STATE_RUNNING), readRecord(t, dir, id).State,
 		"and the settled state is written down, so the next agent does not have to decide it again")
+}
+
+// TestAnAgentKilledMidProbeHandsOverTheRunItWasWatching is round 1's durability
+// fix driven the way it actually breaks.
+//
+// Every other re-adoption scenario here stops the first agent, and a stop
+// writes every record again on the way out — so a record that was wrong for the
+// whole life of the run looks right to the agent that reads it afterwards. That
+// is exactly how a spawn that never wrote down its own run survived a green
+// suite: the only case the tests exercised was the one that repaired the record
+// on the way past it.
+//
+// This one takes the state directory as it stands while the agent is still
+// running and hands that to the next agent, which is what a SIGKILL leaves.
+// Nothing between the spawn and the copy writes the record: the run being
+// probed never announces itself, so its probe has no verdict to record, and a
+// record naming the *previous* run would fail the two-fact test against a pid
+// that died with the restart.
+func TestAnAgentKilledMidProbeHandsOverTheRunItWasWatching(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	probe := testProbe(probeLogPattern, 300*time.Millisecond)
+	probe.patternSrc = `listening on \d+`
+	probe.pattern = mustCompile(t, probe.patternSrc)
+
+	marker := filepath.Join(t.TempDir(), "announced")
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv:          helperArgv(t, "announce-once", marker, "listening on 3000"),
+		name:          "killed-mid-probe",
+		env:           helperEnviron(),
+		probe:         probe,
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+	require.NoError(t, first.waitForReady(context.Background(), r))
+
+	// A second run, which stays silent, so its probe times out and nothing
+	// after the spawn writes the record again.
+	require.NoError(t, first.restart(r, time.Second))
+	id, pid := r.id, int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+	require.IsType(t, &probeTimeoutError{}, first.waitForReady(context.Background(), r))
+	waitForLine(t, r, 20*time.Second, "restarted without announcing")
+
+	r.mu.Lock()
+	mark := r.runFirstSeq
+	r.mu.Unlock()
+	require.Positive(t, mark, "the second run's output cannot begin at the start of the buffer")
+
+	// The kill. The agent is not stopped and never gets to tidy anything up;
+	// this is its state directory as it stands, and the process is still going.
+	crashed := snapshotStateDir(t, dir)
+	require.True(t, pidAlive(pid))
+
+	second := newRawSupervisor(t, crashed)
+	adopted, ok := second.lookup(id)
+	require.True(t, ok, "the next agent has to know about the process at all")
+	require.Contains(t, adopted.status().GetAdoptionNote(), "re-adopted",
+		"the run that was being probed when the agent died is the run the record has to name")
+	require.Equal(t, pid, int(adopted.status().GetPid()))
+	require.Equal(t, mark, readRecord(t, crashed, id).RunFirstSeq,
+		"the mark the resumed probe needs is this run's, not the one before it")
+
+	// And the probe resumed on it is watching this run: the only announcement
+	// in the history it inherited belongs to the run before this one.
+	require.IsType(t, &probeTimeoutError{}, second.waitForReady(context.Background(), adopted))
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_STARTING, adopted.currentState())
+	require.Equal(t, 1, countLines(adopted, "listening on 3000"),
+		"the first run's announcement has to be in the inherited history, or this proves nothing")
+}
+
+// TestAdoptionRunsAProbeWithNoTimingsOnTheAgentsDefaults is the caller half of
+// the crash loop round 1 closed.
+//
+// probeFromPersisted applies the agent's defaults to a probe read off disk
+// because a zero interval reaches time.NewTicker, which panics — on the startup
+// path, on a record that is re-read on every start. That was covered by calling
+// probeFromPersisted with two defaults; nothing asked whether adopt passes it
+// any. Handing it zeros left the whole suite green while the daemon this fix
+// exists for went back to dying on the record it could not survive.
+//
+// So the timings are asserted through what they do rather than through what
+// they are: the announcement arrives *after* the adoption, and a probe running
+// on a zero timeout has already given up by then.
+func TestAdoptionRunsAProbeWithNoTimingsOnTheAgentsDefaults(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	marker := filepath.Join(t.TempDir(), "announce-now")
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv:          helperArgv(t, "announce-when", marker, "listening on 3000"),
+		name:          "timings-off-disk",
+		env:           helperEnviron(),
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+	id, pid := r.id, int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+	waitState(t, r, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING)
+	require.NoError(t, first.Close())
+
+	// A probe with no timings at all, which this agent cannot write and an
+	// edit or a corruption can, on a run that is still being decided.
+	stored := readRecord(t, dir, id)
+	stored.State = stateName(sandboxdv1.ProcessState_PROCESS_STATE_STARTING)
+	stored.Probe = &persistedProbe{Kind: "log_pattern", Pattern: `listening on \d+`}
+	writeRecord(t, dir, stored)
+
+	// A timeout long enough that the announcement below cannot lose a race to
+	// it: what is being asserted is that the probe is still watching, not how
+	// fast the machine is.
+	second := newRawSupervisor(t, dir, func(c *supervisorConfig) { c.probeTimeout = 30 * time.Second })
+	adopted, ok := second.lookup(id)
+	require.True(t, ok)
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_STARTING, adopted.currentState(),
+		"a re-adopted process with a probe is decided by the probe")
+
+	require.NoError(t, os.WriteFile(marker, []byte("go"), 0o600))
+	waitState(t, adopted, 30*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_READY)
+}
+
+// TestAProbeThisAgentCannotRebuildIsNotDroppedSilently.
+//
+// A record can name a probe this agent cannot rebuild: a pattern that no longer
+// compiles, or a kind a newer agent wrote and this one has never heard of —
+// the same version skew parseState is deliberate about one field away. The
+// probe is dropped, which is the right call, and the process is then settled as
+// RUNNING, which is the state for "running, with no readiness probe
+// configured". Read on its own that says the caller never asked for one.
+func TestAProbeThisAgentCannotRebuildIsNotDroppedSilently(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	first := newRawSupervisor(t, dir)
+	r, err := first.start(startSpec{
+		argv:          helperArgv(t, "echo", "20000", "50", "tick"),
+		name:          "probe-from-the-future",
+		env:           helperEnviron(),
+		restartPolicy: sandboxdv1.RestartPolicy_RESTART_POLICY_NEVER,
+		maxLogBytes:   1 << 18,
+	}, false)
+	require.NoError(t, err)
+	id, pid := r.id, int(r.status().GetPid())
+	t.Cleanup(func() { killPID(t, pid) })
+	waitState(t, r, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING)
+	require.NoError(t, first.Close())
+
+	stored := readRecord(t, dir, id)
+	stored.State = stateName(sandboxdv1.ProcessState_PROCESS_STATE_STARTING)
+	stored.Probe = &persistedProbe{Kind: "unix_socket", URL: "/run/app.sock", TimeoutMS: 1000, IntervalMS: 20}
+	writeRecord(t, dir, stored)
+
+	second := newRawSupervisor(t, dir)
+	adopted, ok := second.lookup(id)
+	require.True(t, ok)
+	require.Equal(t, sandboxdv1.ProcessState_PROCESS_STATE_RUNNING, adopted.currentState(),
+		"there is no probe left to decide it, so it is not left starting either")
+	require.Equal(t, 1, countLines(adopted, "readiness probe (unix_socket) could not be rebuilt"),
+		"the process's own log is where the operator looks for why it stopped being probed")
 }
 
 // writeRecord replaces a process's persisted record, for the tests that need

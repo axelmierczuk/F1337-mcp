@@ -325,6 +325,94 @@ func TestAReadoptedProcessIsReadyOnTheAnnouncementItAlreadyMade(t *testing.T) {
 	s.ok("fleet_forward", map[string]any{"remote_port": port, "stop": true})
 }
 
+// TestAnAgentKilledWhileProbingHandsTheRunOver is the same handover as the
+// scenario above, from an agent that never got to tidy up.
+//
+// The distinction is the whole of what makes it worth running twice. A daemon
+// that is stopped writes every record again on the way out, so a record that
+// was wrong for the entire life of a run still looks right to the agent that
+// reads it afterwards — which is exactly how a spawn that never wrote down its
+// own pid, start identity and log mark survived a green suite: the only case
+// anything exercised was the one that repaired the record on the way past it.
+//
+// Here the daemon is SIGKILLed instead, while a probe is still outstanding and
+// nothing since the spawn has written the record. If what the spawn wrote is
+// not the run that is running, the next agent cannot prove the process survived
+// and marks a serving process crashed — for good, because ORPHANED and CRASHED
+// are terminal.
+func TestAnAgentKilledWhileProbingHandsTheRunOver(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+	s := f.connect(t)
+	s.ok("fleet_select", map[string]any{"name": a.name})
+
+	port := freePort(t)
+	announce := filepath.Join(a.home, "announce-now")
+	started := structured[processStartResult](t, s.okAs("fleet_process_start", map[string]any{
+		"name": "killed-while-probing",
+		"argv": []string{bins.helpers, "serve-when", strconv.Itoa(port), "survived", announce},
+		"ready_probe": map[string]any{
+			// Nothing can match until this test says so, so the probe gives up
+			// whatever the machine is doing.
+			"log_pattern":     "listening on [0-9]+",
+			"timeout_seconds": 1,
+		},
+	}, callOptions{timeout: 120 * time.Second}))
+	pid := int(started.Process.PID)
+	t.Cleanup(func() { killPID(pid) })
+
+	// A probe that gave up is a run whose readiness nobody decided, and the
+	// state machine has nothing left to write. From here to the kill, the
+	// record on disk is exactly what the spawn wrote and nothing else.
+	if started.ReadyError == "" {
+		t.Fatalf("the process has not announced itself yet, so its probe cannot have passed: %+v", started)
+	}
+	if started.Process.State != "starting" {
+		t.Fatalf("a process still being probed is starting, got %q: %+v", started.Process.State, started.Process)
+	}
+
+	writeFile(t, announce, []byte("go"))
+	marker := "listening on " + strconv.Itoa(port)
+	waitFor(t, 30*time.Second, "the announcement to reach the agent's log", func() (bool, string) {
+		logs := readLogs(t, s, started.Process.ProcessID)
+		return contains(logs.Logs, marker), "log so far:\n" + logs.Logs
+	})
+
+	// SIGKILL, not a drain.
+	a.kill()
+	if !processAlive(pid) {
+		t.Fatalf("pid %d died with the agent; supervised processes are meant to outlive it", pid)
+	}
+	f.restart(a)
+
+	var found *processDetail
+	waitFor(t, 60*time.Second, "the re-adopted process to be reported ready", func() (bool, string) {
+		res := s.call("fleet_process_list", nil, callOptions{})
+		if res.IsError {
+			return false, resultText(res)
+		}
+		list := structured[processListResult](t, res)
+		found = findProcess(list.Processes, started.Process.ProcessID)
+		if found == nil {
+			return false, fmt.Sprintf("not in the listing: %+v", list.Processes)
+		}
+		return found.State == "ready", fmt.Sprintf("state is %q (note %q)", found.State, found.AdoptionNote)
+	})
+	if !contains(found.AdoptionNote, "re-adopted") {
+		t.Fatalf("the process reported ready is not the re-adopted one: %q", found.AdoptionNote)
+	}
+	if int(found.PID) != pid {
+		t.Fatalf("the re-adopted process reports pid %d, want the pid the killed agent was supervising (%d)", found.PID, pid)
+	}
+
+	// And it is serving, which is what readiness claims about it.
+	fwd := structured[forwardResult](t, s.okAs("fleet_forward", map[string]any{"remote_port": port}, callOptions{}))
+	if got := httpGet(t, "http://"+fwd.LocalAddress+"/"); got != "survived" {
+		t.Fatalf("the re-adopted server answered %q", got)
+	}
+	s.ok("fleet_forward", map[string]any{"remote_port": port, "stop": true})
+}
+
 // TestSupervisedProcessSurvivesAndIsReadoptedAfterAnAgentCrash runs the
 // re-adoption path for real.
 //

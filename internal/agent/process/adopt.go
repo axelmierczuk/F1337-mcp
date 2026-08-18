@@ -112,6 +112,24 @@ func (s *Supervisor) adopt(p persisted) error {
 		r.buf.restore(lines, p.LogBytes)
 	}
 
+	// A probe the record names but this agent cannot rebuild is dropped, and
+	// saying so is the whole of the fix for it. probeFromPersisted returns nil
+	// for a pattern that no longer compiles and for a kind this version does
+	// not know — a record written by a newer agent, then read by an older one,
+	// which is the case parseState is careful about one field further up.
+	// Silently, that reads as "this process never had a probe": it is settled
+	// as RUNNING below, it is never probed again, and the next write of the
+	// record drops the probe from disk too. The process keeps running either
+	// way, so this is a warning rather than a refusal — but it is not nothing,
+	// and the operator wondering why readiness stopped meaning anything needs
+	// it in the two places they look.
+	if p.Probe != nil && r.probe == nil {
+		s.log.Warn("dropping a readiness probe this agent cannot rebuild; the process is re-adopted without one",
+			"process_id", p.ID, "name", p.Name, "kind", p.Probe.Kind)
+		r.buf.note("supervisor: the recorded readiness probe (" + p.Probe.Kind +
+			") could not be rebuilt by this agent and has been dropped; this process is no longer probed")
+	}
+
 	previous := parseState(p.State)
 
 	// A process that survived the last agent is a process running on this host

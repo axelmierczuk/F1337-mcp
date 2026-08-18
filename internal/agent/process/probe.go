@@ -33,6 +33,14 @@ import (
 //     turns a 30-second readiness budget into an indefinite one, and the
 //     StartProcess call the model is waiting on never returns.
 
+// probeIntervalFloor is the retry interval a probe falls back to when the one
+// it was handed is not a positive duration.
+//
+// It matches the agent's own default (supervisorConfig.probeInterval), because
+// the case it covers is a probe whose interval was never chosen by anybody: a
+// record hand-edited or corrupted into naming no interval at all.
+const probeIntervalFloor = 250 * time.Millisecond
+
 type probeKind int
 
 const (
@@ -291,7 +299,20 @@ func (p *probeSpec) run(ctx context.Context, r *record, fromSeq uint64, httpTime
 
 	timeout := time.NewTimer(p.timeout)
 	defer timeout.Stop()
-	ticker := time.NewTicker(p.interval)
+	// The floor is applied here, at the one call that panics on a bad value,
+	// rather than only where the value is chosen. Both constructors already
+	// refuse a non-positive interval — probeFromProto for a request, and
+	// probeFromPersisted for a record read off disk — so this is unreachable
+	// from either, and that is exactly why it is here: this goroutine runs on
+	// the startup path for every re-adopted process, and a panic on it takes
+	// the daemon down, after which the service manager restarts it, it re-reads
+	// the same record and it goes down again. Every other consequence of a bad
+	// interval is recoverable by an operator; this one is not.
+	interval := p.interval
+	if interval <= 0 {
+		interval = probeIntervalFloor
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
