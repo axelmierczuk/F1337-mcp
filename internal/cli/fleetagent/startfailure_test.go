@@ -274,6 +274,27 @@ func TestServiceStatus_SaysWhyTheLastStartFailed(t *testing.T) {
 	assert.Contains(t, text, "service start", "and what to run once it is fixed")
 }
 
+// A record that is there and cannot be read is not "no failure".
+//
+// The same rule readLiveRuntimeReport draws, and for the same reason: silence
+// about a file that exists is how a command tells an operator everything is fine
+// while being unable to ask the question. On Linux this is the ordinary case —
+// `install` gives the state directory to the service account at 0750 — and the
+// answer has to be the reason, not a clean bill of health.
+func TestServiceStatus_SaysWhenItCannotReadTheFailedStartRecord(t *testing.T) {
+	stateDir := pinAgentConfig(t)
+	defer fleetagent.PinInstalledForTest([]fleetagent.Mechanism{fleetagent.MechanismService}, false)()
+
+	require.NoError(t, os.WriteFile(fleetagent.StartFailurePathForTest(stateDir), []byte("{not json"), 0o644))
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{"service", "status"}, out)
+	text := out.String()
+	require.Equal(t, 0, code, "%s", text)
+	assert.Contains(t, text, "could not read the record a failed start leaves behind",
+		"a record status cannot read has to be reported as that, not as an agent with nothing wrong")
+}
+
 // The notes themselves, which is where the wording is pinned.
 func TestStartFailureNotes(t *testing.T) {
 	assert.Empty(t, fleetagent.StartFailureNotesForTest(nil),
