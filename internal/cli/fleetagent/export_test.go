@@ -202,6 +202,18 @@ func (a aclForTest) GrantEnrollment(account, dir string, files []string) error {
 	return a.acl.grantEnrollment(account, dir, files)
 }
 
+// ExecutableAccessOutcomeForTest exposes what `install` says about a binary the
+// service account cannot read, and whether saying it ends the command, with the
+// platform and the dry run supplied rather than read.
+//
+// The dry-run half of it was reachable from no runner: the check is fatal only
+// on Windows, and a Windows runner had never driven `install --dry-run` against
+// a binary inside a profile — so a dry run returning the refusal instead of the
+// plan was invisible everywhere.
+func ExecutableAccessOutcomeForTest(goos string, dryRun bool) (headline string, refuse bool) {
+	return executableAccessOutcome(goos, dryRun)
+}
+
 // ExecutableAccessIsFatalForTest exposes the rule that decides whether a binary
 // the service account cannot reach stops the install or only warns about it.
 func ExecutableAccessIsFatalForTest(goos string) bool { return executableAccessIsFatal(goos) }

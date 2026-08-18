@@ -399,12 +399,88 @@ func TestServiceInstall_DryRunSaysWhenTheAccountDoesNotExist(t *testing.T) {
 	text := out.String()
 
 	require.Equal(t, 0, code, "a dry run still changes nothing: %s", text)
+	// The plan, first. On Windows this account is not the only thing wrong with
+	// the command — the test binary is inside somebody's profile, which is the
+	// refusal `install` exists to make — and until the fix that refusal came
+	// back instead of everything below it.
+	assert.Contains(t, text, "mechanism:")
+	assert.Contains(t, text, "runs as:")
 	assert.Contains(t, text, "fleet-agent-no-such-account")
 	if runtime.GOOS == "linux" {
 		assert.Contains(t, text, "would create the system account")
 		return
 	}
-	assert.Contains(t, text, "will refuse")
+	assert.Contains(t, text, "fleet-agent-no-such-account does not exist on this host")
+}
+
+// The rule the dry run turns on: what `install` says about a binary the service
+// account cannot read, and whether saying it ends the command.
+//
+// Windows refuses and Unix warns — that half is executableAccessIsFatal's and
+// is asserted in acl_test.go. The half that was missing is that a dry run is
+// not an install: it registers nothing, so there is nothing for it to refuse.
+func TestExecutableAccessOutcome(t *testing.T) {
+	headline, refuse := fleetagent.ExecutableAccessOutcomeForTest("windows", false)
+	assert.True(t, refuse, "a real install on Windows refuses: the account provably cannot read the path")
+	assert.Contains(t, headline, "refusing to install")
+
+	headline, refuse = fleetagent.ExecutableAccessOutcomeForTest("windows", true)
+	assert.False(t, refuse,
+		"a dry run registers nothing, so a refusal here withholds the plan instead of preventing anything")
+	assert.Contains(t, headline, "would refuse")
+	assert.Contains(t, headline, "register nothing")
+
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, dry := range []bool{false, true} {
+			headline, refuse = fleetagent.ExecutableAccessOutcomeForTest(goos, dry)
+			assert.False(t, refuse, "%s dry=%v: a supplementary group can grant what the mode bits appear to deny", goos, dry)
+			assert.Equal(t, "WARNING:", headline, "%s dry=%v", goos, dry)
+		}
+	}
+}
+
+// And the command reports it, on the platform where it refuses.
+//
+// `install --dry-run` is sold as the way to see which mechanism a host will
+// get, under which account, and whether the binary is somewhere that account
+// can read — before running the command that acts on it. The executable check
+// sat above the dry-run branch and is fatal on Windows, so the one platform
+// that refuses answered only the third of those, by failing: the operator got
+// the refusal and no mechanism, no account, no state directory. The Unix half
+// of the identical condition warned, printed the plan and exited zero, and had
+// been driven from the command since round 1; only the fatal half was reachable
+// by nobody, and it disagreed.
+func TestServiceInstall_DryRunReportsABinaryTheAccountCannotRead(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Unix warns rather than refusing; that half is driven from the command in confine_test.go")
+	}
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	// A profile root one level above the directory this binary is in, so the
+	// binary is inside "somebody's profile" as far as the rule is concerned.
+	t.Setenv("USERPROFILE", filepath.Join(filepath.Dir(filepath.Dir(exe)), "someone-else"))
+
+	configPath, stateDir, _ := installConfig(t, "")
+	_, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	code := fleetagent.Main([]string{
+		"service", "install", "--dry-run", "--config", configPath,
+		"--user", `NT AUTHORITY\NetworkService`,
+	}, out)
+	text := out.String()
+
+	require.Equal(t, 0, code, "a dry run registers nothing, so it has nothing to refuse: %s", text)
+	assert.Contains(t, text, "would refuse", "and it still has to say install will not do this")
+	assert.Contains(t, text, "error 5, access denied", "the string an operator will search for")
+	assert.Contains(t, text, "mechanism:",
+		"the plan is what a dry run is for, and it is what the refusal was returned instead of")
+	assert.Contains(t, text, `NT AUTHORITY\NetworkService`)
+	assert.Contains(t, text, stateDir, "including the directories install would create")
 }
 
 // The config directory install leaves alone, and the command that makes it

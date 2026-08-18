@@ -1164,6 +1164,35 @@ func TestServiceStatus_NamesTheToolchainsItCannotReach(t *testing.T) {
 	assert.NotContains(t, text, "pid:        unavailable")
 }
 
+// keptStateDir is the directory the "left in place:" block names, read back as
+// a path rather than as a string.
+//
+// As a string it is not the same question. state_dir is echoed from the config
+// exactly as it was written there — agent.Load only joins a *relative* path, so
+// an absolute one keeps whatever separators the operator used — and
+// pinAgentConfig writes it with filepath.ToSlash. On Windows that makes the
+// printed line `C:/.../state` where the directory this test made is
+// `C:\...\state`: the same directory, spelled the way the config spells it,
+// which is the right thing for `uninstall` to print because it is what the
+// operator can match against their own file.
+//
+// So comparing the two as strings was asking about a spelling. It passed on
+// Linux and macOS only because filepath.ToSlash is the identity there, which
+// made an assertion about the wrong thing indistinguishable from one about the
+// right thing on two runners out of three. What the line has to name is a
+// directory, and that is what this compares.
+func keptStateDir(t *testing.T, text string) string {
+	t.Helper()
+	const suffix = " (supervised process state)"
+	for _, line := range strings.Split(text, "\n") {
+		if named, ok := strings.CutSuffix(strings.TrimSpace(line), suffix); ok {
+			return filepath.Clean(named)
+		}
+	}
+	t.Fatalf("no line naming the process state directory in:\n%s", text)
+	return ""
+}
+
 // `uninstall` on a host carrying both registrations removes both — including
 // when the first one refuses.
 //
@@ -1214,7 +1243,7 @@ func TestServiceUninstall_KeepsTheEnrollmentAndProcessState(t *testing.T) {
 	require.Equal(t, 0, code, "%s", text)
 	assert.Equal(t, []string{"service:stop", "service:uninstall", "task:stop", "task:uninstall"}, calls())
 	assert.Contains(t, text, "left in place:")
-	assert.Contains(t, text, stateDir+" (supervised process state)",
+	assert.Equal(t, filepath.Clean(stateDir), keptStateDir(t, text),
 		"the state directory this host actually uses, not the default it does not")
 	assert.Contains(t, text, os.Getenv("FLEET_AGENT_CONFIG"),
 		"and the config, whose certificate and key are the reason re-installing rejoins without enrolling again")

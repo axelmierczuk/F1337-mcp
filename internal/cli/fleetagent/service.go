@@ -186,10 +186,11 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 	// is present to explain.
 	if problem := executableAccessProblem(params.Executable, params.User); problem != "" {
 		advice := executableAccessAdvice(problem, params.Executable, params.User, runtime.GOOS)
-		if executableAccessIsFatal(runtime.GOOS) {
-			return fmt.Errorf("refusing to install a service that cannot start: %s", advice)
+		headline, refuse := executableAccessOutcome(runtime.GOOS, opts.dryRun)
+		if refuse {
+			return fmt.Errorf("%s %s", headline, advice)
 		}
-		p.Printf("WARNING: %s\n", advice)
+		p.Printf("%s %s\n", headline, advice)
 	}
 
 	if opts.dryRun {
@@ -391,6 +392,46 @@ func dryRunNotes(m Mechanism, goos, account string) []string {
 		return nil
 	}
 	return []string{fmt.Sprintf("  install would prompt for %s's password and hand it to the SCM.", account)}
+}
+
+// executableAccessOutcome is what `install` says about a binary the service
+// account will not be able to read, and whether saying it ends the command.
+//
+// executableAccessIsFatal answers the platform half: Windows refuses, because a
+// path inside somebody else's profile is one the account provably cannot read,
+// and Unix warns, because a supplementary group can grant what the mode bits
+// appear to deny. What it does not answer is whether this command is an install
+// at all — and the check sits above the dry-run branch, so on the one platform
+// that refuses, `install --dry-run` returned the refusal and printed nothing
+// else: no mechanism, no account, no state directory, no log directory.
+//
+// That is the opposite of what a dry run is for. docs/service.md sells it as
+// the way to see "which mechanism a host will get, under which account, and
+// whether the binary is somewhere that account can read — before running the
+// command that acts on it"; answering only the third, by failing, withholds the
+// two an operator has no other way to get. The line is: a dry run fails when it
+// cannot produce a plan — `--mechanism task` under a built-in identity has no
+// plan to print — and reports, in the plan, one that install would refuse to
+// act on. This is the second kind.
+//
+// The Unix half was already right and already driven from the command: it
+// warns, prints the plan, and exits zero for the identical condition. Only the
+// fatal half was reachable by nobody, and it disagreed. A dry run exits zero
+// here for the same reason it does there, and because the two platforms
+// disagreeing about the same condition is the shape this branch keeps finding.
+//
+// goos and dryRun are parameters for the reason resolveMechanism's goos is: the
+// rule decides what an operator is told and whether their command stops, and a
+// rule only one runner can reach is a rule only that runner checks.
+func executableAccessOutcome(goos string, dryRun bool) (headline string, refuse bool) {
+	switch {
+	case !executableAccessIsFatal(goos):
+		return "WARNING:", false
+	case dryRun:
+		return "dry run: install would refuse this and register nothing:", false
+	default:
+		return "refusing to install a service that cannot start:", true
+	}
 }
 
 // foreignConfigDirNote is what an operator is told when the directory holding

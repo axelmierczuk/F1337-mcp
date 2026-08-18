@@ -22,6 +22,12 @@ account and says it will, and everywhere else a missing account is what the
 real `install` refuses on, so a plan that did not mention it was a plan that
 could not be carried out.
 
+**A dry run reports what `install` would refuse; it does not refuse.** It
+registers nothing, so there is nothing for a refusal to prevent, and returning
+one instead of the plan withholds the two answers an operator has no other way
+to get. It fails only when it cannot produce a plan at all — `--mechanism task`
+under a built-in service identity has no plan to print.
+
 ## Windows has two mechanisms, and the difference decides whether it works
 
 **Every Windows service runs in session 0**, which has been isolated from every
@@ -175,6 +181,8 @@ denied**, before a line of agent code ran.
 
 `install` knows the path it is about to register and the account it is about to
 register it for, so it refuses, names both, and prints the copy that fixes it.
+`--dry-run` prints the same thing as part of the plan and exits zero, because a
+dry run registers nothing and has nothing to refuse.
 Installing from your own Desktop to run as yourself — which is what the Windows
 default now is — is fine and is not refused. On Linux and macOS the same check
 runs against the mode bits and **warns** rather than refusing, because a
