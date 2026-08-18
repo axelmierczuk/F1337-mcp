@@ -258,6 +258,21 @@ func TestAgentRefusesToServeUnauthenticatedOnAPublicAddress(t *testing.T) {
 		t.Fatalf("something is listening on %s after the daemon refused to serve", wildcard)
 	}
 
+	// And the same refusal when the wildcard arrives on the command line rather
+	// than in the file. `--listen 0.0.0.0:8722` on a config that is otherwise
+	// fine is the shape #85 names: the override is applied before the check,
+	// and a check that ran on the file alone would let it straight through.
+	loopback := f.writePlaintextAgent(t, "flagged-box", fmt.Sprintf("127.0.0.1:%d", freePort(t)))
+	overridden := append(append([]string{}, loopback.args...), "--listen", fmt.Sprintf("0.0.0.0:%d", freePort(t)))
+	viaFlag := start(t, "fleet-agent flagged-box", bins.agent, overridden, procOptions{env: loopback.env, dir: loopback.home})
+	viaFlag.awaitExit(t, 30*time.Second)
+	if viaFlag.waitErr == nil {
+		t.Fatalf("`serve --listen 0.0.0.0:...` started with no mTLS:\n%s", viaFlag.stderr())
+	}
+	if !contains(viaFlag.stderr(), "refusing to serve without mTLS") {
+		t.Fatalf("the refusal did not name its reason:\n%s", viaFlag.stderr())
+	}
+
 	// The same configuration, plus the flag that authorises it, must serve —
 	// which is what stops the refusal above from being a daemon that cannot
 	// start at all, or a wildcard address the daemon simply cannot bind.
