@@ -87,6 +87,7 @@ func NewRootCommand(out io.Writer) *cobra.Command {
 		newListCommand(out),
 		newInfoCommand(out),
 		newRemoveCommand(out),
+		newSocksCommand(out),
 		newVersionCommand(out),
 	)
 	return root

@@ -40,6 +40,7 @@ var allToolNames = []string{
 	"fleet_read",
 	"fleet_remove",
 	"fleet_select",
+	"fleet_socks",
 	"fleet_transfer",
 	"fleet_write",
 }

@@ -31,10 +31,18 @@ it, and the one file in it that exists purely for Windows was checked by nothing
 
 ## What it needs
 
-A Go toolchain and a loopback interface. No Docker, no root, no network, no
-`sudo`, nothing installed on the machine beyond the toolchain: the workloads
-the scenarios run on a sandbox are built from `testdata/helpers` at startup
-rather than borrowed from whatever `python3` happens to be present.
+A Go toolchain, a loopback interface, and `curl`. No Docker, no root, no
+network, no `sudo`: the workloads the scenarios run on a sandbox are built from
+`testdata/helpers` at startup rather than borrowed from whatever `python3`
+happens to be present.
+
+`curl` is the one exception to "nothing installed beyond the toolchain", and it
+is deliberate. The SOCKS proxy's acceptance criterion is written in terms of
+`curl --socks5-hostname`, and a Go SOCKS client agreeing with a Go SOCKS server
+proves considerably less than the client the criterion names. The scenarios that
+use it **fail rather than skip** when it is absent, because a skip would report
+success for a run that proved nothing. It ships on both platforms this suite
+supports and on both CI runners it runs on.
 
 It takes about twenty seconds.
 
@@ -52,6 +60,10 @@ Everything except one scenario.
 | `TestSelectionSurvivesAServerRestart` | The sticky default is persisted, not held in memory. |
 | `TestDevServerReadinessForwardAndFetch` | The whole remote dev loop: readiness probe, port forward, HTTP GET over `localhost`. |
 | `TestForwardRefusesAPortNothingIsServing` | A forward to a dead port is refused by the sandbox rather than opening a local listener that resets every connection. |
+| `TestSocksProxyCarriesCurlThroughTheSandbox` | `fleetctl socks` + real `curl --socks5-hostname`: a fetch by a name the agent resolved, the audit record proving it crossed the wire unresolved, a destination outside `allowed_hosts` refused and recorded, and the listener unreachable from another machine. |
+| `TestSocksIsRefusedByAnAgentThatDidNotOptIn` | Proxying is off until an operator turns it on, and the refusal names `forward.socks_enabled`. |
+| `TestFleetSocksRefusesAnUnrestrictedAgent` | The same agent configuration that `fleetctl socks` serves, `fleet_socks` refuses — and the narrowed agent serves both. |
+| `TestSocksProxyIsReleasedWithItsSandbox` | Deregistering a sandbox closes the proxy reaching through it, with the MCP server still running. |
 | `TestProcessRestartKeepsItsIdentityAndComesBackReady` | A restart keeps the process id, passes its log-pattern probe again, serves again, keeps both runs' logs, and leaves the restart policy's budget alone. |
 | `TestALogPatternProbeWatchesTheRunItIsProbing` | A restarted run that never prints the pattern is reported as not ready, rather than matching the previous run's announcement out of the retained log (#57). |
 | `TestAReadoptedProcessIsReadyOnTheAnnouncementItAlreadyMade` | The other side of the same rule: a process re-adopted while it was still being probed is ready on the announcement it made to the agent that is gone, read out of the retained log rather than waited for again. |
@@ -121,3 +133,16 @@ body runs the pattern has already decided which bodies there are.
   forked it. A hostname would prove nothing when both daemons share one.
 - **Real network conditions.** Everything is loopback: no latency, no packet
   loss, no severed connection mid-stream.
+- **A host only the sandbox can see.** One machine, so the SOCKS scenarios
+  cannot produce one. What they assert instead is the property that difference
+  turns on: *where the destination name is resolved*. A proxy that resolved on
+  the client would send an address in its CONNECT request, and the agent's audit
+  record — written on the far side of a gRPC stream — would say `127.0.0.1`
+  where the scenario requires `localhost`. Reverting the proxy to resolve
+  locally turns it red.
+- **A listener released by process exit.** "The MCP server or CLI exiting
+  releases every listener" cannot fail here: a process that exits releases its
+  listeners whether or not any code asked it to. `TestSocksProxyIsReleasedWithItsSandbox`
+  asserts the half this suite can break — a listener released while the server
+  keeps running — and `TestSocks_ServerCloseReleasesEveryListener` in
+  `internal/mcpserver` pins the teardown itself, in-process, before the exit.

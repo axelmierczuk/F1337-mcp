@@ -121,7 +121,7 @@ Streaming is used where buffering would be wrong, not everywhere:
 | `FileService.WriteFile` | client stream | Same, in reverse. Written to a temp file and renamed, so a failed transfer cannot leave a truncated file. |
 | `FileService.Grep` | server stream | Results before the walk finishes. |
 | `ProcessService.GetProcessLogs` | server stream | Replay buffered output, then follow new output to a bounded deadline. |
-| `ForwardService.Forward` | bidirectional | One stream per forwarded TCP connection. |
+| `ForwardService.Forward` | bidirectional | One stream per carried TCP connection — a port forward's and a SOCKS proxy's alike. A proxy marks its connections with `ForwardOpen.socks`, which selects which of the agent's two policies applies; it needs no RPC of its own, and a second byte-pump would be a second place to leak a goroutine per connection. |
 
 Everything else is unary.
 
