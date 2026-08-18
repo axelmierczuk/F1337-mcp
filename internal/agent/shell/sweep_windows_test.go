@@ -27,9 +27,8 @@ import (
 // id; here, for the tree the job object still holds. See the Unix file, which
 // is the same fixture with the opposite expectation.
 func TestKillGroup_StillSignalsAfterTheWaitHasCollectedTheLeader(t *testing.T) {
-	_, collected, _ := sessionCommand(t, "exit", "0")
-	group, _, _ := sessionCommand(t, "exit", "0")
-	wait := startLeaderWait(collected, group, testLogger(&syncBuffer{}))
+	group, cmd, _ := sessionCommand(t, "exit", "0")
+	wait := startLeaderWait(cmd, group, testLogger(&syncBuffer{}))
 	require.NoError(t, <-wait.waited)
 
 	aimedAt, live, _ := sessionCommand(t, "sleep")
