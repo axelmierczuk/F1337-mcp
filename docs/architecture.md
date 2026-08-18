@@ -246,6 +246,18 @@ while it was still being probed has its readiness probe resumed, because
 otherwise nothing would ever decide it: the probe was running in an agent that
 no longer exists.
 
+**Where the capture resumes.** A re-adopted process's logs pick up where the
+previous agent stopped reading, at a byte offset the record carries. That offset
+is the one piece of per-run state that changes continuously while nothing else
+about the process changes at all, so it is written back on a cadence rather than
+only when the process changes state. A stop rewrites the record on the way out
+and so hides the difference; after a *killed* agent the next one would resume
+from the position recorded when the process started, and replay a history that
+opens with a duplicate of itself, at the moment an operator is least able to
+afford distrusting the log (#71). The cadence bounds that duplication to what
+the process wrote in the last few seconds, and a process that is producing no
+output is not written at all.
+
 **Readiness is per run, not per process.** A `log_pattern` probe scans the lines
 already buffered before it starts following new ones — a process that announces
 itself before the probe is set up would otherwise never be seen. The buffer

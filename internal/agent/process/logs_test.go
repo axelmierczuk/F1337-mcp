@@ -28,14 +28,26 @@ func TestStreamsAreDistinguishableAndOrdered(t *testing.T) {
 	t.Parallel()
 	ts := newTestSupervisor(t)
 
-	// 250ms between writes. stdout and stderr are separate files followed by
-	// separate goroutines, so the agent's read order reproduces the process's
-	// write order only for writes further apart than a poll interval — 20ms at
-	// most here. Two writes microseconds apart on different streams can be read
-	// in either order, and no capture that tags streams separately can do
-	// better without the process cooperating.
-	r := ts.startHelper("two-streams", "streams", "250", "2")
-	waitForLine(t, r, 20*time.Second, "err 1")
+	// stdout and stderr are separate files followed by separate goroutines, so
+	// the agent's read order reproduces the process's write order only for a
+	// write it had already read before the next one happened. Two writes
+	// microseconds apart on different streams can be read in either order, and
+	// no capture that tags streams separately can do better without the process
+	// cooperating.
+	//
+	// So the process cooperates. It waits for this test's go-ahead before every
+	// write after the first, and this test gives it only once it has seen the
+	// previous line arrive — which is what makes the separation below a fact
+	// rather than a bet. The previous version left a 250ms gap and took that as
+	// separation; on a loaded runner it is not one, and that is #80.
+	prefix := filepath.Join(t.TempDir(), "step-")
+	r := ts.startHelper("two-streams", "streams", prefix, "2")
+	for step, line := range []string{"out 0", "err 0", "out 1", "err 1"} {
+		if step > 0 {
+			writeMarker(t, stepMarker(prefix, step), "go")
+		}
+		waitForLine(t, r, 20*time.Second, line)
+	}
 
 	stream := &recordingStream{}
 	require.NoError(t, ts.streamLogs(context.Background(), r, logRequest{sel: selector{tail: 100}}, stream))
@@ -59,7 +71,8 @@ func TestStreamsAreDistinguishableAndOrdered(t *testing.T) {
 	require.Equal(t, []string{"out 0", "out 1"}, stdout)
 	require.Equal(t, []string{"err 0", "err 1"}, stderr)
 
-	// Across streams, with the writes well separated, read order is write order.
+	// And across streams: each of these writes happened after the agent had
+	// read the one before it, so this is the order the agent must report.
 	require.Equal(t, []string{"out:out 0", "err:err 0", "out:out 1", "err:err 1"}, got)
 
 	// And a stream filter returns exactly one of them.
@@ -110,23 +123,44 @@ func TestFileRotationPrunesOldSegments(t *testing.T) {
 	// rotations, which proves the rotation and the pruning as well as three
 	// thousand did and costs a third of the time on a runner that is already
 	// running every other package's tests.
-	spec := ts.helperSpec("rotating", "echo", "1000", "0", "rotate-me-with-some-padding-to-make-the-record-larger")
+	//
+	// The helper stays up after its last line rather than exiting, and that is
+	// the fix for #80's second flake rather than a detail of it. The tailers
+	// are bounded once a process has been reaped — drain_window, so that a
+	// grandchild which inherited the capture file cannot hold the exit open —
+	// so on a runner that leaves a tailer unscheduled past that window, output
+	// the process had already written is never read at all. Waiting sixty
+	// seconds for line 999 after the exit is then waiting for something that
+	// can no longer happen: the budget is not a failsafe, it *is* the
+	// assertion, and it fails by timing out. With the process still running
+	// there is no drain, the wait is for the line to arrive, and the sixty
+	// seconds is a failsafe against a genuine hang again.
+	spec := ts.helperSpec("rotating", "echo", "1000", "0",
+		"rotate-me-with-some-padding-to-make-the-record-larger", staysUp)
 	spec.maxLogBytes = 16 * 1024
 	r, err := ts.start(spec, false)
 	require.NoError(t, err)
 
-	waitState(t, r, 60*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
-	// Three thousand lines through the tailer, the rotation and the ring, on a
-	// runner already running every other package's tests. The budget is how
-	// long the assertion is willing to wait, not what it asserts.
 	waitForLine(t, r, 60*time.Second, "rotate-me-with-some-padding-to-make-the-record-larger 999")
 
+	// Every rotation this process will ever cause has happened by now, and that
+	// is a consequence of where rotation is done rather than of any wait:
+	// rotatingFile.write rotates before the write that would pass the cap, on
+	// the same goroutine, so the line above cannot be in the buffer while a
+	// rotation it caused is still outstanding.
 	segments := r.buf.segments()
 	require.Greater(t, len(segments), 1, "the log should have rotated at its cap")
-	require.LessOrEqual(t, len(segments), 3, "retain=2 plus the live segment")
 
-	// Nothing older than the retention is left behind.
-	require.NoFileExists(t, segments[len(segments)-1]+".3")
+	// Retention is asserted against the directory, not against segments().
+	// That function counts down from retain and so returns at most retain+1
+	// paths however many files rotation actually left behind — comparing its
+	// length to retain+1 compares it to itself, and holds whatever is on disk.
+	// What retention means is that the older files are gone.
+	live := segments[len(segments)-1]
+	rotated, err := filepath.Glob(live + ".*")
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(rotated), 2, "retain=2, and these are the files on disk: %v", rotated)
+	require.NoFileExists(t, live+".3")
 }
 
 // TestBackpressureOnAMillionLines is the assertion that a chatty process cannot
@@ -309,11 +343,30 @@ func TestTailSinceAndFilterCompose(t *testing.T) {
 	t.Parallel()
 	ts := newTestSupervisor(t)
 
-	// 40ms between lines: wide enough that the agent's read timestamps are not
-	// all the same on a host whose clock ticks every 15ms.
-	r := ts.startHelper("composing", "echo", "20", "40", "item")
-	waitState(t, r, 20*time.Second, sandboxdv1.ProcessState_PROCESS_STATE_EXITED)
-	waitForLine(t, r, 5*time.Second, "item 19")
+	// since is inclusive, so proving it excludes anything needs a line the agent
+	// read strictly before the pivot. Timestamps are the agent's read times and
+	// every line of a batch read in one go carries the same instant, so 40ms
+	// between the writes was a bet that the agent would read them in more than
+	// one batch — a bet a runner that can starve a tailer for a second loses,
+	// which is #80.
+	//
+	// Two recorded facts replace it. The helper prints the first ten lines and
+	// then waits, so this test can see those ten arrive before releasing the
+	// rest: the two batches were therefore read by two different reads. And it
+	// waits for the clock to pass the instant those ten carry before releasing
+	// them — the agent stamps each read with time.Now, so once now is past that
+	// instant every later read is stamped strictly after it, at any clock
+	// resolution.
+	marker := filepath.Join(t.TempDir(), "second-batch")
+	r := ts.startHelper("composing", "echo-batch", marker, "10", "20", "item")
+	waitForLine(t, r, 20*time.Second, "item 9")
+
+	firstBatch := newestReadAt(r.buf.ringLines())
+	waitFor(t, 20*time.Second, "the clock to pass the first batch's read time", func() bool {
+		return time.Now().After(firstBatch)
+	})
+	writeMarker(t, marker, "go")
+	waitForLine(t, r, 20*time.Second, "item 19")
 
 	all := r.buf.ringLines()
 	require.GreaterOrEqual(t, len(all), 20)
@@ -333,12 +386,13 @@ func TestTailSinceAndFilterCompose(t *testing.T) {
 	})
 
 	t.Run("since", func(t *testing.T) {
-		// Timestamps are the agent's read times, and a batch of lines read in
-		// one go shares one. On a host with a coarse clock several consecutive
-		// lines therefore carry the same instant, and since is inclusive — so
-		// "everything at or after item 10's timestamp" legitimately includes
-		// the lines that were read alongside it. Asserting that a particular
-		// neighbour is absent asserts the clock's resolution, not the filter.
+		// item 10 opens the second batch, so every line before it was read
+		// strictly earlier — established by the handshake above rather than
+		// inferred from the gaps between the writes. Without that, a batch read
+		// in one go shares one instant, since is inclusive, and "everything at
+		// or after item 10's timestamp" legitimately includes the lines read
+		// alongside it: the assertion would be about the clock's resolution
+		// rather than about the filter.
 		var pivot time.Time
 		for _, line := range all {
 			if line.Text == "item 10" {
@@ -355,7 +409,8 @@ func TestTailSinceAndFilterCompose(t *testing.T) {
 				older = line
 			}
 		}
-		require.NotEmpty(t, older.Text, "no line was read before item 10; the helper's gaps are too small")
+		require.NotEmpty(t, older.Text,
+			"no line was read before item 10, so the two batches were read as one and this subtest would prove nothing")
 
 		stream := &recordingStream{}
 		require.NoError(t, ts.streamLogs(context.Background(), r, logRequest{
@@ -384,6 +439,19 @@ func TestTailSinceAndFilterCompose(t *testing.T) {
 		}, stream))
 		require.Equal(t, []string{"item 18", "item 19"}, stream.texts())
 	})
+}
+
+// newestReadAt is the most recent instant the agent stamped any of these lines
+// with. Everything read after it carries a strictly later one, which is what
+// lets a test establish a since pivot without assuming a clock resolution.
+func newestReadAt(lines []logLine) time.Time {
+	var newest time.Time
+	for _, line := range lines {
+		if line.At.After(newest) {
+			newest = line.At
+		}
+	}
+	return newest
 }
 
 // TestLongLinesAreSplitNotDropped: a process emitting a minified bundle on one

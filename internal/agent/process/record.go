@@ -120,6 +120,12 @@ type record struct {
 	// log lines. Persisted so a re-adopting agent resumes rather than replays.
 	captureOffsets [2]int64
 
+	// persistedOffsets is what the last successful write of this record put in
+	// its capture_offsets. It is what makes the cadence in
+	// Supervisor.persistCaptureOffsets cheap: a process that is not producing
+	// output has nothing to write down, and does not pay for the tick.
+	persistedOffsets [2]int64
+
 	// removed is set by RemoveProcess before the record's directory is deleted,
 	// so a transition still in flight cannot write the record back into a
 	// directory that is being removed.
@@ -296,10 +302,36 @@ func (r *record) persist() {
 	if removed {
 		return
 	}
-	if err := r.sup.store.save(r.snapshotPersisted()); err != nil {
+	p := r.snapshotPersisted()
+	if err := r.sup.store.save(p); err != nil {
 		r.sup.log.Error("could not persist process record",
 			"process_id", r.id, "name", r.name, "error", err)
+		return
 	}
+	// What the offset cadence compares against, recorded after the write rather
+	// than before it: a write that failed has not put these offsets anywhere,
+	// and remembering it as though it had would have the next tick skip the
+	// retry.
+	r.mu.Lock()
+	r.persistedOffsets = p.CaptureOffsets
+	r.mu.Unlock()
+}
+
+// persistMovedOffsets rewrites the record when its tailers have read past what
+// the last write of it recorded. It is the per-record half of
+// Supervisor.persistCaptureOffsets.
+//
+// Only while the run has a live capture. A record whose capture is gone has
+// nothing left to move, and its final offsets were written by the transition
+// that ended the run.
+func (r *record) persistMovedOffsets() {
+	r.mu.Lock()
+	moved := r.cap != nil && r.currentOffsetsLocked() != r.persistedOffsets
+	r.mu.Unlock()
+	if !moved {
+		return
+	}
+	r.persist()
 }
 
 // status projects the record onto the wire type.
