@@ -33,6 +33,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
@@ -93,6 +94,15 @@ func (t *Target) Name() string { return t.Sandbox.Name }
 
 // Address returns the resolved sandbox's host:port.
 func (t *Target) Address() string { return t.Sandbox.Address }
+
+// Client is this target as internal/client dials it — name, address, and
+// whether this fleet authenticates the connection.
+//
+// One conversion rather than a pair of accessors passed to every call, because
+// the posture has to travel with the address it applies to: a handler that
+// assembled the two by hand would dial the right host with the wrong
+// credentials the day a sandbox's posture changed. See [client.Target].
+func (t *Target) Client() client.Target { return client.TargetFor(t.Sandbox) }
 
 // Call returns an mcperr.Call pre-filled with this target, so a handler can
 // map a gRPC failure without restating which host it was talking to:

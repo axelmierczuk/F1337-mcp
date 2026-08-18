@@ -316,7 +316,7 @@ func (p UnitParams) ServiceConfigWithPassword(password string) *service.Config {
 	cfg := &service.Config{
 		Name:        ServiceName,
 		DisplayName: "fleet agent",
-		Description: "Runs commands and serves files for a fleet over mTLS gRPC.",
+		Description: "Runs commands and serves files for a fleet over gRPC.",
 		Executable:  p.Executable,
 		Arguments:   p.Arguments(),
 		UserName:    p.User,
@@ -420,7 +420,7 @@ func (p UnitParams) ScheduledTaskXML() string {
 	b.WriteString(`<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` + "\r\n")
 
 	b.WriteString("  <RegistrationInfo>\r\n")
-	b.WriteString("    <Description>Runs commands and serves files for a fleet over mTLS gRPC.</Description>\r\n")
+	b.WriteString("    <Description>Runs commands and serves files for a fleet over gRPC.</Description>\r\n")
 	b.WriteString("    <URI>" + escapeXML(TaskPath) + "</URI>\r\n")
 	b.WriteString("  </RegistrationInfo>\r\n")
 

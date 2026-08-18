@@ -16,11 +16,34 @@ listen: "0.0.0.0:8722"
 # Identity issued during enrollment. The private key is generated on this host
 # and never leaves it.
 tls:
+  # Mutual TLS: both ends present a certificate issued by the fleet CA, and
+  # this is the whole of the agent's own authentication.
+  #
+  # Unset means "on if the paths below are set", so a config `fleet-agent
+  # enroll` wrote authenticates and one hand-written for a trusted network does
+  # not. `enroll` writes it explicitly, and so does every save of this file.
+  #
+  # WITH IT FALSE THIS AGENT AUTHENTICATES NOBODY. It serves plaintext: no
+  # client certificate is demanded, none is presented, and nothing is
+  # encrypted by this product. Whatever authenticates and encrypts the
+  # connection is the network — a Tailscale tailnet, a WireGuard mesh, a VPC
+  # with tight security groups — and if the network does not do that, then
+  # anyone who can reach this port can run commands on this host.
+  #
+  # So the daemon refuses to start with it false on a listen address that is
+  # neither loopback nor private, unless `serve` is given
+  # --allow-unauthenticated-public. It warns at every start either way, it
+  # shows as `auth none` in `fleetctl list` and `fleet_info`, and every audit
+  # record it writes names the address the call came from rather than a
+  # verified identity ("principal_source": "network"). See docs/security.md.
+  #
+  # The three paths below are required only when this is true.
+  enabled: true
   certificate: "/etc/fleet/agent.crt"
   private_key: "/etc/fleet/agent.key"
   ca_bundle: "/etc/fleet/ca.crt"
   # Client certificates must be issued by the CA above and carry this
-  # organisational unit. mTLS is mandatory; there is no plaintext mode.
+  # organisational unit. It is checked whenever mTLS is on.
   #
   # This one name still reads "sandboxd" after the fleet rebrand, and that is
   # deliberate: it is stamped into every certificate the CA has already issued

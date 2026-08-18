@@ -119,13 +119,13 @@ func newShellCommand(io.Writer) *cobra.Command {
 			// long as the operator holds the terminal, for hours of it. See
 			// oneShotHealthInterval; `fleetctl tui` is the one command on the
 			// other side of that.
-			pool, err := control.pool(oneShotHealthInterval)
+			pool, err := control.pool(oneShotHealthInterval, warnTo(cmd.ErrOrStderr()))
 			if err != nil {
 				return err
 			}
 			defer func() { _ = pool.Close() }()
 
-			shells, err := pool.Shell(target.Name(), target.Address())
+			shells, err := pool.Shell(target.Client())
 			if err != nil {
 				return err
 			}

@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc"
@@ -32,6 +33,26 @@ type Config struct {
 	// client certificate.
 	CertPEM []byte
 	KeyPEM  []byte
+
+	// CredentialErr is why this pool holds no mTLS material, for a caller that
+	// could not load it.
+	//
+	// A workstation whose fleet is entirely mTLS-free has no CA and no control
+	// leaf, and must still be able to dial: building the pool cannot be the
+	// thing that fails. So a missing credential is carried here instead of
+	// refused, and surfaces at the one moment it actually matters — a dial to a
+	// sandbox that expects a certificate — where the message can name the file
+	// and the command that creates it. See [Pool.Conn].
+	CredentialErr error
+
+	// Log is where the pool announces a connection this fleet does not
+	// authenticate. Nil is silent.
+	//
+	// Not decoration, and not optional in production: an unauthenticated dial
+	// is the client half of a posture whose whole failure mode is being held by
+	// accident, and a control plane that took one without saying so would be
+	// the only participant that never mentions it.
+	Log *slog.Logger
 
 	// MaxRecvMsgSize and MaxSendMsgSize bound a single gRPC message. Zero
 	// uses DefaultMaxMessageSize.
@@ -67,7 +88,26 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// hasCredentials reports whether any mTLS material was supplied at all. It is
+// the difference between "this pool cannot dial an mTLS sandbox" and "this
+// pool was handed half a credential", which are different errors.
+func (c Config) hasCredentials() bool {
+	return len(c.CACertPEM) > 0 || len(c.CertPEM) > 0 || len(c.KeyPEM) > 0
+}
+
+// buildTLSConfig assembles the mTLS configuration, or returns nil when no
+// credentials were supplied.
+//
+// A nil configuration is not an error here: a pool on a workstation whose whole
+// fleet runs without mTLS has nothing to load and every dial it makes is
+// insecure by the operator's decision. It becomes an error at the first dial to
+// a sandbox that is not marked insecure, which is where the missing file can be
+// named. Half a credential is refused either way — a CA with no leaf is a
+// misconfiguration, never a posture.
 func (c Config) buildTLSConfig() (*tls.Config, error) {
+	if !c.hasCredentials() {
+		return nil, nil
+	}
 	if len(c.CACertPEM) == 0 {
 		return nil, errors.New("client: CA certificate bundle is required")
 	}

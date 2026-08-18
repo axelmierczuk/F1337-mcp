@@ -1,4 +1,5 @@
-// Package client dials fleet-agent instances over mTLS gRPC, pooling
+// Package client dials fleet-agent instances over gRPC — mutually authenticated
+// unless a sandbox is registered as insecure — pooling
 // connections and tracking health so fleet_list can report status without a
 // round trip per call.
 //

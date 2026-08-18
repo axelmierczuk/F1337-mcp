@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/mcperr"
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/selection"
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
@@ -51,6 +52,15 @@ const enrollmentHint = "No sandboxes are registered. Enrolling one mints credent
 // read from the other end: "no roots" is silently indistinguishable from
 // "nowhere is writable", and a model that concludes the host is read-only will
 // not even try. So the absence is stated, not implied.
+// unauthenticatedNote is what fleet_info says about a sandbox this fleet does
+// not authenticate.
+//
+// Said in the result rather than left to the auth field, because a model reads
+// prose and acts on it: "auth: none" is a value it may not weigh, and "nothing
+// authenticated this connection" is a sentence it can pass on to the person who
+// needs to know.
+const unauthenticatedNote = "This sandbox is registered as insecure: the connection to it carries no client certificate and its agent verifies none, so nothing in this fleet authenticated either end. Whatever authenticates it is the network. Commands run here are recorded by the agent against the address they came from rather than a verified identity."
+
 const unconfinedNote = "This sandbox is unconfined: the agent reports no allowed roots, so every path its user can reach is readable and writable. Roots are enforced only on an agent with exec disabled — with exec enabled a command can write anywhere regardless, so the jail is not applied."
 
 // registerFleet adds the five fleet tools.
@@ -58,21 +68,21 @@ func registerFleet(r *Registrar) {
 	AddFleet(r, &mcp.Tool{
 		Name:        "fleet_list",
 		Title:       "List sandboxes",
-		Description: "List registered sandboxes with platform, health, labels and which one is selected. Health is cached unless refresh is set.",
+		Description: "List registered sandboxes with platform, health, labels, which one is selected, and what authenticates each connection (auth: mtls or none). Health is cached unless refresh is set.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, r.sandboxList)
 
 	AddFleet(r, &mcp.Tool{
 		Name:        "fleet_select",
 		Title:       "Select a sandbox",
-		Description: "Set the default sandbox for subsequent calls. Returns a handle plus the host's platform and the roots it allows writes under.",
+		Description: "Set the default sandbox for subsequent calls. Returns a handle, the host's platform, the roots it allows writes under, and what authenticates the connection (auth: mtls or none).",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
 	}, r.sandboxSelect)
 
 	AddFleet(r, &mcp.Tool{
 		Name:        "fleet_add",
 		Title:       "Register a sandbox",
-		Description: "Register an already-enrolled agent by name and address. Does not enroll: minting credentials is an operator action via fleetctl.",
+		Description: "Register an already-enrolled agent by name and address. Pass insecure for a host whose agent runs without mTLS. Does not enroll: minting credentials is an operator action via fleetctl.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
 	}, r.sandboxAdd)
 
@@ -86,7 +96,7 @@ func registerFleet(r *Registrar) {
 	AddTargeted(r, &mcp.Tool{
 		Name:        "fleet_info",
 		Title:       "Describe a sandbox",
-		Description: "Full detail for one sandbox: platform, resources, allowed roots, agent version and uptime. include_toolchains probes the filesystem and is measurably slower.",
+		Description: "Full detail for one sandbox: platform, resources, allowed roots, agent version, uptime, and what authenticates the connection (auth: mtls or none). include_toolchains probes the filesystem and is measurably slower.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, r.sandboxInfo)
 }
@@ -112,6 +122,16 @@ type SandboxLine struct {
 	Address string `json:"address"`
 	// Platform is "os/arch", absent until something has probed the host.
 	Platform string `json:"platform,omitempty"`
+	// Auth is what authenticates the connection to this sandbox: "mtls" when
+	// both ends present certificates issued by the fleet CA, "none" when this
+	// fleet authenticates neither end and whatever the network provides is the
+	// whole of it.
+	//
+	// Not omitempty, unlike almost everything else on this line. A missing
+	// field would read as "mtls" to anything that defaults, and the one value
+	// worth paying a few bytes a row for is the one that says nobody is
+	// authenticated.
+	Auth string `json:"auth"`
 	// Health is serving, degraded, draining, unreachable, or unknown.
 	Health string `json:"health"`
 	// Detail explains a health value that is not serving.
@@ -196,6 +216,7 @@ func (r *Registrar) sandboxList(ctx context.Context, req *mcp.CallToolRequest, i
 			// the last GetHostInfo, so they are bounded on the same terms as
 			// the detail column: no single row may run away with the listing.
 			Platform: compact(platformString(sb.Platform)),
+			Auth:     client.TargetFor(sb).AuthName(),
 			Health:   h.status,
 			Detail:   h.detail,
 			Agent:    compact(agent),
@@ -263,6 +284,14 @@ type SelectResult struct {
 	Unconfined bool `json:"unconfined,omitempty"`
 	// Health is the sandbox's status right now.
 	Health string `json:"health"`
+	// Auth is what authenticates the connection to this sandbox — "mtls" or
+	// "none". See [SandboxLine.Auth].
+	//
+	// Reported here as well as on fleet_list and fleet_info because this is the
+	// call that decides where every later one lands: a model that has just
+	// pointed itself at a host should learn what stands between that host and
+	// the network at the moment it points, not on the next listing.
+	Auth string `json:"auth"`
 	// Note explains a selection that succeeded without full detail.
 	Note string `json:"note,omitempty"`
 }
@@ -288,6 +317,7 @@ func (r *Registrar) sandboxSelect(ctx context.Context, req *mcp.CallToolRequest,
 		Address:       target.Address(),
 		Platform:      platformString(target.Sandbox.Platform),
 		PathSeparator: target.Sandbox.Platform.PathSeparator,
+		Auth:          target.Client().AuthName(),
 		Health:        healthUnknown,
 	}
 
@@ -315,6 +345,12 @@ func (r *Registrar) sandboxSelect(ctx context.Context, req *mcp.CallToolRequest,
 		out.Unconfined = true
 		out.Note = unconfinedNote
 	}
+	if target.Sandbox.Insecure {
+		// Ahead of the rest of the note: which paths are writable matters, and
+		// "nothing authenticated this connection, and the agent records no
+		// identity for anything done over it" matters more.
+		out.Note = strings.TrimSpace(unauthenticatedNote + " " + out.Note)
+	}
 	return out, target.Name(), nil
 }
 
@@ -328,6 +364,13 @@ type AddArgs struct {
 	Address string `json:"address" jsonschema:"the agent's address as host:port, e.g. build-box.internal:8722"`
 	// Labels are free-form operator metadata.
 	Labels map[string]string `json:"labels,omitempty" jsonschema:"free-form labels, e.g. {\"arch\":\"arm64\"}"`
+	// Insecure registers a sandbox whose agent runs without mTLS.
+	//
+	// It has to be said here because it cannot be discovered: an agent serving
+	// plaintext and one refusing a handshake look the same to a dialer that has
+	// not been told which it is talking to. Registering the wrong value costs a
+	// failed connection, never a silent downgrade.
+	Insecure bool `json:"insecure,omitempty" jsonschema:"the agent on this host runs with tls.enabled false; connect to it without mTLS, which is only safe on a network that authenticates its peers"`
 }
 
 // AddResult is the fleet_add result.
@@ -338,6 +381,10 @@ type AddResult struct {
 	Address string `json:"address"`
 	// Handle is the opaque reference for the new sandbox.
 	Handle string `json:"handle"`
+	// Auth is what will authenticate connections to this sandbox — "mtls" or
+	// "none". Echoed back so the caller sees which of the two it just
+	// registered rather than only which it asked for.
+	Auth string `json:"auth"`
 	// Note states what registering did not do.
 	Note string `json:"note"`
 }
@@ -358,7 +405,7 @@ func (r *Registrar) sandboxAdd(_ context.Context, _ *mcp.CallToolRequest, in Add
 		return AddResult{}, "", err
 	}
 
-	err := r.deps.Fleet.Add(registry.Sandbox{Name: name, Address: address, Labels: in.Labels})
+	err := r.deps.Fleet.Add(registry.Sandbox{Name: name, Address: address, Labels: in.Labels, Insecure: in.Insecure})
 	switch {
 	case errors.Is(err, registry.ErrExists):
 		existing, getErr := r.deps.Fleet.Get(name)
@@ -371,10 +418,18 @@ func (r *Registrar) sandboxAdd(_ context.Context, _ *mcp.CallToolRequest, in Add
 		return AddResult{}, "", err
 	}
 
+	note := "Registered locally only. This does not enroll the host: the agent must already hold a certificate from this fleet's CA, or calls to it will fail the mTLS handshake."
+	if in.Insecure {
+		// A different sentence, not a suffix. The mTLS note tells the caller
+		// what still has to happen for this entry to work; this one tells them
+		// what will never happen for it, which is the more important half.
+		note = "Registered locally only, and without mTLS: no client certificate will be presented to this host and its agent verifies none, so nothing in this fleet authenticates either end. That is only safe if the network between them does — a tailnet, a WireGuard mesh, a tight VPC. The agent must be running with tls.enabled false, or calls to it will fail."
+	}
 	return AddResult{
 		Address: address,
 		Handle:  selection.HandleFor(name),
-		Note:    "Registered locally only. This does not enroll the host: the agent must already hold a certificate from this fleet's CA, or calls to it will fail the mTLS handshake.",
+		Auth:    client.Target{Insecure: in.Insecure}.AuthName(),
+		Note:    note,
 	}, name, nil
 }
 
@@ -640,8 +695,13 @@ type InfoResult struct {
 	RunningProcesses uint32 `json:"running_processes,omitempty"`
 	// Labels are the operator-assigned labels.
 	Labels map[string]string `json:"labels,omitempty"`
-	// Principal is the identity the agent authenticated this client as.
+	// Principal is the identity the agent authenticated this client as. On a
+	// sandbox reached without mTLS the agent authenticated nobody and says so:
+	// the value begins "unauthenticated:" and names the address it saw.
 	Principal string `json:"principal,omitempty"`
+	// Auth is what authenticates the connection to this sandbox — "mtls" or
+	// "none". See [SandboxLine.Auth].
+	Auth string `json:"auth"`
 	// Note explains anything the model should not have to infer.
 	Note string `json:"note,omitempty"`
 }
@@ -653,6 +713,12 @@ func (r *Registrar) sandboxInfo(ctx context.Context, _ *mcp.CallToolRequest, tar
 		Platform: platformString(target.Sandbox.Platform),
 		Labels:   target.Sandbox.Labels,
 		Health:   healthUnknown,
+		// From the registry, not from the agent's answer: it is this
+		// workstation's own account of how it reached the host, it is known
+		// before the call and whether or not one succeeds, and an agent's claim
+		// about its own authentication is worth exactly nothing on a connection
+		// nothing authenticated.
+		Auth: target.Client().AuthName(),
 	}
 
 	info, err := r.hostInfo(ctx, target, in.IncludeToolchains)
@@ -692,6 +758,12 @@ func (r *Registrar) sandboxInfo(ctx context.Context, _ *mcp.CallToolRequest, tar
 		out.Unconfined = true
 		out.Note = unconfinedNote
 	}
+	if target.Sandbox.Insecure {
+		// Ahead of the rest of the note: which paths are writable matters, and
+		// "nothing authenticated this connection, and the agent records no
+		// identity for anything done over it" matters more.
+		out.Note = strings.TrimSpace(unauthenticatedNote + " " + out.Note)
+	}
 	if !in.IncludeToolchains {
 		// Appended after, not before: which paths are writable outranks a note
 		// about an optional probe, and the model reads the front of a string.
@@ -727,7 +799,7 @@ func (r *Registrar) hostInfo(ctx context.Context, target *selection.Target, incl
 	if d.Clients == nil {
 		return nil, fmt.Errorf("sandbox %s cannot be reached: no gRPC client is configured", target.Name())
 	}
-	host, err := d.Clients.Host(target.Name(), target.Address())
+	host, err := d.Clients.Host(target.Client())
 	if err != nil {
 		return nil, target.Call().Map(err)
 	}
@@ -840,7 +912,7 @@ func (r *Registrar) healthFor(ctx context.Context, sandboxes []registry.Sandbox,
 
 // probe issues one Health call under its own deadline.
 func (r *Registrar) probe(ctx context.Context, sb registry.Sandbox, timeout time.Duration) healthView {
-	host, err := r.deps.Clients.Host(sb.Name, sb.Address)
+	host, err := r.deps.Clients.Host(client.TargetFor(sb))
 	if err != nil {
 		return healthView{status: healthUnreachable, detail: shortDetail(err)}
 	}

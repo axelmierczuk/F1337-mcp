@@ -21,7 +21,7 @@ Do not install the agent on a machine you would not hand to the model outright.
 | --- | --- | --- |
 | Control plane (`fleetctl`) | CA signing key | Issue identities for the whole fleet |
 | MCP server (`fleet-mcp`) | Client cert | Full exec and filesystem access on every enrolled sandbox |
-| Agent (`fleet-agent`) | Leaf cert + key | Serve requests from authenticated clients |
+| Agent (`fleet-agent`) | Leaf cert + key | Serve requests from authenticated clients (or, with mTLS off, from whoever the network lets reach the port) |
 | Model | Nothing directly | Whatever the MCP server exposes as tools |
 
 The model is not a principal. It acts through the MCP server's identity, which
@@ -30,14 +30,86 @@ able to mint a credential.
 
 ## Transport
 
-- **mTLS on every RPC.** Both sides present certificates issued by the fleet CA.
-  There is no plaintext mode and no `--insecure` flag, including on loopback.
+- **mTLS on every RPC, by default.** Both sides present certificates issued by
+  the fleet CA. This is what `fleet-agent enroll` configures and what every
+  enrolled agent keeps.
 - **Client authorization** is by certificate, further constrained by an expected
   organisational unit. A leaf issued for an agent cannot be used to drive other
   agents.
-- Agents accept connections only from the fleet CA. A publicly reachable agent
-  port is still a listening service — bind it to a private interface where you
-  can.
+- Agents with mTLS on accept connections only from the fleet CA. A publicly
+  reachable agent port is still a listening service — bind it to a private
+  interface where you can.
+- **It can be turned off**, for a network that already authenticates its peers.
+  That is a deliberate posture with a precondition, not a convenience toggle;
+  it is described in full below.
+
+## Running without mTLS
+
+`tls.enabled: false` in the agent config turns mutual TLS off. The agent then
+serves plaintext gRPC: it demands no client certificate, presents none, and
+encrypts nothing.
+
+**The precondition is that the network authenticates its peers.** A Tailscale
+tailnet, a WireGuard mesh, a VPC with security groups that admit only the
+control plane — on those, the identity check this product would perform has
+already been performed, by something that also encrypts the traffic, and the
+fleet CA is a second identity system for a property you already have. Its setup
+cost — mint a token, distribute a fingerprint, keep leaves fresh, rotate the CA —
+buys nothing there.
+
+**If that precondition does not hold, this is unauthenticated remote code
+execution on the host.** The agent's purpose is running commands; with mTLS off
+there is nothing between a reachable port and a shell on that machine. There is
+no half-way state: it is either true that the network authenticates every peer
+that can reach the port, or the agent is open to whoever can.
+
+The failure mode is silence. An agent that skipped the CA ceremony works
+immediately and, from the outside, looks exactly like a secured one. So the
+product will not let the posture be held by accident:
+
+- **The daemon refuses to serve on an address that is neither loopback nor
+  private.** `--listen 0.0.0.0:8722` with mTLS off does not start. Loopback,
+  RFC 1918, unique-local and link-local addresses, and carrier-grade NAT space
+  (100.64.0.0/10, where every Tailscale node lives) are permitted; a wildcard
+  bind, a public address, and a hostname the agent cannot judge without asking
+  DNS are not. `serve --allow-unauthenticated-public` overrides it, and is the
+  only way to reach that state.
+- **It says so at every start**, with the listen address, what it means, and
+  the precondition — the same way an unrestricted SOCKS proxy is announced. If
+  certificates are configured and being ignored, it says that too.
+- **`fleetctl list`, `fleetctl info`, `fleet_list`, `fleet_select` and
+  `fleet_info` show it per sandbox**, as `auth: none` against `auth: mtls`, with
+  a line under the listing saying what "none" costs. A mixed fleet is normal and legible: the posture is
+  recorded per sandbox in the registry, and the control plane dials each one the
+  way its entry says.
+- **The audit record says so.** See [Audit](#audit).
+
+The client half is symmetrical and explicit. `fleet_add … insecure: true`
+registers a sandbox the control plane will reach without mTLS; nothing infers
+it, because an agent serving plaintext and one refusing a handshake are
+indistinguishable to a dialer that has not been told. Registering it wrongly
+costs a failed connection in either direction — never a silent downgrade. The
+control plane announces every unauthenticated dial it makes.
+
+### What enrollment means without a CA
+
+Nothing is issued, and nothing is proved.
+
+Enrollment does two things: it gives a host a name in the fleet registry, and it
+gives that host a certificate binding the name to a keypair only that host holds.
+Without mTLS the second half has no meaning — there is no CA to sign anything and
+nothing on the wire to check a signature against — and it also has nothing to do:
+`fleetctl serve` and `fleet-agent enroll` are the ceremony this posture exists to
+skip.
+
+The first half remains, and remains useful: a sandbox still has a name, an
+address, labels and a registry entry, added with `fleet_add`. But that name is a
+label this workstation assigned to an address, exactly as it is for a sandbox
+enrolled without `--name`. **The host never proves it.** If something else
+answers on that address, the fleet will call it by the name in the registry, and
+the audit records it writes will be stamped with the name in *its* config. On a
+tailnet that is fine, because the tailnet decides who can answer. It is the
+whole of what the name means.
 
 ## Enrollment
 
@@ -660,12 +732,26 @@ record what it did must not report success for an unrecorded pivot.
 
 Every exec, every interactive shell session, every forwarded connection that
 leaves the machine — and, as they land, every write, edit, process start and
-signal — appends one JSONL record: timestamp, authenticated principal (the
-client certificate's common name), the sandbox's own name, RPC, outcome,
-duration, and then whatever the operation has: argv and the resolved executable
-and working directory for a command or a session, the requested and dialed
-addresses and the byte counts for a connection. Append-only, rotated by size
-with a configurable number of retained segments.
+signal — appends one JSONL record: timestamp, principal, the sandbox's own name,
+RPC, outcome, duration, and then whatever the operation has: argv and the
+resolved executable and working directory for a command or a session, the
+requested and dialed addresses and the byte counts for a connection.
+Append-only, rotated by size with a configurable number of retained segments.
+
+**The principal says how it was established.** On an agent using mTLS it is the
+client certificate's common name, taken from the chain the agent verified, and
+the record carries `"principal_source": "certificate"`. On an agent serving
+without mTLS nothing was verified, and the record says so twice over: the
+principal reads `unauthenticated:<peer address>` and `"principal_source"` is
+`"network"`. The address is worth recording — it is what joins the line to a
+tailnet's own access log, a firewall log or a conntrack entry, which on such an
+agent is where the caller's identity actually lives.
+
+A record with no `principal_source` at all was written before the field existed,
+by an agent for which mTLS was mandatory, so absent means `certificate` and every
+historical line still means exactly what it meant. What must never happen is a
+principal nobody verified reading like one that was — an audit log where those
+two are indistinguishable has quietly stopped being an audit log.
 
 Every record names the sandbox it came from. That is redundant on the host that
 wrote it and essential everywhere else: these files are shipped off-box and

@@ -37,7 +37,7 @@ func TestPool_ConnectAndIssueRPC(t *testing.T) {
 
 	pool := newTestPool(t, fleet, dialOpt)
 
-	hostClient, err := pool.Host("agent-a", addr)
+	hostClient, err := pool.Host(client.Target{Name: "agent-a", Address: addr})
 	require.NoError(t, err)
 
 	resp, err := hostClient.Health(context.Background(), &sandboxdv1.HealthRequest{})
@@ -53,12 +53,12 @@ func TestPool_ReuseChannel_SecondCallDoesNotRedial(t *testing.T) {
 
 	pool := newTestPool(t, fleet, dialOpt)
 
-	_, err := pool.Conn("agent-a", addr)
+	_, err := pool.Conn(client.Target{Name: "agent-a", Address: addr})
 	require.NoError(t, err)
 	firstDialCount := pool.DialCount()
 	require.EqualValues(t, 1, firstDialCount)
 
-	_, err = pool.Conn("agent-a", addr)
+	_, err = pool.Conn(client.Target{Name: "agent-a", Address: addr})
 	require.NoError(t, err)
 
 	assert.EqualValues(t, firstDialCount, pool.DialCount(), "second call for the same sandbox must reuse the pooled channel")
@@ -71,9 +71,9 @@ func TestPool_UnreachableSandbox_DoesNotBlockOthers(t *testing.T) {
 
 	pool := newTestPool(t, fleet, dialOpt)
 
-	upClient, err := pool.Host("up-box", upAddr)
+	upClient, err := pool.Host(client.Target{Name: "up-box", Address: upAddr})
 	require.NoError(t, err)
-	downClient, err := pool.Host("down-box", "down-box:8722")
+	downClient, err := pool.Host(client.Target{Name: "down-box", Address: "down-box:8722"})
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -118,7 +118,7 @@ func TestPool_ServerCertFromDifferentCA_Rejected(t *testing.T) {
 
 	pool := newTestPool(t, fleet, dialOpt)
 
-	hostClient, err := pool.Host("agent-a", addr)
+	hostClient, err := pool.Host(client.Target{Name: "agent-a", Address: addr})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -148,7 +148,7 @@ func TestPool_AgentLeafAsClientCert_RejectedByServer(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
-	hostClient, err := pool.Host("agent-a", addr)
+	hostClient, err := pool.Host(client.Target{Name: "agent-a", Address: addr})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -182,7 +182,7 @@ func TestPool_HealthCache_TransitionsToUnreachableWithinOneInterval(t *testing.T
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
-	_, err = pool.Host("agent-a", addr)
+	_, err = pool.Host(client.Target{Name: "agent-a", Address: addr})
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -205,11 +205,11 @@ func TestPool_Close_RejectsFurtherConn(t *testing.T) {
 
 	pool := newTestPool(t, fleet, dialOpt)
 
-	_, err := pool.Conn("agent-a", addr)
+	_, err := pool.Conn(client.Target{Name: "agent-a", Address: addr})
 	require.NoError(t, err)
 
 	require.NoError(t, pool.Close())
 
-	_, err = pool.Conn("agent-a", addr)
+	_, err = pool.Conn(client.Target{Name: "agent-a", Address: addr})
 	require.Error(t, err)
 }

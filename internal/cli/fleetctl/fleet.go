@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -85,7 +86,24 @@ const oneShotHealthInterval = time.Hour
 // nothing to notice if they stopped being.
 //
 // The per-call probe timeout is --timeout either way.
-func (f *controlFlags) pool(healthInterval time.Duration) (*client.Pool, error) {
+// warnTo is where the pool announces a connection this fleet does not
+// authenticate: the command's error stream, never its own writer, because the
+// writer carries the result and a --json consumer parsing one document must not
+// find a log line in the middle of it. Same rule `fleetctl socks` applies to
+// the proxy's log.
+//
+// Nil is silent, and `fleetctl tui` passes nil deliberately: it owns the whole
+// terminal, and a warning written into it would garble the view rather than
+// inform anybody. The posture reaches that operator through the sandbox's
+// principal, which reads `unauthenticated:<address>` in the detail pane.
+func warnTo(w io.Writer) *slog.Logger {
+	if w == nil {
+		return nil
+	}
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+func (f *controlFlags) pool(healthInterval time.Duration, warn *slog.Logger) (*client.Pool, error) {
 	if healthInterval <= 0 {
 		healthInterval = oneShotHealthInterval
 	}
@@ -93,10 +111,11 @@ func (f *controlFlags) pool(healthInterval time.Duration) (*client.Pool, error) 
 	if err != nil {
 		return nil, err
 	}
-	authority, err := loadCA(caDir)
-	if err != nil {
-		return nil, err
-	}
+	// The CA is loaded on the same terms as the leaf below: a workstation whose
+	// whole fleet runs without mTLS has never run `ca init` and does not need
+	// to, so "there is no CA here" is carried to the dial that needs one rather
+	// than failing every command that touches the fleet.
+	authority, caErr := loadCA(caDir)
 
 	certPath, err := resolve(f.certPath, defaultControlCertPath)
 	if err != nil {
@@ -106,22 +125,31 @@ func (f *controlFlags) pool(healthInterval time.Duration) (*client.Pool, error) 
 	if err != nil {
 		return nil, err
 	}
-	certPEM, err := readControlCredential(certPath, "control certificate")
-	if err != nil {
-		return nil, err
-	}
-	keyPEM, err := readControlCredential(keyPath, "control private key")
-	if err != nil {
-		return nil, err
-	}
-
-	return client.NewPool(client.Config{
-		CACertPEM:      authority.CertPEM(),
-		CertPEM:        certPEM,
-		KeyPEM:         keyPEM,
+	cfg := client.Config{
 		HealthTimeout:  f.probeTimeout(),
 		HealthInterval: healthInterval,
-	})
+		Log:            warn,
+	}
+
+	certPEM, certErr := readControlCredential(certPath, "control certificate")
+	keyPEM, keyErr := readControlCredential(keyPath, "control private key")
+	switch {
+	case caErr != nil:
+		cfg.CredentialErr = caErr
+	case certErr != nil:
+		// Carried rather than returned, so a fleet whose members all run
+		// without mTLS works on a workstation that has never issued itself a
+		// leaf — there is nothing missing there, only nothing needed. It
+		// becomes the error for a sandbox that *is* reached over mTLS, where it
+		// still names the file and the command that creates it.
+		cfg.CredentialErr = certErr
+	case keyErr != nil:
+		cfg.CredentialErr = keyErr
+	default:
+		cfg.CACertPEM, cfg.CertPEM, cfg.KeyPEM = authority.CertPEM(), certPEM, keyPEM
+	}
+
+	return client.NewPool(cfg)
 }
 
 // readControlCredential loads a PEM file, turning "no such file" into the
@@ -152,8 +180,14 @@ func (f *controlFlags) probeTimeout() time.Duration {
 // sandboxLine is one row of `fleetctl list`. It deliberately mirrors the MCP
 // server's SandboxLine: same fields, same health words, same relative times.
 type sandboxLine struct {
-	Name       string            `json:"name"`
-	Address    string            `json:"address"`
+	Name    string `json:"name"`
+	Address string `json:"address"`
+	// Auth is what authenticates the connection to this sandbox: "mtls", or
+	// "none" for one this fleet reaches without a certificate at either end.
+	// It is a column of its own because an operator looking at a fleet has to
+	// be able to see which members are authenticated without opening a config
+	// on each host.
+	Auth       string            `json:"auth"`
 	Platform   string            `json:"platform,omitempty"`
 	Health     string            `json:"health"`
 	Detail     string            `json:"detail,omitempty"`
@@ -199,7 +233,7 @@ func newListCommand(out io.Writer) *cobra.Command {
 			}
 
 			result := listResult{Sandboxes: make([]sandboxLine, 0, len(sandboxes))}
-			health, note := probeFleet(cmd.Context(), sandboxes, &control, noProbe)
+			health, note := probeFleet(cmd.Context(), sandboxes, &control, warnTo(cmd.ErrOrStderr()), noProbe)
 			result.Note = note
 
 			now := time.Now()
@@ -216,6 +250,7 @@ func newListCommand(out io.Writer) *cobra.Command {
 				result.Sandboxes = append(result.Sandboxes, sandboxLine{
 					Name:    sb.Name,
 					Address: sb.Address,
+					Auth:    client.TargetFor(sb).AuthName(),
 					// Platform and agent version are the agent's words too,
 					// cached from its last report, so they are bounded on the
 					// same terms as the detail column.
@@ -241,6 +276,7 @@ func newListCommand(out io.Writer) *cobra.Command {
 					rows = append(rows, []string{
 						sb.Name,
 						dash(sb.Address),
+						sb.Auth,
 						dash(sb.Platform),
 						dash(sb.Agent),
 						sb.Health,
@@ -248,12 +284,19 @@ func newListCommand(out io.Writer) *cobra.Command {
 						sb.Detail,
 					})
 				}
-				if err := o.table([]string{"NAME", "ADDRESS", "PLATFORM", "AGENT", "HEALTH", "LAST SEEN", "DETAIL"}, rows); err != nil {
+				if err := o.table([]string{"NAME", "ADDRESS", "AUTH", "PLATFORM", "AGENT", "HEALTH", "LAST SEEN", "DETAIL"}, rows); err != nil {
 					p.Printf("%v\n", err)
 					return
 				}
 				if result.Note != "" {
 					p.Printf("\n%s\n", result.Note)
+				}
+				if note := unauthenticatedListNote(result.Sandboxes); note != "" {
+					// After the table and after any note about the listing
+					// itself. An operator scanning a column of "none" should
+					// not have to know what the column means, and one whose
+					// fleet is entirely mTLS never sees this line.
+					p.Printf("\n%s\n", note)
 				}
 			})
 		},
@@ -263,6 +306,28 @@ func newListCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&registryPath, "registry", "", "path to the fleet registry (default: <config dir>/registry.yaml)")
 	cmd.Flags().BoolVar(&noProbe, "no-probe", false, "list from the registry without contacting any sandbox")
 	return cmd
+}
+
+// unauthenticatedListNote names the members of a listing that nothing in this
+// fleet authenticates, and what that means.
+//
+// It exists because the column alone is not a warning. "none" in a table reads
+// as an absence — of a value, of a probe — rather than as the whole of a
+// sandbox's authentication, and the operator this is written for is the one who
+// inherited a fleet and has never seen the setting before.
+func unauthenticatedListNote(lines []sandboxLine) string {
+	var names []string
+	for _, line := range lines {
+		if line.Auth == client.AuthNone {
+			names = append(names, line.Name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("auth none (%s): reached without mTLS — no certificate is presented and none is verified, so nothing in this fleet authenticates either end.\n"+
+		"Whatever authenticates them is the network they sit on. Commands run there are recorded against the address they came from, not a verified identity.",
+		strings.Join(names, ", "))
 }
 
 // healthView is one sandbox's health, in the same shape the MCP server keeps.
@@ -281,7 +346,7 @@ type healthView struct {
 // see which hosts are enrolled and be told, once, what is missing. Failing the
 // whole command would answer a question about the fleet with a question about
 // this workstation.
-func probeFleet(ctx context.Context, sandboxes []registry.Sandbox, control *controlFlags, noProbe bool) (map[string]healthView, string) {
+func probeFleet(ctx context.Context, sandboxes []registry.Sandbox, control *controlFlags, warn *slog.Logger, noProbe bool) (map[string]healthView, string) {
 	out := make(map[string]healthView, len(sandboxes))
 	unknown := func(note string) (map[string]healthView, string) {
 		for _, sb := range sandboxes {
@@ -297,7 +362,7 @@ func probeFleet(ctx context.Context, sandboxes []registry.Sandbox, control *cont
 		return unknown("Health is unknown: --no-probe was given, so no sandbox was contacted.")
 	}
 
-	pool, err := control.pool(oneShotHealthInterval)
+	pool, err := control.pool(oneShotHealthInterval, warn)
 	if err != nil {
 		return unknown("Health is unknown: " + err.Error())
 	}
@@ -319,14 +384,48 @@ func probeFleet(ctx context.Context, sandboxes []registry.Sandbox, control *cont
 		}(sb)
 	}
 	wg.Wait()
+
+	if credErr := pool.CredentialErr(); credErr != nil && anyAuthenticated(sandboxes) {
+		// Said once, under the table, rather than left to be pieced together
+		// from a column of "unknown": this is a fact about this workstation
+		// rather than about the fleet, and it has one fix. In the loader's own
+		// words, because those name the file and the command that makes it —
+		// `ca init` when there is no CA at all, `ca sign` when there is.
+		//
+		// Only when some sandbox actually needed it: a fleet that runs entirely
+		// without mTLS was probed in full, and telling that operator about a
+		// certificate they will never issue is noise about a fleet that is fine.
+		return out, "Health is unknown for the sandboxes reached over mTLS: " + credErr.Error()
+	}
 	return out, ""
+}
+
+// anyAuthenticated reports whether any of these sandboxes is reached over mTLS,
+// and so needs a credential this workstation may not have.
+func anyAuthenticated(sandboxes []registry.Sandbox) bool {
+	for _, sb := range sandboxes {
+		if !sb.Insecure {
+			return true
+		}
+	}
+	return false
 }
 
 // probeOne issues one Health call under its own deadline. It is the same call,
 // through the same pool, that the MCP server's fleet_list makes.
 func probeOne(ctx context.Context, pool *client.Pool, sb registry.Sandbox, timeout time.Duration) healthView {
-	host, err := pool.Host(sb.Name, sb.Address)
-	if err != nil {
+	host, err := pool.Host(client.TargetFor(sb))
+	switch {
+	case errors.Is(err, client.ErrNoCredentials):
+		// Nothing was dialled, so this is "nothing has looked", not "looked and
+		// found nothing" — the distinction the health vocabulary exists to
+		// keep, and the one that stops an operator chasing a machine that is
+		// fine because their own workstation has no leaf.
+		//
+		// No detail: the reason is the same for every such row and is said
+		// once, under the table, where it can name the command that fixes it.
+		return healthView{status: client.HealthUnknown}
+	case err != nil:
 		return healthView{status: client.HealthUnreachable, detail: probeDetail(err)}
 	}
 
@@ -436,16 +535,20 @@ type infoToolchain struct {
 // when the host does not answer, because "enrolled at, address, and not
 // responding" is exactly what an operator needs when a host is down.
 type infoResult struct {
-	Name             string            `json:"name"`
-	Address          string            `json:"address"`
-	Health           string            `json:"health"`
-	Detail           string            `json:"detail,omitempty"`
-	Platform         string            `json:"platform,omitempty"`
-	Kernel           string            `json:"kernel,omitempty"`
-	Hostname         string            `json:"hostname,omitempty"`
-	PathSeparator    string            `json:"path_separator,omitempty"`
-	Agent            string            `json:"agent,omitempty"`
-	Uptime           string            `json:"uptime,omitempty"`
+	Name          string `json:"name"`
+	Address       string `json:"address"`
+	Health        string `json:"health"`
+	Detail        string `json:"detail,omitempty"`
+	Platform      string `json:"platform,omitempty"`
+	Kernel        string `json:"kernel,omitempty"`
+	Hostname      string `json:"hostname,omitempty"`
+	PathSeparator string `json:"path_separator,omitempty"`
+	Agent         string `json:"agent,omitempty"`
+	Uptime        string `json:"uptime,omitempty"`
+	// Auth is what authenticates the connection to this sandbox — "mtls" or
+	// "none" — read from the registry rather than from the host's answer, so
+	// it is reported for a host that never replies.
+	Auth             string            `json:"auth"`
 	RunningProcesses uint32            `json:"running_processes,omitempty"`
 	Principal        string            `json:"principal,omitempty"`
 	Resources        infoResources     `json:"resources,omitzero"`
@@ -496,6 +599,7 @@ func newInfoCommand(out io.Writer) *cobra.Command {
 			result := infoResult{
 				Name:       sb.Name,
 				Address:    sb.Address,
+				Auth:       client.TargetFor(sb).AuthName(),
 				Health:     client.HealthUnknown,
 				Platform:   safeText(sb.Platform.String()),
 				Kernel:     safeText(sb.Platform.KernelVersion),
@@ -505,7 +609,7 @@ func newInfoCommand(out io.Writer) *cobra.Command {
 				EnrolledAt: formatTime(sb.EnrolledAt),
 				LastSeen:   cli.RelativeTime(sb.LastSeenAt, time.Now()),
 			}
-			fillHostInfo(cmd.Context(), &result, sb, &control, toolchains)
+			fillHostInfo(cmd.Context(), &result, sb, &control, warnTo(cmd.ErrOrStderr()), toolchains)
 
 			return flags.output(out).Emit(result, func(p *cli.Printer) { printInfo(p, result, toolchains) })
 		},
@@ -519,16 +623,20 @@ func newInfoCommand(out io.Writer) *cobra.Command {
 
 // fillHostInfo asks the sandbox about itself, leaving the registry's own
 // answers in place when it does not reply.
-func fillHostInfo(ctx context.Context, result *infoResult, sb registry.Sandbox, control *controlFlags, toolchains bool) {
-	pool, err := control.pool(oneShotHealthInterval)
+func fillHostInfo(ctx context.Context, result *infoResult, sb registry.Sandbox, control *controlFlags, warn *slog.Logger, toolchains bool) {
+	pool, err := control.pool(oneShotHealthInterval, warn)
 	if err != nil {
 		result.Health, result.Detail = client.HealthUnknown, err.Error()
 		return
 	}
 	defer func() { _ = pool.Close() }()
 
-	host, err := pool.Host(sb.Name, sb.Address)
-	if err != nil {
+	host, err := pool.Host(client.TargetFor(sb))
+	switch {
+	case errors.Is(err, client.ErrNoCredentials):
+		result.Health, result.Detail = client.HealthUnknown, err.Error()
+		return
+	case err != nil:
 		result.Health, result.Detail = client.HealthUnreachable, probeDetail(err)
 		return
 	}
@@ -594,6 +702,12 @@ func fillHostInfo(ctx context.Context, result *infoResult, sb registry.Sandbox, 
 	}
 }
 
+// unauthenticatedInfoNote is what `fleetctl info` says about a sandbox this
+// fleet does not authenticate.
+const unauthenticatedInfoNote = "auth none: this sandbox is reached without mTLS. No client certificate is presented and its agent verifies none,\n" +
+	"so nothing in this fleet authenticates either end — whatever does is the network it sits on. The agent records\n" +
+	"commands run here against the address they came from rather than a verified identity."
+
 func printInfo(p *cli.Printer, r infoResult, toolchainsRequested bool) {
 	field := func(label, value string) {
 		if value != "" {
@@ -602,6 +716,8 @@ func printInfo(p *cli.Printer, r infoResult, toolchainsRequested bool) {
 	}
 	field("name", r.Name)
 	field("address", r.Address)
+	// Directly under the address, because it is a property of reaching it.
+	field("auth", r.Auth)
 	field("health", r.Health)
 	field("detail", r.Detail)
 	field("platform", r.Platform)
@@ -615,6 +731,13 @@ func printInfo(p *cli.Printer, r infoResult, toolchainsRequested bool) {
 	field("principal", r.Principal)
 	field("enrolled", r.EnrolledAt)
 	field("last seen", r.LastSeen)
+
+	if r.Auth == client.AuthNone {
+		// The field above says which posture this is; this says what it costs.
+		// An operator reading `fleetctl info` about one host is the reader most
+		// likely to be deciding whether that host is safe where it is.
+		p.Printf("\n%s\n", unauthenticatedInfoNote)
+	}
 
 	if r.Resources.CPUCores > 0 || r.Resources.MemoryTotal != "" || r.Resources.DiskTotal != "" {
 		p.Printf("\nresources:\n")

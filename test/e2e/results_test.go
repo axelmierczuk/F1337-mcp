@@ -20,10 +20,19 @@ import (
 type sandboxLine struct {
 	Name     string `json:"name"`
 	Address  string `json:"address"`
+	Auth     string `json:"auth"`
 	Platform string `json:"platform"`
 	Health   string `json:"health"`
 	Agent    string `json:"agent"`
 	Selected bool   `json:"selected"`
+}
+
+// addResult is what fleet_add reports back.
+type addResult struct {
+	Sandbox string `json:"sandbox"`
+	Address string `json:"address"`
+	Auth    string `json:"auth"`
+	Note    string `json:"note"`
 }
 
 type listResult struct {
@@ -45,6 +54,7 @@ type selectResult struct {
 type infoResult struct {
 	Sandbox      string   `json:"sandbox"`
 	Address      string   `json:"address"`
+	Auth         string   `json:"auth"`
 	Handle       string   `json:"handle"`
 	Platform     string   `json:"platform"`
 	Hostname     string   `json:"hostname"`
@@ -53,6 +63,7 @@ type infoResult struct {
 	Agent        string   `json:"agent"`
 	Health       string   `json:"health"`
 	Principal    string   `json:"principal"`
+	Note         string   `json:"note"`
 }
 
 type execResult struct {

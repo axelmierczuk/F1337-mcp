@@ -182,7 +182,7 @@ func probeAgent(t *testing.T, caPEM, certPEM, keyPEM []byte, addr string) error 
 	}
 	defer func() { _ = pool.Close() }()
 
-	host, err := pool.Host("probe", addr)
+	host, err := pool.Host(client.Target{Name: "probe", Address: addr})
 	if err != nil {
 		return err
 	}

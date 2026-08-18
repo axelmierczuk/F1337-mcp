@@ -92,8 +92,32 @@ type Config struct {
 }
 
 // TLSConfig names the identity the agent serves with and the CA it
-// authenticates clients against.
+// authenticates clients against — or says that it does neither.
 type TLSConfig struct {
+	// Enabled turns mutual TLS on. It is the whole of this agent's own
+	// authentication, and turning it off is a decision about the network this
+	// host sits on rather than a convenience.
+	//
+	// With it off the agent serves plaintext gRPC: no client certificate is
+	// demanded, the agent presents none, and nothing is encrypted by this
+	// product. Whatever authenticates the caller is the network — a Tailscale
+	// tailnet, a WireGuard mesh, a VPC with tight security groups — and
+	// nothing else. On a network that does not do that, an agent serving
+	// without mTLS is unauthenticated remote code execution; the daemon
+	// refuses to open a listener that is neither loopback nor private without
+	// an explicit flag, and says what it is at every start either way. See
+	// [CheckListenPosture] and docs/security.md.
+	//
+	// A pointer, because the default is neither constant nor "true": an unset
+	// field means "on if this config names TLS material". That keeps the two
+	// cases apart that a plain bool would merge — a config written by
+	// `fleet-agent enroll`, which names a leaf and a CA and must keep
+	// authenticating after an upgrade, and one hand-written for a tailnet,
+	// which names none and never wanted a CA. Nothing here silently downgrades
+	// an enrolled agent, and nothing demands a certificate from a host that
+	// never enrolled.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
 	// Certificate is the agent's server-auth leaf, issued during enrollment.
 	Certificate string `yaml:"certificate"`
 	// PrivateKey is the key generated on this host at enrollment. It has
@@ -105,6 +129,30 @@ type TLSConfig struct {
 	// top of chaining to the fleet CA. Empty means DefaultClientOU; it never
 	// means "any OU".
 	RequireClientOU string `yaml:"require_client_ou"`
+}
+
+// IsEnabled reports whether mutual TLS is in force.
+//
+// An unset Enabled infers it from the material: a config naming a leaf, a key
+// or a CA bundle was written by enrollment and authenticates, and one naming
+// none never enrolled and cannot. The inference only ever runs for a config
+// that says nothing, and [Config.applyDefaults] writes the answer down, so what
+// a daemon does and what its file says stay the same thing.
+func (t TLSConfig) IsEnabled() bool {
+	if t.Enabled != nil {
+		return *t.Enabled
+	}
+	return t.Configured()
+}
+
+// Configured reports whether this block names any TLS material at all.
+//
+// It is the inference above, and separately it is what makes "mTLS is off and
+// there are certificates here" sayable: that combination is a config the
+// operator should hear about at every start, since the files are there and are
+// doing nothing.
+func (t TLSConfig) Configured() bool {
+	return t.Certificate != "" || t.PrivateKey != "" || t.CABundle != ""
 }
 
 // ExecConfig bounds one-shot command execution (#7) and is enforced centrally
@@ -585,6 +633,15 @@ func (c *Config) applyDefaults() {
 	if c.TLS.CABundle == "" {
 		c.TLS.CABundle = c.LegacyCAFile
 	}
+	if c.TLS.Enabled == nil {
+		// Materialised, after the legacy paths above have been folded in, so
+		// the inference sees the whole config. A saved file then states its
+		// posture in as many words rather than leaving the next reader to
+		// re-derive it — and an operator who changes their mind edits one
+		// line whose meaning is not "it depends".
+		enabled := c.TLS.Configured()
+		c.TLS.Enabled = &enabled
+	}
 	if c.TLS.RequireClientOU == "" {
 		c.TLS.RequireClientOU = DefaultClientOU
 	}
@@ -680,6 +737,17 @@ type ValidateOptions struct {
 	// AllowNoJail permits an empty allowed_roots list. It is `serve
 	// --no-jail`, and the daemon logs a warning on every start when it is set.
 	AllowNoJail bool
+
+	// AllowUnauthenticatedPublic permits serving without mTLS on an address
+	// that is neither loopback nor private. It is `serve
+	// --allow-unauthenticated-public`.
+	//
+	// A second flag rather than a config key, deliberately. The posture it
+	// unlocks is the one an operator can end up in by accident — a config
+	// copied from another host, a `--listen 0.0.0.0` typed for convenience —
+	// and a key in a file is inherited silently, while a flag has to be typed
+	// or written into a unit by the person who owns the machine.
+	AllowUnauthenticatedPublic bool
 }
 
 // Validate reports whether the config can actually run a daemon.
@@ -689,17 +757,23 @@ func (c *Config) Validate(opts ValidateOptions) error {
 	if c.Listen == "" {
 		problems = append(problems, "listen is empty")
 	}
-	if c.TLS.Certificate == "" {
-		problems = append(problems, "tls.certificate is not set")
-	}
-	if c.TLS.PrivateKey == "" {
-		problems = append(problems, "tls.private_key is not set")
-	}
-	if c.TLS.CABundle == "" {
-		problems = append(problems, "tls.ca_bundle is not set; there is no plaintext mode")
-	}
-	if c.TLS.RequireClientOU == "" {
-		problems = append(problems, "tls.require_client_ou is empty; an empty OU would accept any leaf the fleet CA ever signed, including another agent's")
+	if c.TLS.IsEnabled() {
+		// Required only with mTLS on, which is what makes it optional: an
+		// agent on a network that authenticates its own peers has no CA to
+		// name. With it on, every one of these is load-bearing and a missing
+		// one is a daemon that cannot authenticate anybody.
+		if c.TLS.Certificate == "" {
+			problems = append(problems, "tls.certificate is not set, and tls.enabled is true")
+		}
+		if c.TLS.PrivateKey == "" {
+			problems = append(problems, "tls.private_key is not set, and tls.enabled is true")
+		}
+		if c.TLS.CABundle == "" {
+			problems = append(problems, "tls.ca_bundle is not set, and tls.enabled is true; run `fleet-agent enroll`, or set tls.enabled: false if this network authenticates its peers")
+		}
+		if c.TLS.RequireClientOU == "" {
+			problems = append(problems, "tls.require_client_ou is empty; an empty OU would accept any leaf the fleet CA ever signed, including another agent's")
+		}
 	}
 	for _, root := range c.AllowedRoots {
 		if !filepath.IsAbs(root) {
@@ -727,7 +801,12 @@ func (c *Config) Validate(opts ValidateOptions) error {
 	if c.JailEnforced() && len(c.AllowedRoots) == 0 && !opts.AllowNoJail {
 		return ErrNoAllowedRoots
 	}
-	return nil
+
+	// Last, and on its own, for the same reason: this is a refusal with a
+	// documented override rather than a typo to fix. It is checked after the
+	// problems above because a config with no listen address at all should be
+	// told that, not told about its transport.
+	return CheckListenPosture(c, opts.AllowUnauthenticatedPublic)
 }
 
 func (c *Config) describe() string {

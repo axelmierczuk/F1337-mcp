@@ -29,8 +29,11 @@ Inventory of registered sandboxes.
 | `refresh` | bool | Probe health live instead of returning cached status. |
 | `label` | string | Filter by `key=value`. |
 
-Returns name, platform, health, labels, agent version, last-seen time, and which
-one is currently selected.
+Returns name, platform, health, labels, agent version, last-seen time, which one
+is currently selected, and `auth` — `mtls` when both ends present certificates
+from the fleet CA, `none` when nothing in this fleet authenticates either end
+and whatever the network provides is the whole of it. See
+[docs/security.md](security.md#running-without-mtls).
 
 ### `fleet_select`
 Choose the default target for subsequent calls.
@@ -43,6 +46,11 @@ Returns a handle, plus the resolved host's platform and allowed roots — so the
 model learns where it can write without a second call. An agent whose jail is
 off returns no roots, which is the honest answer: it can write anywhere its
 account can.
+
+It also returns `auth` (`mtls` or `none`), because this is the call that decides
+where every later one lands: a sandbox reached without mTLS is one nothing in
+this fleet authenticated, and that is worth knowing at the moment the model
+points itself at it rather than on the next listing.
 
 An agent that enforces no path jail returns `unconfined: true` and no
 `allowed_roots`. That is "every path is writable", not "none is": the path jail
@@ -59,9 +67,18 @@ Register an already-enrolled agent that is not in the local registry.
 | `name` | string | **Required.** |
 | `address` | string | **Required.** `host:port`. |
 | `labels` | object | Free-form `key=value`, bounded: at most 32, keys printable ASCII with no spaces. |
+| `insecure` | bool | The agent on this host runs with `tls.enabled: false`. Reach it without mTLS. |
 
 Does not enroll. Enrollment mints credentials and is an operator action via
 `fleetctl`.
+
+`insecure` has to be stated because it cannot be discovered: an agent serving
+plaintext and one refusing a handshake look the same to a dialer that has not
+been told which it is talking to. Getting it wrong costs a failed connection,
+never a silent downgrade. Registering a sandbox this way means no certificate is
+presented to it and none is verified from it — only do it where the network
+authenticates its peers, and read
+[docs/security.md](security.md#running-without-mtls) first.
 
 Name, address and labels are all validated before the registry is touched, so a
 rejected call leaves nothing behind. Labels are bounded because they are paid
@@ -86,6 +103,11 @@ Full detail for one sandbox: platform, kernel, CPU and memory, disk, detected
 toolchains, allowed roots, agent version and uptime, running process count.
 Reports `unconfined: true` for an agent with no path jail, on the same terms as
 `fleet_select`.
+
+Also reports `auth` (`mtls` or `none`) and `principal` — the identity the agent
+authenticated this caller as. On a sandbox reached without mTLS the agent
+authenticated nobody, `auth` is `none`, and `principal` reads
+`unauthenticated:<address>`.
 
 | Argument | Type | Notes |
 | --- | --- | --- |

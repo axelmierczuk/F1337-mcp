@@ -11,9 +11,10 @@
    │   internal/mcpserver/tools           │  tool handlers
    │   internal/mcpserver/selection       │  which sandbox does this call target
    │   internal/registry                  │  fleet inventory, sticky default
-   │   internal/client                    │  mTLS gRPC dialer + pool
+   │   internal/client                    │  gRPC dialer + pool, mTLS per sandbox
    └──────────────────────────────────────┘
-              │  gRPC / mTLS  (:8722)
+              │  gRPC, mTLS unless the sandbox is  (:8722)
+              │  registered insecure — docs/security.md
               ▼
    ┌──────────────────────────────────────┐
    │ fleet-agent                          │

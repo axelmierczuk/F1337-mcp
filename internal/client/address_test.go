@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 )
 
 // assertTLSFailure checks that an RPC failed because the handshake was
@@ -35,7 +37,7 @@ func TestPool_RejectsAddressWithoutHostPort(t *testing.T) {
 
 	for _, address := range []string{"build-box", "", ":8722"} {
 		t.Run(address, func(t *testing.T) {
-			_, err := pool.Conn("build-box", address)
+			_, err := pool.Conn(client.Target{Name: "build-box", Address: address})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "build-box", "the error must name the sandbox")
 		})
@@ -48,6 +50,6 @@ func TestPool_AcceptsHostPort(t *testing.T) {
 	addr, dialOpt, _ := serveAgent(t, fleet.ca, "agent-a", agent)
 
 	pool := newTestPool(t, fleet, dialOpt)
-	_, err := pool.Conn("agent-a", addr)
+	_, err := pool.Conn(client.Target{Name: "agent-a", Address: addr})
 	require.NoError(t, err)
 }

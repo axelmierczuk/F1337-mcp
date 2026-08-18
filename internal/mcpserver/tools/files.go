@@ -194,7 +194,7 @@ func (r *Registrar) sandboxRead(ctx context.Context, _ *mcp.CallToolRequest, tar
 		return ReadResult{}, errors.New("offset and limit are line-oriented and cannot be combined with raw, which returns bytes")
 	}
 
-	files, err := r.deps.Clients.Files(target.Name(), target.Address())
+	files, err := r.deps.Clients.Files(target.Client())
 	if err != nil {
 		return ReadResult{}, target.Call().Map(err)
 	}
@@ -395,7 +395,7 @@ func (r *Registrar) sandboxWrite(ctx context.Context, _ *mcp.CallToolRequest, ta
 		return WriteResult{}, errors.New("append and fail_if_exists contradict each other: one requires the file to exist, the other requires it not to")
 	}
 
-	files, err := r.deps.Clients.Files(target.Name(), target.Address())
+	files, err := r.deps.Clients.Files(target.Client())
 	if err != nil {
 		return WriteResult{}, target.Call().Map(err)
 	}
@@ -515,7 +515,7 @@ func (r *Registrar) sandboxEdit(ctx context.Context, _ *mcp.CallToolRequest, tar
 		return EditResult{}, errors.New("path is required")
 	}
 
-	files, err := r.deps.Clients.Files(target.Name(), target.Address())
+	files, err := r.deps.Clients.Files(target.Client())
 	if err != nil {
 		return EditResult{}, target.Call().Map(err)
 	}
@@ -598,7 +598,7 @@ func (r *Registrar) sandboxLs(ctx context.Context, _ *mcp.CallToolRequest, targe
 		return LsResult{}, fmt.Errorf("limit %d must not be negative", in.Limit)
 	}
 
-	files, err := r.deps.Clients.Files(target.Name(), target.Address())
+	files, err := r.deps.Clients.Files(target.Client())
 	if err != nil {
 		return LsResult{}, target.Call().Map(err)
 	}
@@ -691,7 +691,7 @@ func (r *Registrar) sandboxGlob(ctx context.Context, _ *mcp.CallToolRequest, tar
 		return GlobResult{}, fmt.Errorf("limit %d must not be negative", in.Limit)
 	}
 
-	files, err := r.deps.Clients.Files(target.Name(), target.Address())
+	files, err := r.deps.Clients.Files(target.Client())
 	if err != nil {
 		return GlobResult{}, target.Call().Map(err)
 	}
@@ -790,7 +790,7 @@ func (r *Registrar) sandboxGrep(ctx context.Context, _ *mcp.CallToolRequest, tar
 		return GrepResult{}, fmt.Errorf("context_lines %d and max_matches %d must not be negative", in.ContextLines, in.MaxMatches)
 	}
 
-	files, err := r.deps.Clients.Files(target.Name(), target.Address())
+	files, err := r.deps.Clients.Files(target.Client())
 	if err != nil {
 		return GrepResult{}, target.Call().Map(err)
 	}

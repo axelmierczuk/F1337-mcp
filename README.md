@@ -138,7 +138,12 @@ never silently acts on the wrong host.
 
 ## Security
 
-- **mTLS everywhere.** No plaintext mode, not even on loopback.
+- **mTLS by default.** Both ends present certificates from the fleet CA.
+  It can be turned off for a network that already authenticates its peers —
+  a tailnet, a WireGuard mesh, a tight VPC — and then the agent refuses to
+  serve on any address that is neither loopback nor private, says so at every
+  start, shows as `auth none` in `fleetctl list`, and records every command
+  against the address it came from rather than a verified identity.
 - **Keys never move.** Enrollment is a CSR exchange against a single-use token.
 - **No shell by default.** Commands take an argv, not a string.
 - **Caps and audit.** Wall-clock timeouts, output limits, append-only JSONL

@@ -41,8 +41,8 @@ type fleetLister interface {
 }
 
 type agentClients interface {
-	Host(name, address string) (sandboxdv1.HostServiceClient, error)
-	Process(name, address string) (sandboxdv1.ProcessServiceClient, error)
+	Host(t client.Target) (sandboxdv1.HostServiceClient, error)
+	Process(t client.Target) (sandboxdv1.ProcessServiceClient, error)
 	Health(name string) (client.HealthStatus, bool)
 }
 
@@ -77,6 +77,33 @@ func NewFleetSource(fleet *registry.Registry, pool *client.Pool, timeout time.Du
 	return &fleetSource{fleet: fleet, pool: pool, timeout: timeout}
 }
 
+// target is how this pane dials one sandbox: its address, and whether this
+// fleet authenticates the connection to it.
+//
+// The posture is looked up rather than carried in from the pane, because the
+// panes address a sandbox by name and address and adding a third value to every
+// one of their signatures would put the same fact in five more places to keep
+// in step. A registry that cannot be read, or a name that is not in it, falls
+// back to mTLS: the conservative half, where a wrong guess is a failed
+// handshake rather than a plaintext connection nobody asked for.
+func (s *fleetSource) target(name, address string) client.Target {
+	sandboxes, err := s.fleet.List()
+	if err != nil {
+		return client.Target{Name: name, Address: address}
+	}
+	for _, sb := range sandboxes {
+		if sb.Name == name {
+			t := client.TargetFor(sb)
+			// The address the pane is holding wins: it is what the caller
+			// asked for, and a registry edited underneath a running TUI must
+			// not silently redirect a call to somewhere else.
+			t.Address = address
+			return t
+		}
+	}
+	return client.Target{Name: name, Address: address}
+}
+
 // Sandboxes lists the fleet and reads each sandbox's cached health.
 //
 // It issues no RPCs. Calling Host here is what pools a channel for a sandbox
@@ -104,7 +131,7 @@ func (s *fleetSource) Sandboxes(_ context.Context) ([]Sandbox, error) {
 		// A sandbox whose address cannot be dialed at all — a malformed
 		// host:port in the registry — is a fact about the fleet, so it is
 		// reported in the row rather than failing the whole listing.
-		if _, err := s.pool.Host(sb.Name, sb.Address); err != nil {
+		if _, err := s.pool.Host(client.TargetFor(sb)); err != nil {
 			row.Health, row.Detail = client.HealthUnreachable, oneLine(err.Error())
 			out = append(out, row)
 			continue
@@ -161,7 +188,7 @@ func probeDetail(err error) string {
 }
 
 func (s *fleetSource) Processes(ctx context.Context, sandbox, address string) ([]Process, error) {
-	proc, err := s.pool.Process(sandbox, address)
+	proc, err := s.pool.Process(s.target(sandbox, address))
 	if err != nil {
 		return nil, client.MapError(err)
 	}
@@ -228,7 +255,7 @@ func sortedPorts(ports []uint32) []uint32 {
 // same bound fleet_process_logs is under, for the same reason: a call that
 // never returns is indistinguishable from a hung agent.
 func (s *fleetSource) Logs(ctx context.Context, sandbox, address, processID string, opts LogOptions) (Logs, error) {
-	proc, err := s.pool.Process(sandbox, address)
+	proc, err := s.pool.Process(s.target(sandbox, address))
 	if err != nil {
 		return Logs{}, client.MapError(err)
 	}
@@ -347,7 +374,7 @@ func renderLogLine(line *sandboxdv1.LogLine) string {
 }
 
 func (s *fleetSource) Detail(ctx context.Context, sandbox, address string, toolchains bool) (Detail, error) {
-	host, err := s.pool.Host(sandbox, address)
+	host, err := s.pool.Host(s.target(sandbox, address))
 	if err != nil {
 		return Detail{}, client.MapError(err)
 	}
@@ -419,7 +446,7 @@ func boundFollow(d time.Duration) time.Duration {
 const gracePeriod = 10 * time.Second
 
 func (s *fleetSource) Signal(ctx context.Context, sandbox, address, processID, sig string, graceful bool) error {
-	proc, err := s.pool.Process(sandbox, address)
+	proc, err := s.pool.Process(s.target(sandbox, address))
 	if err != nil {
 		return client.MapError(err)
 	}
@@ -473,7 +500,7 @@ func parseSignal(sig string) (sandboxdv1.SignalProcessRequest_Signal, error) {
 }
 
 func (s *fleetSource) Restart(ctx context.Context, sandbox, address, processID string) error {
-	proc, err := s.pool.Process(sandbox, address)
+	proc, err := s.pool.Process(s.target(sandbox, address))
 	if err != nil {
 		return client.MapError(err)
 	}

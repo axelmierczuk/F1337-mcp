@@ -37,7 +37,7 @@
 //	        Name:        "fleet_edit",
 //	        Description: "Replace an exact string in a file on the selected sandbox.",
 //	    }, func(ctx context.Context, req *mcp.CallToolRequest, t *selection.Target, in editArgs) (editResult, error) {
-//	        files, err := r.Deps().Clients.Files(t.Name(), t.Address())
+//	        files, err := r.Deps().Clients.Files(t.Client())
 //	        if err != nil {
 //	            // Mapped too: a pool that could not be built fails here, and
 //	            // "no control certificate at …" still has to name the sandbox
@@ -139,16 +139,16 @@ type targeter interface {
 // that has no control certificate yet — fleet_list and fleet_add work
 // fine without one.
 type Clients interface {
-	// Host returns a HostServiceClient for the named sandbox.
-	Host(name, address string) (sandboxdv1.HostServiceClient, error)
-	// Exec returns an ExecServiceClient for the named sandbox.
-	Exec(name, address string) (sandboxdv1.ExecServiceClient, error)
-	// Files returns a FileServiceClient for the named sandbox.
-	Files(name, address string) (sandboxdv1.FileServiceClient, error)
-	// Process returns a ProcessServiceClient for the named sandbox.
-	Process(name, address string) (sandboxdv1.ProcessServiceClient, error)
-	// Forward returns a ForwardServiceClient for the named sandbox.
-	Forward(name, address string) (sandboxdv1.ForwardServiceClient, error)
+	// Host returns a HostServiceClient for the target sandbox.
+	Host(t client.Target) (sandboxdv1.HostServiceClient, error)
+	// Exec returns an ExecServiceClient for the target sandbox.
+	Exec(t client.Target) (sandboxdv1.ExecServiceClient, error)
+	// Files returns a FileServiceClient for the target sandbox.
+	Files(t client.Target) (sandboxdv1.FileServiceClient, error)
+	// Process returns a ProcessServiceClient for the target sandbox.
+	Process(t client.Target) (sandboxdv1.ProcessServiceClient, error)
+	// Forward returns a ForwardServiceClient for the target sandbox.
+	Forward(t client.Target) (sandboxdv1.ForwardServiceClient, error)
 	// Health returns the cached background health for a pooled sandbox, and
 	// false if nothing has been dialed for that name yet.
 	Health(name string) (client.HealthStatus, bool)

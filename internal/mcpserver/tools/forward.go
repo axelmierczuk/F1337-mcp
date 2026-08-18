@@ -429,7 +429,7 @@ func (r *Registrar) startForward(ctx context.Context, target *selection.Target, 
 	if r.deps.Clients == nil {
 		return ForwardResult{}, fmt.Errorf("sandbox %s cannot be reached: no gRPC client is configured", target.Name())
 	}
-	client, err := r.deps.Clients.Forward(target.Name(), target.Address())
+	client, err := r.deps.Clients.Forward(target.Client())
 	if err != nil {
 		return ForwardResult{}, target.Call().Map(err)
 	}

@@ -19,19 +19,26 @@ import (
 
 func newServeCommand() *cobra.Command {
 	var (
-		configPath string
-		listen     string
-		logLevel   string
-		noJail     bool
-		drain      time.Duration
+		configPath  string
+		listen      string
+		logLevel    string
+		noJail      bool
+		allowPublic bool
+		drain       time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the agent daemon",
-		Long: "serve loads the agent config, opens an mTLS gRPC listener, and hosts every\n" +
+		Long: "serve loads the agent config, opens the gRPC listener, and hosts every\n" +
 			"registered service until it is signalled.\n\n" +
-			"mTLS is mandatory. Clients must present a certificate issued by the fleet CA\n" +
-			"carrying the configured organisational unit; there is no plaintext mode.\n\n" +
+			"With tls.enabled true — which is what `fleet-agent enroll` writes — clients\n" +
+			"must present a certificate issued by the fleet CA carrying the configured\n" +
+			"organisational unit, and the agent presents its own.\n\n" +
+			"With tls.enabled false the agent serves plaintext and authenticates nobody:\n" +
+			"whatever the network provides is the whole of it. That is a posture for a\n" +
+			"network that authenticates its peers — a tailnet, a WireGuard mesh, a tight\n" +
+			"VPC — and the daemon refuses to serve it on an address that is neither\n" +
+			"loopback nor private unless --allow-unauthenticated-public says otherwise.\n\n" +
 			"allowed_roots is enforced only when exec.enabled is false. A caller that can\n" +
 			"run commands reaches any path without FileService, so on an exec-enabled\n" +
 			"agent the roots are ignored and the daemon says so at every start.\n\n" +
@@ -41,11 +48,12 @@ func newServeCommand() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runServe(cmd.Context(), serveOptions{
-				configPath: configPath,
-				listen:     listen,
-				logLevel:   logLevel,
-				noJail:     noJail,
-				drain:      drain,
+				configPath:  configPath,
+				listen:      listen,
+				logLevel:    logLevel,
+				noJail:      noJail,
+				allowPublic: allowPublic,
+				drain:       drain,
 			})
 		},
 	}
@@ -53,6 +61,8 @@ func newServeCommand() *cobra.Command {
 	cmd.Flags().StringVar(&listen, "listen", "", "override the config's listen address")
 	cmd.Flags().StringVar(&logLevel, "log-level", "", "override the config's log level: debug, info, warn, error")
 	cmd.Flags().BoolVar(&noJail, "no-jail", false, "with exec.enabled false, start anyway when allowed_roots is empty (with exec enabled there is no jail to disable)")
+	cmd.Flags().BoolVar(&allowPublic, "allow-unauthenticated-public", false,
+		"with tls.enabled false, serve on an address that is neither loopback nor private; anyone who can reach the port can run commands on this host")
 	cmd.Flags().DurationVar(&drain, "drain-timeout", 0, "how long to wait for in-flight RPCs on shutdown (default "+agent.DefaultDrainTimeout.String()+")")
 	return cmd
 }
@@ -62,7 +72,12 @@ type serveOptions struct {
 	listen     string
 	logLevel   string
 	noJail     bool
-	drain      time.Duration
+	// allowPublic is --allow-unauthenticated-public. It reaches both
+	// [agent.Config.Validate] and [agent.New]: the command checks first so the
+	// refusal is a clean message, and the daemon checks again because it is
+	// what actually binds the socket.
+	allowPublic bool
+	drain       time.Duration
 }
 
 // serverOptions is what the daemon is built from.
@@ -71,12 +86,13 @@ type serveOptions struct {
 // daemon reports and the version enrollment records are one fact, and a test
 // can only hold them to that if both are reachable without starting a daemon
 // or dialling a control plane. See reportedVersion and #61.
-func serverOptions(cfg *agent.Config, log *slog.Logger, drain time.Duration) agent.Options {
+func serverOptions(cfg *agent.Config, log *slog.Logger, opts serveOptions) agent.Options {
 	return agent.Options{
-		Config:       cfg,
-		Log:          log,
-		Version:      reportedVersion(),
-		DrainTimeout: drain,
+		Config:                     cfg,
+		Log:                        log,
+		Version:                    reportedVersion(),
+		DrainTimeout:               opts.drain,
+		AllowUnauthenticatedPublic: opts.allowPublic,
 	}
 }
 
@@ -96,9 +112,19 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		cfg.Log.Level = opts.logLevel
 	}
 
-	if err := cfg.Validate(agent.ValidateOptions{AllowNoJail: opts.noJail}); err != nil {
+	if err := cfg.Validate(agent.ValidateOptions{
+		AllowNoJail:                opts.noJail,
+		AllowUnauthenticatedPublic: opts.allowPublic,
+	}); err != nil {
 		if errors.Is(err, agent.ErrNoAllowedRoots) {
 			return fmt.Errorf("%w\n\nconfig: %s", err, path)
+		}
+		if errors.Is(err, agent.ErrUnauthenticatedPublicListen) {
+			// The remedy, and the file to edit. This is the one refusal an
+			// operator meets while trying to start an agent that works fine on
+			// their laptop, so it has to say what to do rather than only what
+			// was wrong.
+			return fmt.Errorf("%w%s\n\nconfig: %s", err, agent.UnauthenticatedListenRemedy, path)
 		}
 		return err
 	}
@@ -131,7 +157,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 
 	// The jail state is announced by agent.New, which is the one place that
 	// decides it — see jailFor. Doing it here as well would let the two drift.
-	srv, err := agent.New(serverOptions(cfg, log, opts.drain))
+	srv, err := agent.New(serverOptions(cfg, log, opts))
 	if err != nil {
 		return err
 	}

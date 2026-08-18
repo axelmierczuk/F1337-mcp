@@ -631,3 +631,63 @@ func TestServiceInstall_RefusesABinaryTheServiceAccountCannotRead(t *testing.T) 
 	assert.Empty(t, calls(),
 		"nothing may be registered: the service manager accepts this definition and then fails every start")
 }
+
+// `service install` says what it just registered when the config authenticates
+// nobody, and says when the daemon it registered will refuse to start.
+//
+// The unit runs `serve --config <path>` and nothing else, so a config the
+// daemon refuses produces an installed service that never comes up — which an
+// operator reads as a broken install rather than as the posture it is. This is
+// the last moment before that happens where anyone is looking.
+func TestServiceInstall_SaysWhenTheAgentItRegisteredAuthenticatesNobody(t *testing.T) {
+	t.Run("loopback: a warning, and it will start", func(t *testing.T) {
+		configPath, _, _ := installConfig(t, "")
+		args := append([]string{"service", "install", "--config", configPath}, installAccount(t)...)
+		_, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+		defer restore()
+
+		out := &bytes.Buffer{}
+		require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
+		text := out.String()
+		assert.Contains(t, text, "tls.enabled is false")
+		assert.Contains(t, text, "authenticate nobody")
+		assert.NotContains(t, text, "refuse to start",
+			"a loopback listener is the one place this posture needs no override")
+	})
+
+	t.Run("wildcard: the daemon will refuse, and install says so", func(t *testing.T) {
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "agent.yaml")
+		require.NoError(t, os.WriteFile(configPath, []byte(
+			"name: test-host\nlisten: 0.0.0.0:8722\n"+
+				"state_dir: "+filepath.ToSlash(filepath.Join(dir, "state"))+"\n"+
+				"audit:\n  path: "+filepath.ToSlash(filepath.Join(dir, "logs", "audit.jsonl"))+"\n"), 0o600))
+		t.Setenv("FLEET_AGENT_CONFIG", configPath)
+
+		args := append([]string{"service", "install", "--config", configPath}, installAccount(t)...)
+		_, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+		defer restore()
+
+		out := &bytes.Buffer{}
+		require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
+		text := out.String()
+		assert.Contains(t, text, "refuse to start on 0.0.0.0:8722")
+		assert.Contains(t, text, "--allow-unauthenticated-public")
+	})
+
+	t.Run("enrolled: nothing to warn about", func(t *testing.T) {
+		configPath, _, _ := installConfig(t, "tls:\n  certificate: a.crt\n  private_key: a.key\n  ca_bundle: ca.crt\n")
+		// The files have to exist: install hands the enrollment material to the
+		// account the daemon will run as, and refuses when it cannot.
+		for _, name := range []string{"a.crt", "a.key", "ca.crt"} {
+			require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(configPath), name), []byte("x"), 0o600))
+		}
+		args := append([]string{"service", "install", "--config", configPath}, installAccount(t)...)
+		_, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{})
+		defer restore()
+
+		out := &bytes.Buffer{}
+		require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
+		assert.NotContains(t, out.String(), "authenticate nobody")
+	})
+}

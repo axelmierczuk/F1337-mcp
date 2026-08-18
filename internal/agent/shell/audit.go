@@ -6,6 +6,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/axelmierczuk/fleet-mcp/internal/agent"
 	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
 
@@ -32,10 +33,12 @@ type sessionAudit struct {
 	started  time.Time
 	duration time.Duration
 
-	// principal is the common name from the client certificate the daemon
-	// authenticated. It is derived from the verified chain, never from
-	// anything the caller sends.
-	principal string
+	// principal is who the daemon resolved this session's caller to be, and how
+	// it knows: the common name from a verified client certificate, or — on an
+	// agent serving without mTLS — the peer address, named as unauthenticated.
+	// Either way it is derived from the connection, never from anything the
+	// caller sends.
+	principal agent.Principal
 
 	// argv is the command the session ran, and path the executable it resolved
 	// to. This is the one place a caller can put a secret into this file — a
@@ -64,19 +67,22 @@ type sessionAudit struct {
 // record renders the session as the line that goes into the audit log.
 func (a sessionAudit) record() policy.Record {
 	return policy.Record{
-		Time:       a.started,
-		Principal:  a.principal,
-		RPC:        shellMethod,
-		Outcome:    a.outcome,
-		Argv:       a.argv,
-		Path:       a.path,
-		WorkingDir: a.dir,
-		ExitCode:   a.exitCode,
-		Signal:     a.signal,
-		TimedOut:   a.idle,
-		DurationMS: a.duration.Milliseconds(),
-		Rule:       a.rule,
-		Error:      a.failure,
+		Time: a.started,
+		// The name and what established it, always together. See
+		// policy.Record.PrincipalSource.
+		Principal:       a.principal.String(),
+		PrincipalSource: a.principal.Source(),
+		RPC:             shellMethod,
+		Outcome:         a.outcome,
+		Argv:            a.argv,
+		Path:            a.path,
+		WorkingDir:      a.dir,
+		ExitCode:        a.exitCode,
+		Signal:          a.signal,
+		TimedOut:        a.idle,
+		DurationMS:      a.duration.Milliseconds(),
+		Rule:            a.rule,
+		Error:           a.failure,
 	}
 }
 

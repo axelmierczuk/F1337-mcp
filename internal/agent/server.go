@@ -66,11 +66,26 @@ type Options struct {
 
 	// GRPCOptions are appended to the server options this package builds.
 	GRPCOptions []grpc.ServerOption
+
+	// AllowUnauthenticatedPublic carries `serve --allow-unauthenticated-public`
+	// through to the check that opens the listener.
+	//
+	// [Config.Validate] makes the same check, and the command runs it first.
+	// This one is not redundant: Validate is a call a caller can skip, and this
+	// is the function that actually binds the socket. The guard belongs on the
+	// path that cannot be gone around, and a repository whose recurring defect
+	// is a fix the running command never reached does not get to have it in
+	// only one of the two places.
+	//
+	// It is ignored when Listener is set, because then no address from the
+	// config is bound at all — a bufconn has no reachability to judge.
+	AllowUnauthenticatedPublic bool
 }
 
-// Server is the agent daemon: an mTLS gRPC listener hosting every registered
-// service, with a shutdown path that drains RPCs without disturbing supervised
-// background processes.
+// Server is the agent daemon: a gRPC listener — mutually authenticated unless
+// the operator has said otherwise — hosting every registered service, with a
+// shutdown path that drains RPCs without disturbing supervised background
+// processes.
 type Server struct {
 	cfg      *Config
 	log      *slog.Logger
@@ -106,6 +121,15 @@ func New(opts Options) (srv *Server, err error) {
 	if err != nil {
 		return nil, err
 	}
+	// Before anything else is built, and before any listener is opened: an
+	// agent that must not serve here must not have opened its audit log, its
+	// jail or its port first. A nil tlsConf is the whole condition this guards.
+	if opts.Listener == nil {
+		if err := CheckListenPosture(opts.Config, opts.AllowUnauthenticatedPublic); err != nil {
+			return nil, fmt.Errorf("%w%s", err, UnauthenticatedListenRemedy)
+		}
+	}
+	logTLSPosture(opts.Config, opts.Log)
 
 	jailed := opts.Jail
 	if jailed == nil {
@@ -145,6 +169,8 @@ func New(opts Options) (srv *Server, err error) {
 		StartedAt: time.Now().UTC(),
 	}
 
+	mtls := opts.Config.TLS.IsEnabled()
+
 	regs := opts.Services
 	if regs == nil {
 		regs = Registered()
@@ -155,7 +181,6 @@ func New(opts Options) (srv *Server, err error) {
 	}
 
 	serverOpts := []grpc.ServerOption{
-		grpc.Creds(credentials.NewTLS(tlsConf)),
 		// Matched to internal/client's limits. A mismatch surfaces as an
 		// opaque ResourceExhausted on whichever side is stricter, with nothing
 		// to say it was a configured cap rather than a real failure.
@@ -168,8 +193,13 @@ func New(opts Options) (srv *Server, err error) {
 			MinTime:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
-		grpc.ChainUnaryInterceptor(principalUnaryInterceptor, recoveryUnaryInterceptor(opts.Log)),
-		grpc.ChainStreamInterceptor(principalStreamInterceptor, recoveryStreamInterceptor(opts.Log)),
+		// The interceptors are told what the *daemon* is configured for, not
+		// what a connection turned out to carry. See resolvePrincipal.
+		grpc.ChainUnaryInterceptor(principalUnaryInterceptor(mtls), recoveryUnaryInterceptor(opts.Log)),
+		grpc.ChainStreamInterceptor(principalStreamInterceptor(mtls), recoveryStreamInterceptor(opts.Log)),
+	}
+	if tlsConf != nil {
+		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(tlsConf)))
 	}
 	serverOpts = append(serverOpts, opts.GRPCOptions...)
 
@@ -274,6 +304,48 @@ func auditFor(cfg *Config, log *slog.Logger) *policy.Audit {
 	return auditLog
 }
 
+// logTLSPosture says what authenticates the callers of this daemon, at every
+// start.
+//
+// Said out loud for the same reason the unrestricted-proxy line is: the
+// setting's effect is invisible in ordinary use. An agent serving without mTLS
+// answers every call exactly as a secured one does, so an operator who
+// inherited a config, or copied one from a laptop to a cloud VM, has nothing to
+// notice — right up until the port is reachable from somewhere they did not
+// intend, at which point the difference is unauthenticated remote code
+// execution on their host.
+//
+// The listen address is in the line because it is the other half of the
+// question. "No mTLS" on 127.0.0.1 is a development box; the same words on a
+// tailnet address are the posture this option exists for; and the daemon
+// refuses the third case outright rather than logging it, unless it was told to
+// allow it — in which case this line is the only remaining record that it was.
+func logTLSPosture(cfg *Config, log *slog.Logger) {
+	if cfg.TLS.IsEnabled() {
+		return
+	}
+	log.Warn("THIS AGENT AUTHENTICATES NOBODY",
+		"reason", "tls.enabled is false, so no client certificate is required and none is presented",
+		"listen", cfg.Listen,
+		"consequence", "anyone who can reach this port can run commands on this host as the account this daemon runs as, and nothing this agent records will name them",
+		"precondition", "this is only safe on a network that authenticates its peers, such as a Tailscale tailnet, a WireGuard mesh, or a VPC with tight security groups",
+		"remedy", "enroll this host and set tls.enabled: true to authenticate callers by certificate")
+
+	if cfg.TLS.Configured() {
+		// The files are right there and are doing nothing. This is the config
+		// of a host that enrolled and then had mTLS turned off — a state an
+		// operator can reach by editing one line and can leave the same way,
+		// and one where every other signal (certificates on disk, a registry
+		// entry, an enrollment record) says the opposite of what is happening.
+		log.Warn("CERTIFICATES ARE CONFIGURED AND IGNORED",
+			"reason", "tls.enabled is false, so the leaf, key and CA bundle in this config are not loaded",
+			"certificate", cfg.TLS.Certificate,
+			"ca_bundle", cfg.TLS.CABundle,
+			"consequence", "this host holds an identity from the fleet CA and is not using it",
+			"remedy", "set tls.enabled: true to use them, or remove them from the config to stop implying they are in force")
+	}
+}
+
 // jailFor builds the jail the daemon hands its services, and announces which
 // of the three states it ended up in.
 //
@@ -373,6 +445,10 @@ func (s *Server) Serve(ctx context.Context) error {
 		// or two. It is false off Linux and on kernels without openat2, and
 		// saying so beats letting an operator assume the stronger guarantee.
 		"jail_atomic", s.deps.Jail.Atomic(),
+		// What authenticates the caller of every RPC this listener accepts.
+		// First among the transport fields because with it false the one below
+		// it describes nothing.
+		"mtls", s.cfg.TLS.IsEnabled(),
 		"require_client_ou", s.cfg.TLS.RequireClientOU,
 		"version", s.deps.Version,
 	)

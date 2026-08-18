@@ -307,7 +307,7 @@ func (r *Registrar) startProxy(ctx context.Context, target *selection.Target, lo
 		return SocksResult{}, err
 	}
 
-	client, err := r.deps.Clients.Forward(target.Name(), target.Address())
+	client, err := r.deps.Clients.Forward(target.Client())
 	if err != nil {
 		return SocksResult{}, target.Call().Map(err)
 	}
@@ -363,7 +363,7 @@ func (r *Registrar) startProxy(ctx context.Context, target *selection.Target, lo
 // proxy is opened at all, and a stale one would decide it from a configuration
 // the agent stopped running some restarts ago.
 func (r *Registrar) socksPolicy(ctx context.Context, target *selection.Target) (*sandboxdv1.ForwardPolicy, error) {
-	host, err := r.deps.Clients.Host(target.Name(), target.Address())
+	host, err := r.deps.Clients.Host(target.Client())
 	if err != nil {
 		return nil, target.Call().Map(err)
 	}
