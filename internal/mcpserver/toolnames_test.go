@@ -22,6 +22,34 @@ import (
 // registrations it checks. A test that built its expectation from the same
 // source it verifies would agree with any rename, which is exactly the change
 // worth failing on.
+//
+// # Why the prefix stays
+//
+// #86 proposed dropping it, on the grounds that a client which namespaces by
+// server applies it twice: under the documented server key "fleet", Claude Code
+// presents fleet_exec as mcp__fleet__fleet_exec. That much is true, and it is
+// still not the case for renaming, because namespacing is a client courtesy
+// rather than a protocol guarantee.
+//
+// The spec scopes name uniqueness to a single server and says a client that
+// aggregates several SHOULD — not MUST — disambiguate, while warning in the
+// same breath that the server name is not unique enough to disambiguate with.
+// Several clients duly do not: openai-agents-python gates prefixing behind
+// include_server_in_tool_names, which defaults to False; langchain-mcp-adapters
+// behind tool_name_prefix, which defaults to False; VS Code prefixes every MCP
+// tool with an opaque f1e_ that names no server at all. Cursor, which does
+// prefix, has still routed two servers' same-named tools to one of them. In any
+// of those, a bare "exec", "read", "write", "list" or "remove" lands in one flat
+// list beside the host's own tools and every other server's — and the tool this
+// one would be mistaken for is the one that runs arbitrary commands, on a
+// different machine. That is the silent target confusion tools/registrar.go
+// calls the most destructive failure this system can produce, arriving one
+// layer ahead of the Echo that guards it: in the only field the model reads
+// before it chooses.
+//
+// The cosmetic half of the complaint is already answered. Every tool here sets
+// Title, which is the field the spec designates for display. The name is what
+// the model matches on, and it is carrying weight.
 var allToolNames = []string{
 	"fleet_add",
 	"fleet_edit",
