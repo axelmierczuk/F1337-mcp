@@ -211,3 +211,108 @@ func processGroupMembers(t *testing.T, pgid int) []int {
 	}
 	return members
 }
+
+// TestExecSweepsADescendantThatOutlivedItsCommand runs a command that succeeds
+// and leaves a descendant behind, and proves the descendant went with the call
+// while an unrelated process group did not.
+//
+// This is the sweep's own scenario and the one the kill path never sees. Every
+// other tree assertion in this suite runs a command that is still alive when
+// the agent decides to kill it, so the group is signalled while its leader is
+// running and the id it names is beyond question. Here nothing killed anything:
+// the command exited on its own, and the only thing that reaches what it left
+// is the sweep at the end of the RPC.
+//
+// The bystander is the half of it #91 is about. The sweep names a process group
+// id, which is a pid, and a pid the kernel has taken back can be handed to
+// somebody else's session leader — so a sweep sent a moment too late is a
+// SIGKILL to a stranger's whole process group. There is no way to force that
+// here without control of pid allocation, so this asserts the property that
+// makes it impossible rather than the event: a process the agent never started
+// is still running afterwards, and so is the agent.
+func TestExecSweepsADescendantThatOutlivedItsCommand(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("build-box", enrollOptions{})
+	s := f.connect(t)
+	s.ok("fleet_select", map[string]any{"name": a.name})
+
+	// Its own session leader, started before the command and expected to be
+	// there after it. Its only job is to hold a process group the sweep must
+	// not touch.
+	bystander := start(t, "bystander", bins.helpers, []string{"sleep"}, procOptions{})
+
+	res := structured[execResult](t, s.okAs("fleet_exec", map[string]any{
+		"argv": []string{bins.helpers, "orphan"},
+	}, callOptions{timeout: 120 * time.Second}))
+
+	procs := parseTree(t, res.Stdout)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, p := range procs {
+			killPID(p.pid)
+		}
+	})
+
+	// The command succeeded, which is what makes this the sweep's scenario and
+	// not the timeout's: nothing here was killed for overrunning or for losing
+	// its caller.
+	if res.TimedOut {
+		t.Fatalf("the command exited on its own; a timeout here means it never got to leave a descendant: %+v", res)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("the command exited %d, so what follows is about a failed command rather than a successful one: %+v", res.ExitCode, res)
+	}
+	if len(procs) != 2 {
+		t.Fatalf("expected the command and its descendant to announce themselves, got %v from:\n%s", procs, res.Stdout)
+	}
+
+	// Checked before anything is asserted about the group, for the same reason
+	// as the timeout scenario: a command that is not in a session of its own
+	// has no group for its descendant to be in, and every assertion below would
+	// pass while the descendant sat somewhere this test never looks.
+	leader, descendant := procs[0], procs[1]
+	if leader.pgid != leader.pid {
+		t.Fatalf("the command's leader (pid %d) is in group %d rather than leading its own; "+
+			"the sweep has no group to aim at and the assertions below would be vacuous",
+			leader.pid, leader.pgid)
+	}
+	if descendant.pgid != leader.pgid {
+		t.Fatalf("the descendant (pid %d) is in group %d, not the command's group %d: the group swept is not the one it is in",
+			descendant.pid, descendant.pgid, leader.pgid)
+	}
+
+	waitFor(t, 30*time.Second, fmt.Sprintf("the descendant (pid %d) to be gone", descendant.pid), func() (bool, string) {
+		if !processAlive(descendant.pid) {
+			return true, ""
+		}
+		return false, fmt.Sprintf("pid %d outlived the call that started it: the sweep did not reach it", descendant.pid)
+	})
+
+	// And nothing else in the group either. The command led its own session, so
+	// membership of that group is a complete list of what it left behind.
+	waitFor(t, 30*time.Second, "the command's process group to empty", func() (bool, string) {
+		members := processGroupMembers(t, leader.pgid)
+		if len(members) == 0 {
+			return true, ""
+		}
+		return false, fmt.Sprintf("process group %d still holds %v", leader.pgid, members)
+	})
+
+	// The other half: a group the agent has no business signalling was not
+	// signalled. On a developer's machine this is their editor or their build.
+	if !bystander.running() {
+		t.Fatalf("a process group outside the command's did not survive the sweep")
+	}
+	if !processAlive(bystander.pid()) {
+		t.Fatalf("pid %d, which the agent never started, was killed by the sweep", bystander.pid())
+	}
+
+	// Including the agent's own, which is one level up from the command's and
+	// what a sweep aimed one level too high would take out.
+	if !a.proc.running() {
+		t.Fatalf("the agent died sweeping the process group:\n%s", a.logs())
+	}
+	s.ok("fleet_exec", map[string]any{"argv": []string{"true"}})
+}

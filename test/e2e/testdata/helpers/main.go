@@ -32,7 +32,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: helpers <serve|serve-when|spew|tree|sleep|winsize|tui> ...")
+		fail("usage: helpers <serve|serve-when|spew|orphan|tree|sleep|winsize|tui> ...")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -41,6 +41,8 @@ func main() {
 		serveWhen(os.Args[2:])
 	case "spew":
 		spew(os.Args[2:])
+	case "orphan":
+		orphan()
 	case "tree":
 		tree(os.Args[2:])
 	case "sleep":
@@ -297,6 +299,40 @@ func tree(args []string) {
 		}
 	}
 	time.Sleep(treeLifetime)
+}
+
+// orphan starts a child that outlives it, announces both identities, and exits
+// at once.
+//
+// This is the shape the post-exec sweep exists for and the only one nothing on
+// the kill path ever reaches: the command succeeded, so no timeout and no
+// hangup signalled anything, and by the time the agent is done waiting the
+// process that would have carried its child down with it is already gone.
+// `sh -c 'daemon &'` is the same thing spelled with a shell.
+//
+// The child inherits no pipes. A child holding the command's stdout is a
+// different scenario — it is what Cmd.WaitDelay bounds — and mixing the two
+// would leave a failure of either looking like a failure of the other.
+//
+// Both identities are printed in the same form tree uses, so a scenario reads
+// them back with parseTree: this process first, because it is the group leader
+// and the assertions turn on that.
+func orphan() {
+	// #nosec G204 -- this is a self-exec: the binary is os.Args[0] and there is
+	// no interpolated value at all.
+	child := exec.Command(os.Args[0], "sleep")
+	child.Stdout = nil
+	child.Stderr = nil
+	if err := child.Start(); err != nil {
+		fail("spawn child: " + err.Error())
+	}
+
+	// The child inherited this process's group, so one reading covers both. A
+	// scenario that needs that checked rather than asserted reads the group's
+	// membership from the process table.
+	group := processGroup()
+	fmt.Printf("pid %d pgid %d\n", os.Getpid(), group)
+	fmt.Printf("pid %d pgid %d\n", child.Process.Pid, group)
 }
 
 // winsizeLifetime bounds a session that nothing ever ends. See treeLifetime:

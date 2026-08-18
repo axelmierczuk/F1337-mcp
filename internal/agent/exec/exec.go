@@ -472,27 +472,12 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 		// outlive the RPC: exec is one-shot by contract, and docs/tools.md
 		// points anything longer-lived at fleet_process_start.
 		//
-		// Sweep then close, and what each of those does is per platform: see
-		// sweepGroup. Only when the child really leads its own group, though.
-		// Without that the group has degraded to "signal this one pid", and by
-		// this point Wait has reaped it — so the pid may already belong to
-		// something else, and the sweep would kill an unrelated process. There
-		// is nothing left to sweep in that case anyway: a leader that never got
-		// its own group had no group for its descendants to be in.
-		//
-		// Both failures are logged at WARN, and neither is decoration: this is
-		// the step that makes "exec takes its process tree with it" true, so a
-		// failure here is a descendant still running on the host after the RPC
-		// that started it has returned. At DEBUG — which is not the level a
-		// daemon runs at — a broken guarantee would be invisible exactly where
-		// it matters. ErrProcessNotFound is the ordinary answer for a group
-		// that is already empty, and is not a failure.
-		if group.Isolated() {
-			if err := sweepGroup(group); err != nil && !errors.Is(err, platform.ErrProcessNotFound) {
-				s.log.Warn("could not sweep the process group after exec; a descendant may have outlived the call",
-					"error", err)
-			}
-		}
+		// On Windows this is the whole of it: closing the last handle to the job
+		// terminates every process still inside. On Unix the killing has
+		// already happened, in waitForCommand, and deliberately not here — the
+		// sweep is only safe to send while the leader is unreaped, and by the
+		// time a deferred call runs it is not. See waitForCommand for what that
+		// ordering is worth.
 		if err := group.Close(); err != nil {
 			s.log.Warn("could not release the process group after exec; on Windows this is what kills the tree",
 				"error", err)
@@ -561,8 +546,12 @@ func (s *Service) run(ctx context.Context, spec runSpec) (outcome, error) {
 	// precisely what tears the stream down and releases that Send. The channel
 	// is buffered so the goroutine can finish and exit after this function has
 	// returned.
+	//
+	// It is also where the post-exec sweep goes out, because the one moment it
+	// is safe to send is between the leader exiting and this Wait collecting
+	// it; see waitForCommand.
 	waited := make(chan error, 1)
-	go func() { waited <- cmd.Wait() }()
+	go func() { waited <- waitForCommand(cmd, group, s.log) }()
 
 	var waitErr error
 	select {

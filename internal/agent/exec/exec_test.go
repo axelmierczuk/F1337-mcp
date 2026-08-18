@@ -733,28 +733,130 @@ func TestExec_TheEscalationStartsWithSIGTERM(t *testing.T) {
 // the command's stdout, and a grandchild that inherited it does — `sh -c
 // 'daemon &'` is the shape. So a command that finished in a millisecond would
 // keep its RPC, its concurrency slot and its audit record waiting until the
-// timeout, and then be reported as having timed out. Cmd.WaitDelay is what
-// bounds that; see defaultIODrain.
+// timeout, and then be reported as having timed out.
 //
-// Nothing asserted it. Every other grandchild in this file is started with no
-// pipes at all, so deleting WaitDelay left the package, and the end-to-end
-// suite, green.
-//
-// # The grandchild really holding the pipe is asserted, not assumed
-//
-// Everything below except the drain's own record is also true of a command
-// whose descendant inherited nothing: it exits, it is not timed out, its code
-// is zero, and the sweep takes the descendant with the call. The one thing
-// only this shape produces is os/exec returning ErrWaitDelay — which it does
-// only for a process that has exited while something still holds its pipes —
-// and the handler logs exactly there. Without that line asserted, deleting the
-// grandchild's inherited stdout left this test green while it measured
-// nothing, which is #70's mistake aimed at a fixture instead of a clock.
+// Two different things stop that, and which one gets there first is per
+// platform. On Unix the sweep reaches the grandchild as soon as the command
+// exits — see waitForCommand — and the pipe closes because its last holder
+// died.
+// On Windows there is no sweep to send and Cmd.WaitDelay is what ends the wait;
+// see defaultIODrain. This asserts the guarantee both of them owe the caller,
+// and the two tests below it assert which one paid.
 func TestExec_ADescendantHoldingTheOutputPipeDoesNotHoldTheCall(t *testing.T) {
 	h := newHarness(t)
 
 	pidFile := filepath.Join(t.TempDir(), "holding.pid")
 	req := helperReq("spawn-exit-holding-stdout", pidFile)
+	// Far longer than the harness's drain, so a call that waited for the pipe
+	// instead of being bounded is reported as a timeout rather than as a
+	// result. The value is a bound on the failure, not on the behaviour.
+	req.Timeout = durationpb.New(10 * time.Second)
+
+	stream, err := h.run(t, req)
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.False(t, res.GetTimedOut(),
+		"the command exited on its own; only its descendant still held the output pipe")
+	require.Equal(t, int32(0), res.GetExitCode())
+
+	// And the descendant goes with the call like any other.
+	_, grandchild := readPIDs(t, pidFile)
+	requireProcessGone(t, grandchild)
+
+	records := h.records(t)
+	require.Len(t, records, 1)
+	require.Equal(t, policy.OutcomeOK, records[0].Outcome)
+	require.False(t, records[0].TimedOut)
+}
+
+// The sweep reaches the descendant before the drain has to.
+//
+// This is the ordering #91 is about, read from the outside. The sweep is sent
+// between the command exiting and Wait reaping it, so by the time Wait starts
+// waiting on the output copiers the grandchild holding the pipe is already
+// dead and they finish on their own. os/exec reports ErrWaitDelay only for a
+// process that exited while something still held its pipes, and the handler
+// logs exactly there — so that line appearing means the drain was still what
+// ended this wait, which is the ordering this fix replaced.
+//
+// The line is asserted present, on this same fixture, by the test below: put
+// the grandchild outside the group where the sweep cannot reach it and the
+// drain is what ends the wait again. So "not there" here cannot pass by the
+// message having changed or the log having gone quiet.
+func TestExec_TheSweepReachesADescendantBeforeTheDrainHasTo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows sends no sweep: the job object takes the tree at Close, and the drain is what ends the wait")
+	}
+	h := newHarness(t)
+
+	pidFile := filepath.Join(t.TempDir(), "holding.pid")
+	req := helperReq("spawn-exit-holding-stdout", pidFile)
+	req.Timeout = durationpb.New(10 * time.Second)
+
+	stream, err := h.run(t, req)
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.Equal(t, int32(0), res.GetExitCode())
+	require.False(t, res.GetSignaled(),
+		"the sweep went out while the command was still running, and SIGKILLed the thing it was waiting for")
+
+	_, grandchild := readPIDs(t, pidFile)
+	requireProcessGone(t, grandchild)
+
+	require.NotContains(t, h.logs.String(), "stopped reading output after the process exited",
+		"the drain is what ended the wait, so the sweep had not been sent yet — which is the ordering that lets it name a group id the kernel has handed to somebody else")
+}
+
+// The sweep does not reach a command that is still running.
+//
+// awaitExit is what holds it back. If it returned before the process had
+// exited — which is what a no-op, or a WNOHANG-shaped check, would do — the
+// sweep would go out microseconds after Start and SIGKILL the very command it
+// is meant to clean up after. Every successful command with a group of its own
+// would come back killed.
+//
+// The recorded fact is the status: a command that ran to its own exit reports
+// the code it chose, and one the sweep reached reports SIGKILL. The command
+// sleeps because the mistake needs a window to happen in, not because anything
+// here is asserted on how long it took — an awaitExit that returned early
+// returns in microseconds, so the sweep lands mid-sleep on any machine.
+func TestExec_TheSweepDoesNotReachACommandThatIsStillRunning(t *testing.T) {
+	h := newHarness(t)
+
+	stream, err := h.run(t, helperReq("sleep", "1"))
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.False(t, res.GetSignaled(),
+		"the command was killed rather than left to exit: the sweep went out before the leader had exited, which is the one thing awaitExit is there to prevent")
+	require.Equal(t, int32(0), res.GetExitCode())
+	require.False(t, res.GetTimedOut())
+}
+
+// A descendant that left the process group is bounded by the drain instead.
+//
+// The sweep aims at a process group, so a grandchild that calls setsid is out
+// of its reach: it survives the call, and it goes on holding the output pipe
+// the command left it. Cmd.WaitDelay is the only thing that ends that wait —
+// deleting it hangs this call until the command's own timeout and reports it as
+// a timeout, which is what the assertions below fail on.
+//
+// It is also what keeps the test above honest: the drain's record is asserted
+// present here, on the same handler and the same message, so its absence there
+// means the sweep got in first rather than the logging having moved.
+func TestExec_ADescendantOutsideTheGroupIsBoundedByTheDrain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a Windows grandchild is in the agent's job object whether it likes it or not; there is no leaving the group to test")
+	}
+	h := newHarness(t)
+
+	pidFile := filepath.Join(t.TempDir(), "detached.pid")
+	req := helperReq("spawn-exit-holding-stdout-detached", pidFile)
 	// Far longer than the harness's drain, so a call that waited for the pipe
 	// instead of for the drain is reported as a timeout rather than as a
 	// result. The value is a bound on the failure, not on the behaviour.
@@ -769,23 +871,20 @@ func TestExec_ADescendantHoldingTheOutputPipeDoesNotHoldTheCall(t *testing.T) {
 		"the command exited on its own; only its descendant still held the output pipe")
 	require.Equal(t, int32(0), res.GetExitCode())
 
-	// The drain is what ended the wait, and this is the handler's own record of
-	// it: os/exec reports ErrWaitDelay only for a process that exited while
-	// something still held its pipes, so this line is simultaneously the
-	// product behaviour under test and the proof the fixture established the
-	// shape it claims to. Everything else here is what a command with no
-	// descendant at all reports.
+	// The handler's own record that os/exec gave up on the pipes rather than
+	// seeing them close: ErrWaitDelay is reported only for a process that
+	// exited while something still held them.
 	require.Contains(t, h.logs.String(), "stopped reading output after the process exited",
-		"the wait ended on the pipes closing rather than on the drain, so the grandchild never held the command's stdout and nothing above is about WaitDelay")
+		"the wait ended on the pipes closing rather than on the drain, so the grandchild never held the command's stdout and nothing here is about WaitDelay")
 
-	// And the descendant goes with the call like any other.
+	// And the grandchild really is out of the sweep's reach, which is what
+	// makes the fixture the shape it claims to be rather than a slower copy of
+	// the test above. Nothing else in this file asserts a survivor, so it is
+	// this test's job to take it with it.
 	_, grandchild := readPIDs(t, pidFile)
-	requireProcessGone(t, grandchild)
-
-	records := h.records(t)
-	require.Len(t, records, 1)
-	require.Equal(t, policy.OutcomeOK, records[0].Outcome)
-	require.False(t, records[0].TimedOut)
+	require.True(t, platform.ProcessExists(grandchild),
+		"the grandchild left the command's process group, so the sweep cannot have reached it; if it is gone, it never detached and the drain above proved nothing")
+	requireKilled(t, grandchild)
 }
 
 // A tree that declines SIGTERM is still gone when the timeout expires.
@@ -1652,6 +1751,19 @@ func requireProcessGone(t *testing.T, pid int) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// requireKilled takes a process this test deliberately left running, and waits
+// for it to be gone before returning.
+//
+// Only for a survivor the agent is not supposed to reach: everything else in
+// this file asserts that the agent already did the killing.
+func requireKilled(t *testing.T, pid int) {
+	t.Helper()
+	proc, err := os.FindProcess(pid)
+	require.NoError(t, err)
+	require.NoError(t, proc.Kill())
+	requireProcessGone(t, pid)
 }
 
 // contextWithPrincipal returns a context carrying a verified client chain, the

@@ -108,7 +108,7 @@ func helperMain(mode string, args []string) int {
 		// something so the caller knows the child exists, and wait. The child
 		// gets no inherited pipes, so a test can find it without the agent's
 		// output drain depending on when it exits.
-		return spawnHelper(arg(args, ""), "sleep", true, false)
+		return spawnHelper(spawnSpec{pidFile: arg(args, ""), childMode: "sleep", wait: true})
 
 	case "spawn-exit":
 		// spawn-exit <pidfile>: the same, except this process exits as soon as
@@ -116,23 +116,32 @@ func helperMain(mode string, args []string) int {
 		// outlived its parent — `sh -c 'daemon &'` — which nothing on the kill
 		// path has reached, because the command was never killed. Only the
 		// post-exec sweep gets it.
-		return spawnHelper(arg(args, ""), "sleep", false, false)
+		return spawnHelper(spawnSpec{pidFile: arg(args, ""), childMode: "sleep"})
 
 	case "spawn-exit-holding-stdout":
 		// spawn-exit-holding-stdout <pidfile>: spawn-exit, except the
 		// grandchild inherits this process's stdout. The agent's read end
-		// therefore never sees EOF once the command itself has exited, which
-		// is the case Cmd.WaitDelay bounds — see defaultIODrain. Every other
-		// grandchild in this file is started with no pipes at all, so nothing
-		// else here can tell a drain that is bounded from one that is not.
-		return spawnHelper(arg(args, ""), "sleep", false, true)
+		// therefore never sees EOF once the command itself has exited. On
+		// Windows that is the case Cmd.WaitDelay bounds — see defaultIODrain.
+		// On Unix the sweep now reaches the grandchild before the drain has to,
+		// which is the ordering #91 is about; the mode below is the one that
+		// still needs the drain there.
+		return spawnHelper(spawnSpec{pidFile: arg(args, ""), childMode: "sleep", holdStdout: true})
+
+	case "spawn-exit-holding-stdout-detached":
+		// spawn-exit-holding-stdout-detached <pidfile>: the same, except the
+		// grandchild leaves the command's process group before it starts
+		// holding the pipe. The sweep aims at the group, so this one is out of
+		// its reach and the drain is the only thing that ends the wait. Unix
+		// only: a Windows grandchild is in the job whether it likes it or not.
+		return spawnHelper(spawnSpec{pidFile: arg(args, ""), childMode: "sleep", holdStdout: true, detach: true})
 
 	case "ignore-term-spawn":
 		// ignore-term-spawn <pidfile>: a tree in which every process declines
 		// SIGTERM, so the polite half of the escalation cannot be what ends
 		// it. Both have to die of the group SIGKILL or not at all.
 		ignoreTerm()
-		return spawnHelper(arg(args, ""), "ignore-term", true, false)
+		return spawnHelper(spawnSpec{pidFile: arg(args, ""), childMode: "ignore-term", wait: true})
 
 	case "env":
 		// env <NAME>: print one variable's value, or nothing when unset. Used
@@ -187,7 +196,21 @@ func arg(args []string, fallback string) string {
 	return fallback
 }
 
-// spawnHelper starts a grandchild in childMode and records both pids, then
+// spawnSpec is what shape of grandchild a spawn mode wants.
+type spawnSpec struct {
+	// pidFile receives both pids; empty writes none.
+	pidFile string
+	// childMode is the helper mode the grandchild runs.
+	childMode string
+	// wait keeps this process alive after the grandchild is running.
+	wait bool
+	// holdStdout hands the grandchild this process's stdout.
+	holdStdout bool
+	// detach puts the grandchild in a session of its own.
+	detach bool
+}
+
+// spawnHelper starts a grandchild in spec.childMode and records both pids, then
 // either waits or returns.
 //
 // The grandchild is started without inheriting this process's stdout unless
@@ -207,31 +230,37 @@ func arg(args []string, fallback string) string {
 // its descendant is still there when Wait comes back.
 //
 // holdStdout hands the grandchild this process's stdout instead, so that the
-// command's output pipe outlives the command. That is the other half of the
-// same shape, and it is the one Cmd.WaitDelay bounds rather than the sweep.
-func spawnHelper(pidFile, childMode string, wait, holdStdout bool) int {
+// command's output pipe outlives the command.
+//
+// detach takes the grandchild out of the command's process group, which is what
+// the sweep aims at — so it is the shape that survives the call, and the only
+// one on Unix in which Cmd.WaitDelay is still what ends the wait.
+func spawnHelper(spec spawnSpec) int {
 	self, err := os.Executable()
 	if err != nil {
 		return 1
 	}
 	child := osexec.Command(self, "600") //nolint:gosec // the test binary re-executing itself
-	child.Env = append(os.Environ(), helperEnvFor(childMode))
+	child.Env = append(os.Environ(), helperEnvFor(spec.childMode))
 	child.Stdout = nil
-	if holdStdout {
+	if spec.holdStdout {
 		child.Stdout = os.Stdout
 	}
 	child.Stderr = nil
+	if spec.detach {
+		detachFromGroup(child)
+	}
 	if err := child.Start(); err != nil {
 		return 1
 	}
-	if pidFile != "" {
+	if spec.pidFile != "" {
 		pids := fmt.Sprintf("%d\n%d\n", os.Getpid(), child.Process.Pid)
-		if err := os.WriteFile(pidFile, []byte(pids), 0o600); err != nil {
+		if err := os.WriteFile(spec.pidFile, []byte(pids), 0o600); err != nil {
 			return 1
 		}
 	}
 	fmt.Println(child.Process.Pid)
-	if !wait {
+	if !spec.wait {
 		return 0
 	}
 	time.Sleep(600 * time.Second)
