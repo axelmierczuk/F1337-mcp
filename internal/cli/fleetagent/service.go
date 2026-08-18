@@ -566,9 +566,13 @@ func runServiceStatus(out io.Writer) error {
 		return p.Err()
 	}
 	if len(mechanisms) > 1 {
-		p.Println("WARNING: this host has the agent registered twice, as a " + mechanisms[0].Describe() +
-			"\n         and as a " + mechanisms[1].Describe() + ". Both start a daemon against the same")
-		p.Println("         state directory, and both re-adopt the same supervised processes.")
+		names := make([]string, 0, len(mechanisms))
+		for _, m := range mechanisms {
+			names = append(names, "a "+m.Describe())
+		}
+		p.Printf("WARNING: this host has the agent registered twice, as %s.\n", strings.Join(names, " and as "))
+		p.Println("         Each starts a daemon against the same state directory, and each")
+		p.Println("         re-adopts the same supervised processes.")
 		p.Println("         Run `fleet-agent service install` to leave exactly one.")
 	}
 
