@@ -12,7 +12,7 @@
 // # What it needs
 //
 // A Go toolchain and a loopback interface. Nothing else: no Docker, no root,
-// no network. The suite builds the three binaries once per run into a
+// no network. The suite builds every binary once per run into a
 // temporary directory and enrolls every sandbox against a CA it creates and
 // throws away.
 //

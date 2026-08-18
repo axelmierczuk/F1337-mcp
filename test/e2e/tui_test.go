@@ -258,11 +258,18 @@ func (s *tuiSession) send(keys string) {
 // waitFor.
 func (s *tuiSession) waitForScreen(t *testing.T, what string, fragments ...string) {
 	t.Helper()
+	awaitScreen(t, s.screen, what, fragments...)
+}
+
+// awaitScreen waits until everything a terminal has been sent contains every
+// fragment. Shared by the two harnesses in this file.
+func awaitScreen(t *testing.T, screen func() string, what string, fragments ...string) {
+	t.Helper()
 	waitFor(t, 60*time.Second, what, func() (bool, string) {
-		screen := s.screen()
+		drawn := screen()
 		for _, fragment := range fragments {
-			if !strings.Contains(screen, fragment) {
-				return false, fmt.Sprintf("%q has not appeared; the terminal holds:\n%s", fragment, screen)
+			if !strings.Contains(drawn, fragment) {
+				return false, fmt.Sprintf("%q has not appeared; the terminal holds:\n%s", fragment, drawn)
 			}
 		}
 		return true, ""
@@ -397,8 +404,14 @@ func stripEscapes(s string) string {
 // Backgrounded and waited on rather than run in the foreground, because `$!` is
 // the only way to ask a shell what pid it thinks this command has — and that
 // pid against the one the helper reports is the whole exec assertion.
+//
+// The flags arrive as the shell's own positional parameters and are passed on
+// with "$@" rather than through an unquoted variable, so that this scenario can
+// type a value with a space in it and an empty one. A command line split on
+// whitespace by the harness could not tell a forwarded argument from a
+// re-serialised one, which is the whole subject below.
 const handOffScript = `
-"$FLEET_CTL" tui $FLEET_HANDOFF_ARGS &
+"$FLEET_CTL" tui "$@" &
 echo $! > "$FLEET_HANDOFF_DIR/shell-pid"
 wait $!
 echo $? > "$FLEET_HANDOFF_DIR/status"
@@ -410,7 +423,20 @@ echo $? > "$FLEET_HANDOFF_DIR/status"
 // --refresh and --timeout are durations the helper has no way to guess, and
 // --registry names the file the whole view is read from. They are given values
 // nothing else in this suite uses, so a match cannot be a coincidence.
-var handOffArgs = []string{"--refresh", "7s", "--timeout", "11s", "--registry", "/nowhere/registry.yaml"}
+//
+// The awkward ones are here deliberately, because "forwarded unchanged" is a
+// claim about the argv as a list and every cheap way of getting it wrong keeps
+// the words and loses the structure. A value with a space in it separates a
+// forwarded argument from a command line joined and re-split. An empty value is
+// the argument a re-serialiser drops without leaving a gap. A repeated flag is
+// the one a rebuild from parsed values collapses to the winner, which is
+// invisible unless both crossings are recorded.
+var handOffArgs = []string{
+	"--refresh", "3s", "--refresh", "7s",
+	"--timeout", "11s",
+	"--registry", "/nowhere/fleet registry.yaml",
+	"--ca-dir", "",
+}
 
 // TestTheHandOffKeepsTheCommandLineAndTheProcess is the two promises
 // `fleetctl tui` makes about handing over, neither of which anything else here
@@ -443,50 +469,17 @@ func TestTheHandOffKeepsTheCommandLineAndTheProcess(t *testing.T) {
 	installFleetctl(t, install)
 	installStubHelper(t, install)
 
-	term, err := pty.New()
-	if err != nil {
-		t.Fatalf("allocate a pseudo-terminal: %v", err)
-	}
-	if err := term.Resize(80, 24); err != nil {
-		t.Fatalf("size the pseudo-terminal: %v", err)
-	}
-	t.Cleanup(func() { _ = term.Close() })
-
-	cmd := term.Command("/bin/sh", "-c", handOffScript)
-	cmd.Env = envWith(
+	// $0 then the operator's flags, which is what makes them "$@" inside the
+	// script rather than a string it has to split.
+	runOnATerminal(t, handOffScript, handOffArgs, envWith(
 		envEntry("FLEET_CTL", filepath.Join(install, exeName("fleetctl"))),
 		envEntry("FLEET_HANDOFF_DIR", record),
-		envEntry("FLEET_HANDOFF_ARGS", strings.Join(handOffArgs, " ")),
 		envEntry("FLEET_CONFIG_DIR", record),
 		envEntry("PATH", os.Getenv("PATH")),
 		envEntry("HOME", record),
 		envEntry("TMPDIR", os.TempDir()),
 		envEntry("TERM", operatorTerm),
-	)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start `fleetctl tui` on a pseudo-terminal: %v", err)
-	}
-	// Drained rather than read: nothing is asserted on the screen here, but a
-	// terminal nobody reads fills up and stops the writer.
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			if _, err := term.Read(buf); err != nil {
-				return
-			}
-		}
-	}()
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-		}
-	})
+	))
 
 	// On the status file having *content*, not on it existing: `echo $? >`
 	// creates it and then writes it, and a read between the two would compare
@@ -497,12 +490,16 @@ func TestTheHandOffKeepsTheCommandLineAndTheProcess(t *testing.T) {
 			"the shell has not finished waiting on `fleetctl tui`"
 	})
 
-	// Unchanged, and compared as one string because that is what was forwarded:
-	// a scenario that checked the flags were "present" would pass for an argv
-	// that had been taken apart and put back together in a different order.
-	want := strings.Join(append([]string{"tui"}, handOffArgs...), " ")
+	// Argument by argument, with each one bracketed, because the claim is about
+	// the argv as a list. Comparing the arguments joined by spaces — which is
+	// what this scenario did first — cannot tell the forwarded list from the
+	// same words handed over as one long argument: `printf '%s' "$*"` renders
+	// both identically, and flattening the command line that way passed here
+	// while the view came up unable to parse its own flags. Bracketed so that an
+	// empty argument and a trailing space are visible in the failure too.
+	want := bracketed(append([]string{"tui"}, handOffArgs...))
 	if got := recorded(t, record, "argv"); got != want {
-		t.Errorf("the helper was handed `%s`, but the operator typed `fleetctl %s`;\n"+
+		t.Errorf("the helper was handed\n%s\nbut the operator typed `fleetctl tui` with\n%s\n"+
 			"the command line is forwarded unchanged so that there is one implementation of every flag "+
 			"— including the credential paths — rather than a second one on the far side (#44)",
 			got, want)
@@ -531,40 +528,66 @@ const stubHelperStatus = "17"
 // installFleetctl puts the real fleetctl into dir under its own name, so that
 // "the helper beside fleetctl" resolves to dir and not to the build directory
 // where the real fleet-tui lives.
+func installFleetctl(t *testing.T, dir string) {
+	t.Helper()
+	installFleetctlAs(t, dir, "fleetctl")
+}
+
+// installFleetctlAs is installFleetctl under a name of the caller's choosing,
+// which is how a scenario arranges the install that names fleetctl after its
+// own helper.
 //
 // Linked rather than copied where the filesystem allows it: this is a 20 MiB
 // binary and the link is the same file by another name, which is all the lookup
 // looks at.
-func installFleetctl(t *testing.T, dir string) {
+func installFleetctlAs(t *testing.T, dir, name string) string {
 	t.Helper()
 
-	path := filepath.Join(dir, exeName("fleetctl"))
+	path := filepath.Join(dir, exeName(name))
 	if err := os.Link(bins.fleetctl, path); err == nil {
-		return
+		return path
 	}
 	source, err := os.ReadFile(bins.fleetctl)
 	if err != nil {
 		t.Fatalf("read fleetctl: %v", err)
 	}
 	if err := os.WriteFile(path, source, 0o755); err != nil { //nolint:gosec // a copy of a binary this test just built
-		t.Fatalf("install fleetctl into %s: %v", dir, err)
+		t.Fatalf("install fleetctl into %s as %s: %v", dir, name, err)
 	}
+	return path
 }
 
 // installStubHelper writes a fleet-tui that reports what it was handed.
 //
 // It records its own pid and argv and exits with a known status, which is the
 // whole of what this scenario needs to know about the far side.
+//
+// One bracketed argument per line, never "$*": the shell joins that with a
+// space, so an argv taken apart and put back together as a single argument —
+// or one that lost an empty value — reads back exactly like the list that was
+// forwarded. See [bracketed].
 func installStubHelper(t *testing.T, dir string) {
 	t.Helper()
 
 	script := "#!/bin/sh\n" +
 		`printf '%s' "$$" > "$FLEET_HANDOFF_DIR/helper-pid"` + "\n" +
-		`printf '%s' "$*" > "$FLEET_HANDOFF_DIR/argv"` + "\n" +
+		`: > "$FLEET_HANDOFF_DIR/argv"` + "\n" +
+		`for a in "$@"; do printf '[%s]\n' "$a" >> "$FLEET_HANDOFF_DIR/argv"; done` + "\n" +
 		"exit " + stubHelperStatus + "\n"
 	if err := os.WriteFile(filepath.Join(dir, exeName("fleet-tui")), []byte(script), 0o755); err != nil { //nolint:gosec // a stub standing in for an installed binary
 		t.Fatalf("install the stub helper into %s: %v", dir, err)
 	}
+}
+
+// bracketed renders an argv the way the stub helper records one: one argument
+// per line, wrapped so that an empty argument is a line and a value with a
+// space in it is one line rather than two.
+func bracketed(args []string) string {
+	var b strings.Builder
+	for _, a := range args {
+		b.WriteString("[" + a + "]\n")
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // recorded reads one of the files the shell or the helper wrote.
@@ -576,4 +599,223 @@ func recorded(t *testing.T, dir, name string) string {
 		t.Fatalf("the hand-off recorded no %s: %v", name, err)
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+// terminalRun is a shell script running on a pseudo-terminal nobody types at.
+//
+// A shell rather than the command itself, for the reason the harness above
+// gives: it is the session leader, so macOS does not revoke the pty out from
+// under the test the moment the command exits, and it outlives the command it
+// ran, so it can record what happened afterwards. Everything written to the
+// terminal is kept, which is both what an assertion reads and what a failure
+// prints.
+type terminalRun struct {
+	out *syncBuffer
+}
+
+// runOnATerminal starts script on a fresh 80x24 pseudo-terminal, with args as
+// its positional parameters and env as the whole environment.
+func runOnATerminal(t *testing.T, script string, args, env []string) *terminalRun {
+	t.Helper()
+
+	term, err := pty.New()
+	if err != nil {
+		t.Fatalf("allocate a pseudo-terminal: %v", err)
+	}
+	if err := term.Resize(80, 24); err != nil {
+		t.Fatalf("size the pseudo-terminal: %v", err)
+	}
+
+	// $0 then the script's own positional parameters, so a value with a space
+	// in it survives the shell.
+	cmd := term.Command("/bin/sh", append([]string{"-c", script, "sh"}, args...)...)
+	cmd.Env = env
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the shell on a pseudo-terminal: %v", err)
+	}
+
+	r := &terminalRun{out: &syncBuffer{}}
+	// Read continuously rather than at the end: a terminal nobody reads fills
+	// up and stops the program writing to it.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := term.Read(buf)
+			if n > 0 {
+				_, _ = r.out.Write(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+		_ = term.Close()
+		if t.Failed() {
+			t.Logf("terminal:\n%s", r.screen())
+		}
+	})
+	return r
+}
+
+// screen is everything the terminal has been sent, with the escape sequences
+// stripped.
+func (r *terminalRun) screen() string { return stripEscapes(r.out.String()) }
+
+func (r *terminalRun) awaitScreen(t *testing.T, what string, fragments ...string) {
+	t.Helper()
+	awaitScreen(t, r.screen, what, fragments...)
+}
+
+// ------------------------------------------ the install without the helper
+
+// missingHelperScript is a workstation where only fleetctl was installed,
+// driven the way an operator would meet it: the command that needs the helper,
+// then a command that does not, then the same command with its output
+// redirected.
+//
+// Statuses are printed rather than inferred from the output, because "it said
+// something about a missing binary" and "it failed" are two different claims
+// and this scenario makes both.
+const missingHelperScript = `
+"$FLEET_CTL" tui
+printf 'TUI-STATUS[%s]\n' "$?"
+"$FLEET_CTL" list
+printf 'LIST-STATUS[%s]\n' "$?"
+"$FLEET_CTL" tui > "$FLEET_MISSING_DIR/piped" 2>&1
+printf 'PIPED-STATUS[%s]\n' "$?"
+printf 'DONE\n'
+`
+
+// TestWithoutTheHelperTuiSaysWhatToInstallAndTheRestIsUnaffected is the cost
+// this PR accepted, driven from the command an operator types.
+//
+// `go install .../cmd/fleetctl@latest` on its own now yields a `fleetctl tui`
+// that cannot draw, and the whole of what makes that acceptable is the sentence
+// it prints instead. Everything about that sentence was asserted by calling
+// findHelper directly, and nothing connected it to the command: replacing the
+// hand-off's error with a silent `return nil` — an operator typing `fleetctl
+// tui` and getting their prompt back, no view and no reason — left this
+// repository green, unit and end-to-end.
+//
+// So: a real fleetctl, alone in a directory, on a real terminal, with a PATH
+// that has no helper on it either. The refusal has to name the binary, say
+// where it looked, give the line that installs it, and say that the rest of the
+// CLI is unaffected — and then `fleetctl list` has to actually work, because a
+// scenario that only read the sentence would pass for a fleetctl that was
+// broken in the way the sentence promises it is not.
+func TestWithoutTheHelperTuiSaysWhatToInstallAndTheRestIsUnaffected(t *testing.T) {
+	requireSupportedHost(t)
+
+	record := t.TempDir()
+	// fleetctl and nothing else — no helper beside it, and the same directory
+	// as PATH, so the two places the lookup knows about are both this one.
+	install := t.TempDir()
+	installFleetctl(t, install)
+
+	run := runOnATerminal(t, missingHelperScript, nil, envWith(
+		envEntry("FLEET_CTL", filepath.Join(install, exeName("fleetctl"))),
+		envEntry("FLEET_MISSING_DIR", record),
+		envEntry("FLEET_CONFIG_DIR", record),
+		envEntry("PATH", install),
+		envEntry("HOME", record),
+		envEntry("TMPDIR", os.TempDir()),
+		envEntry("TERM", operatorTerm),
+	))
+	run.awaitScreen(t, "the workstation to finish all three commands", "DONE")
+
+	screen := run.screen()
+	for _, want := range []string{
+		"fleet-tui",
+		"not next to fleetctl or on PATH",
+		"go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest",
+		"`fleetctl list` and `fleetctl info` need nothing extra",
+		"TUI-STATUS[1]",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("`fleetctl tui` without its helper does not say %q; the terminal holds:\n%s", want, screen)
+		}
+	}
+
+	// The other half of what the refusal claims, checked rather than repeated.
+	for _, want := range []string{"no sandboxes enrolled", "LIST-STATUS[0]"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("`fleetctl list` did not work on an install with no helper, which is what the refusal says is unaffected: %q is missing from:\n%s",
+				want, screen)
+		}
+	}
+
+	// And which refusal comes first when both apply. Redirected output is not a
+	// terminal, and that is the operator's own command being wrong rather than
+	// their install being incomplete — so it is what they are told about, and
+	// they are told it whether or not the helper is installed.
+	piped := recorded(t, record, "piped")
+	if !strings.Contains(piped, "needs a terminal") || !strings.Contains(piped, "fleetctl list --json") {
+		t.Errorf("`fleetctl tui` with its output redirected, on an install with no helper, said:\n%s\n"+
+			"the terminal is what is wrong with that command, and the answer to it does not depend on the helper", piped)
+	}
+	if !strings.Contains(screen, "PIPED-STATUS[1]") {
+		t.Errorf("`fleetctl tui` with its output redirected did not fail; the terminal holds:\n%s", screen)
+	}
+}
+
+// selfHelperScript runs a fleetctl that was installed under its helper's name,
+// and prints something afterwards.
+//
+// The something afterwards is the assertion: the defect this covers is a
+// process that never gets there.
+const selfHelperScript = `
+"$FLEET_CTL" tui
+printf 'STATUS[%s]\n' "$?"
+printf 'DONE\n'
+`
+
+// TestAFleetctlInstalledAsItsOwnHelperRefusesInsteadOfLooping.
+//
+// The hand-off is an exec, and an exec into oneself is invisible: a fleetctl
+// installed as fleet-tui — `cp`, `mv` or `ln -s` by a packager who read
+// "fleet-tui is fleetctl's own command tree" as "the same binary" — finds
+// itself beside itself and execs itself, for ever. Same pid, no child, no exit,
+// nothing written: `fleetctl tui` simply never comes back, which is the failure
+// this command was split out of `fleetctl` to stop. Measured before the guard
+// existed, this scenario's shell was still waiting when the test gave up.
+//
+// End-to-end rather than only at [findHelperVia], because what is wrong with
+// the old behaviour is not the value that function returns — it is that the
+// process never terminates, and only a real run can say that it does. PATH is
+// the install directory, so the lookup meets the same binary in both of the
+// places it knows about.
+func TestAFleetctlInstalledAsItsOwnHelperRefusesInsteadOfLooping(t *testing.T) {
+	requireSupportedHost(t)
+
+	record := t.TempDir()
+	install := t.TempDir()
+	selfNamed := installFleetctlAs(t, install, "fleet-tui")
+
+	run := runOnATerminal(t, selfHelperScript, nil, envWith(
+		envEntry("FLEET_CTL", selfNamed),
+		envEntry("FLEET_CONFIG_DIR", record),
+		envEntry("PATH", install),
+		envEntry("HOME", record),
+		envEntry("TMPDIR", os.TempDir()),
+		envEntry("TERM", operatorTerm),
+	))
+	run.awaitScreen(t, "the command to come back at all, rather than exec into itself for ever", "DONE")
+
+	screen := run.screen()
+	for _, want := range []string{"this same binary", "go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest", "STATUS[1]"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("a fleetctl installed as its own helper does not say %q; the terminal holds:\n%s", want, screen)
+		}
+	}
 }

@@ -274,7 +274,7 @@ ambiguous match from silently editing the wrong line.
 ```
 proto/sandboxd/v1/      wire contract
 gen/go/                 generated code, committed
-cmd/                    three binaries
+cmd/                    every binary
 internal/mcpserver/     MCP transport, tools, selection
 internal/registry/      fleet inventory and persisted state
 internal/client/        gRPC client, pooling, health

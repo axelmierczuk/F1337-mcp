@@ -74,6 +74,9 @@ func handOff(args []string) error {
 // only knowable by running it, and running it is what we are deciding whether
 // to do. A handshake through the environment would only ever catch a helper
 // newer than the check, which is not the direction that hurts.
+//
+// One thing it does detect, because the failure is otherwise silent: a helper
+// that is this same binary. See [isSameBinary].
 func findHelper() (string, error) { return findHelperVia(os.Executable, exec.LookPath) }
 
 // findHelperVia is [findHelper] with its two views of the outside world passed
@@ -81,22 +84,49 @@ func findHelper() (string, error) { return findHelperVia(os.Executable, exec.Loo
 // the test binary, and PATH is the machine's.
 func findHelperVia(executable func() (string, error), lookPath func(string) (string, error)) (string, error) {
 	self, err := executable()
-	if err == nil {
-		// The resolved path too: an install that symlinks fleetctl into a bin
-		// directory leaves the helper beside the *target*, not beside the link.
+	if err != nil {
+		self = ""
+	}
+	// Set by a candidate that was rejected only for being this binary, so the
+	// refusal can say that rather than "there is nothing there".
+	itself := false
+	if self != "" {
+		// The resolved path too, and in this order: the directory the
+		// operator's own invocation named answers first, and the target's is
+		// the fallback that makes a managed install work — a package manager
+		// symlinks fleetctl into a bin directory and leaves the helper beside
+		// the *target*, not beside the link. Ordinary installs have one
+		// directory and both agree; when they differ, the one the invocation
+		// named is the one the operator can see.
 		candidates := []string{self}
 		if resolved, err := filepath.EvalSymlinks(self); err == nil && resolved != self {
 			candidates = append(candidates, resolved)
 		}
 		for _, c := range candidates {
 			beside := filepath.Join(filepath.Dir(c), exeName(helperName))
-			if isExecutableFile(beside) {
-				return beside, nil
+			if !isExecutableFile(beside) {
+				continue
 			}
+			if isSameBinary(self, beside) {
+				itself = true
+				continue
+			}
+			return beside, nil
 		}
 	}
-	if path, err := lookPath(helperName); err == nil {
+	// err == nil, not "a path came back": exec.LookPath answers with a path
+	// *and* an error for a match found through a relative PATH entry, "."
+	// among them. A CLI that holds the operator's control key does not exec
+	// whatever the working directory happens to contain.
+	if path, err := lookPath(helperName); err == nil && !isSameBinary(self, path) {
 		return path, nil
+	}
+	if itself {
+		return "", fmt.Errorf(
+			"%w, and the %s next to fleetctl is this same binary. A copy, a rename or a symlink of "+
+				"fleetctl does not draw the view — the view is linked into a different program. "+
+				"Install it: `go install github.com/axelmierczuk/fleet-mcp/cmd/%s@latest`",
+			errNoHelper, helperName, helperName)
 	}
 	return "", fmt.Errorf(
 		"%w, which draws the view, and it is not next to fleetctl or on PATH. "+
@@ -104,6 +134,39 @@ func findHelperVia(executable func() (string, error), lookPath func(string) (str
 			"`go install github.com/axelmierczuk/fleet-mcp/cmd/%s@latest`. "+
 			"`fleetctl list` and `fleetctl info` need nothing extra",
 		errNoHelper, helperName)
+}
+
+// isSameBinary reports whether path is the binary that is running.
+//
+// It is not a helper if it is us. A fleetctl installed under the helper's name
+// — a copy, a rename, or a symlink made by someone who read "fleet-tui is
+// fleetctl's own command tree" as "the same binary" — finds itself beside
+// itself and execs itself, and then does it again: same pid, no output, no
+// error, no view, for ever. Exec is exactly what makes it invisible, since
+// there is no child to notice and no exit for the operator's shell to report;
+// what they see is `fleetctl tui` hanging on a terminal, which is the failure
+// this whole command was split out to stop.
+//
+// By name first, because that is the case: dir/fleet-tui found from
+// dir/fleet-tui is the same string. os.SameFile after it, for the hard link
+// and the symlink into another directory, which are the same file under two
+// names.
+func isSameBinary(self, path string) bool {
+	if self == "" || path == "" {
+		return false
+	}
+	if self == path {
+		return true
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		return false
+	}
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(selfInfo, pathInfo)
 }
 
 // isExecutableFile reports whether path is something this process could exec.

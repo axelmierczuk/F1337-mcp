@@ -24,7 +24,7 @@ designate instead of your laptop.
 
 ## What it is
 
-Three binaries, one Go module:
+Four binaries, one Go module:
 
 - **`fleet-mcp`** — runs on your workstation. The MCP server your agent
   talks to. Owns the registry of known sandboxes and the current selection.
@@ -153,7 +153,7 @@ dedicated machine). Full threat model in [docs/security.md](docs/security.md).
 ```sh
 make tools        # pinned buf, protoc plugins, golangci-lint into .tools/
 make proto        # regenerate Go from proto/
-make build        # all three binaries
+make build        # every binary
 make check        # the gate: proto, vet and lint per GOOS, tests under -race
 make test-norace  # the unit tests without -race, as CI and the release gate run them
 ```
