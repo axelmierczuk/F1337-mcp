@@ -478,7 +478,7 @@ func TestServiceStatus_WarnsAboutTwoRegistrations(t *testing.T) {
 // command line, because the decision it reports is one this repository has
 // three times fixed in a function the CLI never reached.
 func TestServiceInstall_DryRunReportsThePlan(t *testing.T) {
-	pinAgentConfig(t)
+	stateDir := pinAgentConfig(t)
 
 	out := &bytes.Buffer{}
 	code := fleetagent.Main([]string{"service", "install", "--dry-run"}, out)
@@ -488,6 +488,14 @@ func TestServiceInstall_DryRunReportsThePlan(t *testing.T) {
 	assert.Contains(t, text, "dry run")
 	assert.Contains(t, text, "mechanism:")
 	assert.Contains(t, text, "runs as:")
+	// The directory the daemon's state will live in, which is the answer an
+	// operator most often runs a dry run to get after moving state_dir — and
+	// the one line of the plan nothing asserted. Compared as a path: the config
+	// echoes whatever spelling it was written with, so on Windows this line and
+	// the `config:` line above it disagree about separators while naming
+	// directories that are both exactly right.
+	assert.Equal(t, filepath.Clean(stateDir), plannedPath(t, text, "state"),
+		"the plan has to name the state directory this host will use")
 
 	switch runtime.GOOS {
 	case "windows":

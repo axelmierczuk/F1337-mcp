@@ -480,7 +480,28 @@ func TestServiceInstall_DryRunReportsABinaryTheAccountCannotRead(t *testing.T) {
 	assert.Contains(t, text, "mechanism:",
 		"the plan is what a dry run is for, and it is what the refusal was returned instead of")
 	assert.Contains(t, text, `NT AUTHORITY\NetworkService`)
-	assert.Contains(t, text, stateDir, "including the directories install would create")
+	assert.Equal(t, filepath.Clean(stateDir), plannedPath(t, text, "state"),
+		"including the directories install would create")
+}
+
+// plannedPath is the path a `key:` line of the dry run's plan names, read back
+// as a path rather than as a string.
+//
+// Same reason as keptStateDir, and the same trap: state_dir is echoed from the
+// config exactly as it was written, agent.Load only joins a *relative* path,
+// and these helpers write it with filepath.ToSlash — so on Windows the plan
+// says `C:/.../state` two lines under a `config:` that says `C:\...\agent.yaml`.
+// Same directory, different spelling, and a string comparison between them
+// fails on the one runner that can tell.
+func plannedPath(t *testing.T, text, key string) string {
+	t.Helper()
+	for _, line := range strings.Split(text, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), key+":"); ok {
+			return filepath.Clean(strings.TrimSpace(rest))
+		}
+	}
+	t.Fatalf("no %s line in the plan:\n%s", key, text)
+	return ""
 }
 
 // The config directory install leaves alone, and the command that makes it
