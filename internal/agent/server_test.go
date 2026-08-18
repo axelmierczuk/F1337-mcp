@@ -660,10 +660,23 @@ func (p *panickingService) GetHostInfo(context.Context, *sandboxdv1.GetHostInfoR
 	return &sandboxdv1.GetHostInfoResponse{AgentVersion: "still-here"}, nil
 }
 
+// seams numbers this test's registrations so that each run of it claims a name
+// no earlier run has.
+//
+// The registry is package-level and has no unregister — that is deliberate, it
+// is an init-time seam — so a name fixed for the life of the process is a name
+// the *second* run of this test registers twice. That second registration is
+// not the one inside assert.Panics below; it is the first line of the test, and
+// its panic takes the whole binary down before any assertion runs. CI passes
+// -count=1 and never saw it, but `go test -count=2 ./...` — which is how the
+// t.Parallel sweep in #75 was asked to prove itself against the rest of the
+// tree — cannot get past this package.
+var seams atomic.Int64
+
 // Register is the package-level seam. It is exercised here rather than through
 // a service package so a duplicate registration's panic is asserted directly.
 func TestRegister(t *testing.T) {
-	name := "test-seam-" + strconv.Itoa(os.Getpid())
+	name := "test-seam-" + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(seams.Add(1), 10)
 	agent.Register(name, func(agent.Deps) (agent.Service, error) { return newCountingService(), nil })
 
 	var found bool

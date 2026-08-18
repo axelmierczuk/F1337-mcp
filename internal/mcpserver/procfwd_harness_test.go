@@ -251,6 +251,111 @@ type liveAgentOptions struct {
 	socksEnabled bool
 }
 
+// newAgentServer builds the gRPC server every live fixture serves its agent on.
+//
+// WaitForHandlers is not decoration, and it is the whole reason this is a
+// function rather than a grpc.NewServer() call at the one call site. Without
+// it, Stop returns as soon as the listener is closed and the teardown order
+// startLiveAgent registers is a lie: Stop returns, the audit log is closed,
+// t.TempDir starts deleting the state directory — and a straggler handler
+// writing its record reopens audit.jsonl underneath the delete, which lands as
+// "TempDir RemoveAll cleanup: directory not empty" against a test that had
+// already passed. Twice in twelve runs of the forward and socks tests at
+// -parallel 24, always a different test.
+//
+// That is a statistical failure, which is to say it is one nothing failed on
+// when the option was added. TestLiveAgentServer_StopWaitsForHandlersToFinish
+// is the deterministic half, and it drives this constructor rather than a copy
+// of it so that deleting the option here is what turns it red.
+func newAgentServer() *grpc.Server {
+	return grpc.NewServer(grpc.WaitForHandlers(true))
+}
+
+// blockingHost is a HostService whose Health handler is held open until the
+// test lets it go, so "a handler is still running" is a state a test can be in
+// rather than one it has to catch.
+type blockingHost struct {
+	sandboxdv1.UnimplementedHostServiceServer
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *blockingHost) Health(context.Context, *sandboxdv1.HealthRequest) (*sandboxdv1.HealthResponse, error) {
+	close(h.entered)
+	<-h.release
+	return &sandboxdv1.HealthResponse{Status: sandboxdv1.HealthResponse_STATUS_SERVING}, nil
+}
+
+// TestLiveAgentServer_StopWaitsForHandlersToFinish pins what every live
+// fixture's teardown assumes about Stop and nothing else asserted.
+//
+// startLiveAgent registers t.TempDir first, the audit log second and the
+// shutdown third, so they unwind in the order shutdown, audit log, directory.
+// That order only means anything if Stop means "no handler is running any
+// more". If it means "the listener is closed", the two cleanups behind it are
+// racing a handler rather than following it — see newAgentServer.
+//
+// The assertion is the safe direction: Stop must *not* have returned while a
+// handler is held, and a loaded machine can only make it more true.
+func TestLiveAgentServer_StopWaitsForHandlersToFinish(t *testing.T) {
+	t.Parallel()
+
+	held := &blockingHost{entered: make(chan struct{}), release: make(chan struct{})}
+	srv := newAgentServer()
+	sandboxdv1.RegisterHostServiceServer(srv, held)
+
+	lis := bufconn.Listen(1 << 20)
+	var serving sync.WaitGroup
+	serving.Add(1)
+	go func() {
+		defer serving.Done()
+		_ = srv.Serve(lis)
+	}()
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	answered := make(chan error, 1)
+	go func() {
+		_, callErr := sandboxdv1.NewHostServiceClient(conn).Health(context.Background(), &sandboxdv1.HealthRequest{})
+		answered <- callErr
+	}()
+
+	select {
+	case <-held.entered:
+	case <-time.After(30 * time.Second):
+		close(held.release)
+		t.Fatal("the Health handler was never reached, so this test never got into the state it is about")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		srv.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		close(held.release)
+		t.Fatal("Stop returned while a handler was still running: the cleanups behind it close the audit log " +
+			"and delete the state directory that handler is still writing into")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(held.release)
+	select {
+	case <-stopped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stop never returned after the handler finished")
+	}
+	<-answered
+	_ = lis.Close()
+	serving.Wait()
+}
+
 func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
 	t.Helper()
 
@@ -327,14 +432,7 @@ func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
 	require.NoError(t, err)
 
 	lis := bufconn.Listen(1 << 20)
-	// WaitForHandlers, so Stop below does not return while a handler is still
-	// unwinding. Without it the teardown order is a lie: Stop returns, the audit
-	// log is closed, t.TempDir starts deleting the state directory — and a
-	// straggler handler writing its record reopens audit.jsonl underneath the
-	// delete, which lands as "TempDir RemoveAll cleanup: directory not empty"
-	// against a test that had already passed. Twice in twelve runs of the
-	// forward and socks tests at -parallel 24, always a different test.
-	srv := grpc.NewServer(grpc.WaitForHandlers(true))
+	srv := newAgentServer()
 	procSvc.Register(srv)
 	fwdSvc.Register(srv)
 	hostSvc.Register(srv)
