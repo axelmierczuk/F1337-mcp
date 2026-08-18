@@ -255,6 +255,14 @@ func TestServer_ShutdownDrainsInFlightRPCs(t *testing.T) {
 	h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)},
 		func(o *agent.Options) { o.Log = log })
 
+	// Registered after start, so it runs before the cleanup start registered:
+	// cleanups are LIFO, and releasing the handler has to happen before
+	// anything waits on the drain. Every t.Fatalf below this line skips the
+	// release in the body, and a handler nobody releases makes GracefulStop
+	// sit for the full 30s and report a second, misleading failure on top of
+	// the real one. That is the shape #59 arrived in; see release.
+	t.Cleanup(svc.release)
+
 	certPEM, keyPEM := fleet.controlLeaf()
 	hostClient := h.hostClient(t, fleet.ca.CertPEM(), certPEM, keyPEM)
 
@@ -298,7 +306,7 @@ func TestServer_ShutdownDrainsInFlightRPCs(t *testing.T) {
 	default:
 	}
 
-	close(svc.block)
+	svc.release()
 
 	select {
 	case r := <-results:
@@ -320,16 +328,104 @@ func TestServer_ShutdownDrainsInFlightRPCs(t *testing.T) {
 	require.NoError(t, h.wait(t))
 }
 
+// A blocked handler is released whatever the body did, so a failing run says
+// what failed once instead of hanging first.
+//
+// This is the second half of what #59 reported. The first line of that failure
+// was the real one; the second — "server did not shut down within 30s" — was
+// the test's own cleanup waiting on a handler the body had stopped short of
+// releasing, and it is the line that reads like the problem. A test that
+// exists to say what happened has to survive its own failure to say it.
+//
+// The subtest here ends the way a t.Fatalf ends the drain test: shutdown
+// signalled, a handler still inside the call, and nothing in the body left to
+// run. What is measured is its cleanup, which is why the release is registered
+// after start — cleanups are LIFO, and a release that runs after the wait on
+// the daemon is a release that runs 30s too late.
+func TestServer_ABlockedHandlerIsReleasedWhateverTheBodyDid(t *testing.T) {
+	started := time.Now()
+	finished := t.Run("signals shutdown and returns without releasing its handler", func(t *testing.T) {
+		fleet := newTestFleet(t)
+		svc := newCountingService()
+		svc.block = make(chan struct{})
+
+		h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)})
+		t.Cleanup(svc.release)
+
+		certPEM, keyPEM := fleet.controlLeaf()
+		hostClient := h.hostClient(t, fleet.ca.CertPEM(), certPEM, keyPEM)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			_, _ = hostClient.Health(hold(ctx), &sandboxdv1.HealthRequest{})
+		}()
+
+		select {
+		case <-svc.entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("handler never entered")
+		}
+		h.cancel()
+	})
+	elapsed := time.Since(started)
+
+	assert.True(t, finished,
+		"the subtest's own cleanup reported the daemon failing to shut down, which is the second error #59 carried")
+	assert.Less(t, elapsed, agent.DefaultDrainTimeout/2,
+		"the daemon drained for %s: a handler left blocked by a body that stopped early has to be released by "+
+			"cleanup, or every failure in the drain test is followed by a full drain and a second, misleading error",
+		elapsed.Round(time.Millisecond))
+}
+
+// awaitNotAccepting waits for the listener's own answer, not for its own
+// patience to run out.
+//
+// bufconn hands a dial straight to Accept over an unbuffered channel, so a
+// dial against a listener that is open but unattended fails with the poll's
+// deadline rather than with a closed-listener error. Reading that as "the
+// drain has started" would make this helper a fixed sleep again — the exact
+// thing it replaced — and would let the drain test's ordering assertion run
+// before the shutdown it is supposed to be racing.
+func TestAwaitNotAccepting_WaitsForTheListenerNotForItsOwnTimeout(t *testing.T) {
+	lis := bufconn.Listen(1024)
+	t.Cleanup(func() { _ = lis.Close() })
+	h := &harness{lis: lis}
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		h.awaitNotAccepting(t, &syncBuffer{})
+	}()
+
+	// Nothing ever calls Accept, so every poll times out. Three times the
+	// poll's own bound is long enough that a helper returning on that timeout
+	// has certainly done so.
+	select {
+	case <-returned:
+		t.Fatal("awaitNotAccepting reported the drain under way while the listener was still open and serving")
+	case <-time.After(3 * awaitPollTimeout):
+	}
+
+	require.NoError(t, lis.Close())
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("awaitNotAccepting did not return once the listener was closed")
+	}
+}
+
 // A handler that will never return must not stop the daemon exiting. The drain
 // is bounded, and the bound is enforced.
 func TestServer_ShutdownCutsOffAtTheDrainDeadline(t *testing.T) {
 	fleet := newTestFleet(t)
 	svc := newCountingService()
 	svc.block = make(chan struct{})
-	t.Cleanup(func() { close(svc.block) })
 
 	h := start(t, fleet.agentConfig(t), []agent.Registration{registration("host", svc)},
 		func(o *agent.Options) { o.DrainTimeout = 300 * time.Millisecond })
+	// After start, for the ordering reason the drain test gives: this has to
+	// run before the cleanup that waits on the daemon, not after it.
+	t.Cleanup(svc.release)
 
 	certPEM, keyPEM := fleet.controlLeaf()
 	hostClient := h.hostClient(t, fleet.ca.CertPEM(), certPEM, keyPEM)

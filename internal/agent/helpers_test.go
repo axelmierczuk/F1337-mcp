@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -139,9 +140,10 @@ type countingService struct {
 
 	// block, when set, holds Health until the channel is closed, so a test can
 	// have an RPC in flight across a shutdown.
-	block   chan struct{}
-	entered chan struct{}
-	once    sync.Once
+	block       chan struct{}
+	entered     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
 
 	// cut records the stream context's error if it is cancelled while Health
 	// is blocked. gRPC cancels an in-flight handler's context when it drops
@@ -210,6 +212,21 @@ func hold(ctx context.Context) context.Context {
 func marked(ctx context.Context) bool {
 	md, ok := metadata.FromIncomingContext(ctx)
 	return ok && len(md.Get(holdHeader)) > 0
+}
+
+// release lets a blocked Health handler return, and is idempotent so that the
+// scenario which releases it as part of what it asserts and the cleanup which
+// has to release it whatever happened can both call it.
+//
+// The cleanup is not tidiness. Every t.Fatalf between "the handler is in the
+// call" and the release skips the rest of the body, and a handler nothing ever
+// releases holds GracefulStop for the daemon's whole drain bound: the run
+// prints the real failure, hangs for 30s, and then prints "server did not shut
+// down within 30s" underneath it. That pair is exactly how #59 was reported,
+// and the second line is the one that reads like the problem. A test that
+// exists to say what happened has to survive its own failure to say it.
+func (s *countingService) release() {
+	s.releaseOnce.Do(func() { close(s.block) })
 }
 
 // wasCut reports the stream context's error if this handler's RPC was dropped
@@ -366,6 +383,17 @@ func (h *harness) wait(t *testing.T) error {
 	return h.stopErr
 }
 
+// awaitPollTimeout bounds one dial attempt in awaitNotAccepting, and
+// awaitDeadline bounds the whole wait.
+//
+// They are named because the difference between them is the whole point: the
+// first is the poll's own patience and says nothing about the listener, the
+// second is the assertion.
+const (
+	awaitPollTimeout = time.Second
+	awaitDeadline    = 20 * time.Second
+)
+
 // awaitNotAccepting blocks until the server's listener refuses a dial.
 //
 // It polls for a condition rather than sleeping a duration, which is the rule
@@ -377,19 +405,35 @@ func (h *harness) wait(t *testing.T) error {
 //
 // The dial is made directly against the bufconn rather than through the
 // pooled client, so it creates no gRPC stream and cannot reach a handler.
+//
+// Only the listener's own answer counts. bufconn hands a dial straight to
+// Accept over an unbuffered channel, so a dial can also fail because nothing
+// called Accept inside awaitPollTimeout — which is the poll giving up, not the
+// listener closing. Treating that as proof would put this back where the fixed
+// sleep was: a duration standing in for a fact, and one that reports the drain
+// has started when it may not have.
 func (h *harness) awaitNotAccepting(t *testing.T, serverLog fmt.Stringer) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(awaitDeadline)
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), awaitPollTimeout)
 		conn, err := h.lis.DialContext(ctx)
 		cancel()
-		if err != nil {
+		switch {
+		case err == nil:
+			// Still accepting. Closed straight away: it carries no RPC, and
+			// GracefulStop waits on connections as well as on handlers.
+			_ = conn.Close()
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			// The poll's bound, not the listener's answer. Keep waiting.
+		default:
+			// bufconn reports its own closed error once the listener is shut,
+			// which is the fact this is waiting for.
 			return
 		}
-		_ = conn.Close()
 		if time.Now().After(deadline) {
-			t.Fatalf("the listener was still accepting 20s after shutdown was signalled; daemon log:\n%s", serverLog)
+			t.Fatalf("the listener was still accepting %s after shutdown was signalled; daemon log:\n%s",
+				awaitDeadline, serverLog)
 		}
 		time.Sleep(time.Millisecond)
 	}
