@@ -41,7 +41,7 @@ func TestSweepAndCollect_TakesTheTreeWithTheCommandThatLeftIt(t *testing.T) {
 
 	// Asserted before the job is looked for, because either of these explains a
 	// survivor and "the pid is still there" does not say which.
-	require.NotContains(t, logs.String(), "so it was not swept")
+	require.NotContains(t, logs.String(), "without being swept")
 	require.NotContains(t, logs.String(), "could not sweep")
 
 	var orphan int
@@ -89,26 +89,44 @@ func TestSweepAndCollect_ASessionThatLeftNothingBehindLogsNothing(t *testing.T) 
 // which is a broken guarantee and logged as one. The second is the one worth
 // choosing: the job is at least this agent's own.
 //
-// The failure is arranged by handing the wait a leader this process is not the
+// The failure is arranged by giving the group a leader this process is not the
 // parent of, which is what AwaitExit's two implementations both refuse. There
-// is no seam here and no fake terminal: the group and the process in it are
-// real, and it is the product function taking the branch it takes on a real
-// error.
+// is no seam here and no fake terminal: the group is real, and it is the
+// product function taking the branch it takes on a real error.
+//
+// What a sweep sent anyway would have reached is asserted where an id can be
+// pointed at something on purpose: platform's
+// TestCollect_AnExitItCouldNotEstablishGivesUpTheIDWithoutSweepingIt. Here the
+// assertion is the daemon's own report, which is the half this package owns.
 func TestSweepAndCollect_DoesNotSweepAGroupItCouldNotGround(t *testing.T) {
-	group, child, _ := sessionCommand(t, "sleep")
-	logs := &syncBuffer{}
+	group, err := platform.NewProcessGroup(platform.GroupConfig{KillOnClose: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = group.Close() })
+
+	// Configured, so the group believes a session was asked for: a pid that is
+	// already gone reads as "the leader led its own session and exited", which
+	// is the state a fast leader is really in and the one that leaves this
+	// group with an id it thinks it can sweep.
+	var attr syscall.SysProcAttr
+	group.Configure(&attr)
 
 	stranger, err := os.FindProcess(noSuchPID)
 	require.NoError(t, err)
-	wait := startLeaderWait(&pty.Cmd{Path: child.Path, Process: stranger}, group, testLogger(logs))
+	require.NoError(t, group.Adopt(stranger))
+	require.True(t, group.Isolated(),
+		"the group does not think it has an id of its own, so there is nothing here for the check to refuse")
+
+	self, err := os.Executable()
+	require.NoError(t, err)
+	logs := &syncBuffer{}
+	wait := startLeaderWait(&pty.Cmd{Path: self, Process: stranger}, group, testLogger(logs))
 	require.Error(t, <-wait.waited,
 		"there is no such process to wait for, so the wait has nothing to report either")
 
-	requireDiedOfSIGTERM(t, child,
-		"the session's own process died of a SIGKILL: the group was swept even though nothing had established that it was still the session's")
-
-	require.Contains(t, logs.String(), "so it was not swept; a descendant may have outlived the session",
+	require.Contains(t, logs.String(), "could not sweep the session's process group; a descendant may have outlived the session",
 		"the guarantee was dropped silently: a process is still running on the host and nothing in the daemon's log says so")
+	require.Contains(t, logs.String(), "without being swept",
+		"the log says the sweep failed rather than that it was never sent, which are different things to whoever reads it")
 }
 
 // The teardown's kill is what ends a session that is still running.
@@ -122,7 +140,7 @@ func TestKillGroup_EndsASessionWhoseLeaderIsStillRunning(t *testing.T) {
 	logs := &syncBuffer{}
 
 	wait := startLeaderWait(cmd, group, testLogger(logs))
-	wait.killGroup(group, testLogger(logs))
+	killGroup(group, testLogger(logs))
 
 	require.Error(t, <-wait.waited, "the session was killed, so its wait reports a signal rather than a status")
 	sig, signalled := terminatingSignal(cmd.ProcessState)
@@ -132,30 +150,35 @@ func TestKillGroup_EndsASessionWhoseLeaderIsStillRunning(t *testing.T) {
 
 // And it is not sent at all once the wait has collected the leader.
 //
-// That is the whole of #96 on the teardown path. Service.reap sends its kill
-// after a select on the wait, so the branch it takes when the hangup did end
-// the session is the branch on which the leader has already been collected —
-// and on Unix a process group id whose last member has been collected is a
-// number the kernel has taken back and may already have given to somebody
-// else's session leader. The group is swept by then in any case, from the wait
-// itself, so there is nothing this call can add and a whole process group it
-// could take away.
+// That is #96 on the teardown path and #105's fix underneath it. Service.reap
+// sends its kill after a select on the wait, so the branch it takes when the
+// hangup did end the session is the branch on which the leader has already been
+// collected — and on Unix a process group id whose last member has been
+// collected is a number the kernel has taken back and may already have given to
+// somebody else's session leader. The group is swept by then in any case, from
+// inside the collection, so there is nothing this call can add and a whole
+// process group it could take away.
 //
-// So the group the kill is aimed at is a live one that the wait has nothing to
-// do with, standing in for the session that now holds the number. Its own
-// group could not stand in for it: that one has been emptied, so a signal to it
-// reaches nothing and "it went out" would be unobservable. What settles it is
-// what the stand-in dies of — see below, and see the Windows file, which is
-// this fixture with the opposite expectation.
+// The refusal is the group's own now rather than this package's, which is what
+// makes it one rule for the shell, ExecService and the supervisor alike. So
+// what is asserted here is the two facts this package owns: the group says the
+// id was released, and the teardown's kill goes through the group rather than
+// around it. What a signal sent anyway would *reach* is asserted where an id
+// can be put back into circulation on purpose —
+// platform's TestSignal_ReleasedGroupDoesNotSignalTheIDItNamed, and the
+// pid-namespace reproduction in internal/agent/exec.
 func TestKillGroup_DoesNotSignalAGroupIDTheWaitHasReleased(t *testing.T) {
 	group, cmd, _ := sessionCommand(t, "exit", "0")
 	wait := startLeaderWait(cmd, group, testLogger(&syncBuffer{}))
 	require.NoError(t, <-wait.waited)
 
-	aimedAt, bystander, _ := sessionCommand(t, "sleep")
-	wait.killGroup(aimedAt, testLogger(&syncBuffer{}))
-	requireDiedOfSIGTERM(t, bystander,
-		"the teardown signalled a process group after its own id had been released; on a developer's machine that is whatever session holds the number now")
+	require.ErrorIs(t, group.Kill(), platform.ErrGroupReleased,
+		"the group still answers for an id its own collection gave back to the kernel")
+
+	logs := &syncBuffer{}
+	killGroup(group, testLogger(logs))
+	require.Contains(t, logs.String(), "the teardown's kill was not sent",
+		"nothing in the log says the kill was refused, so a run where it was *sent* would look identical")
 }
 
 // And the teardown an operator's session actually goes through is what asks.
@@ -180,34 +203,14 @@ func TestReap_DoesNotSignalAGroupIDTheWaitHasReleased(t *testing.T) {
 		return false, "the wait has not finished with the session's command yet"
 	})
 
-	aimedAt, bystander, _ := sessionCommand(t, "sleep")
-
 	terminal, err := platform.OpenPTY()
 	require.NoError(t, err)
-	svc := &Service{log: testLogger(&syncBuffer{})}
+	logs := &syncBuffer{}
+	svc := &Service{log: testLogger(logs)}
 	sess := &session{svc: svc, tty: newSessionTerminal(terminal, testLogger(&syncBuffer{}))}
 
-	require.True(t, svc.reap(sess, aimedAt, wait),
+	require.True(t, svc.reap(sess, group, wait),
 		"the wait had already reported, so the teardown must say the session was reaped")
-	requireDiedOfSIGTERM(t, bystander,
-		"the teardown signalled the group itself rather than through the wait, which is the only thing that knows whether the id is still the session's")
-}
-
-// requireDiedOfSIGTERM kills a process the test expects to have been left
-// alone, and reads back which signal arrived.
-//
-// It is the only thing that settles it. A process that has been sent SIGKILL is
-// not distinguishable from a running one by asking whether its pid exists — the
-// answer is yes either way until somebody reaps the zombie — so this kills it
-// deliberately, with a different signal. A kill that went out first is already
-// pending and wins.
-func requireDiedOfSIGTERM(t *testing.T, cmd *pty.Cmd, whatItMeans string) {
-	t.Helper()
-
-	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
-	_ = cmd.Wait()
-	require.NotNil(t, cmd.ProcessState)
-	sig, signalled := terminatingSignal(cmd.ProcessState)
-	require.True(t, signalled)
-	require.Equal(t, "SIGTERM", sig, whatItMeans)
+	require.Contains(t, logs.String(), "the teardown's kill was not sent",
+		"the teardown signalled the group itself rather than through the guard, which is the only thing that knows whether the id is still the session's")
 }

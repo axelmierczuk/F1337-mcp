@@ -665,14 +665,42 @@ func (s *Supervisor) spawn(r *record, fresh bool) error {
 		s.log.Error("could not follow process output", "process_id", r.id, "error", err)
 	}
 
-	// cmd.Wait runs on its own goroutine, outside the supervisor's WaitGroup.
-	// It is the reaper — every spawn has exactly one, which is what stops
-	// zombies accumulating — and it cannot be interrupted: a process sleeping
-	// for an hour keeps it blocked for an hour. Close must not wait for that,
-	// so the goroutine Close does wait for is the monitor below, which selects
-	// on this channel and on the supervisor's own context.
+	// The collection runs on its own goroutine, outside the supervisor's
+	// WaitGroup. It is the reaper — every spawn has exactly one, which is what
+	// stops zombies accumulating — and it cannot be interrupted: a process
+	// sleeping for an hour keeps it blocked for an hour. Close must not wait
+	// for that, so the goroutine Close does wait for is the monitor below,
+	// which selects on this channel and on the supervisor's own context.
+	//
+	// Through the group rather than straight to cmd.Wait, and that is the same
+	// defect #91, #96 and #105 were: on Unix a process group id is a pid the
+	// kernel reclaims when the last member of the group is reaped, and this
+	// Wait is that reap. signalRecord re-reads start identity before it
+	// signals, which rules out a pid the kernel handed out *before* the check —
+	// and nothing rules out the exit landing between the check and the kill(2),
+	// which is a window of exactly the kind this repository has already shipped
+	// three times. Collecting through the group closes it: the group marks its
+	// id released under the lock its own Signal takes, so a stop racing an exit
+	// is refused rather than aimed at whatever now holds the number.
+	//
+	// It sweeps nothing. A supervised process is not a one-shot RPC — the tree
+	// it leaves is the operator's business, and gracefulStop is what asks for
+	// it to go — so this is the collection and the ordering, and no signal the
+	// caller did not ask for.
 	reaped := make(chan error, 1)
-	go func() { reaped <- cmd.Wait() }()
+	go func() {
+		groupErr, waitErr := group.Collect(cmd.Wait)
+		if groupErr != nil {
+			// Not a failed collection: the wait is still whatever it was. What
+			// it says is that this group can no longer reach a tree, so a later
+			// stop will reach the leader alone and its children will survive it
+			// — which is the same broken guarantee Adopt warns about above, and
+			// is worth the same line in the log.
+			s.log.Warn("a supervised process can no longer be stopped as a group; its children may survive a stop",
+				"process_id", r.id, "pid", cmd.Process.Pid, "error", groupErr)
+		}
+		reaped <- waitErr
+	}()
 
 	exited := make(chan struct{})
 	now := time.Now()

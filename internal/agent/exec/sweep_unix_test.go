@@ -40,8 +40,8 @@ func TestWaitForCommand_SweepsTheGroupAndReturnsTheStatus(t *testing.T) {
 	// Nothing was skipped and nothing failed on the way. Asserted before the
 	// descendant is looked for, because either of these explains a survivor and
 	// "the pid is still there" does not say which.
-	require.NotContains(t, logs.String(), "so it was not swept")
-	require.NotContains(t, logs.String(), "could not sweep the process group")
+	require.NotContains(t, logs.String(), "without being swept")
+	require.NotContains(t, logs.String(), "could not sweep the command's process group")
 	requireProcessGone(t, descendant)
 }
 
@@ -72,38 +72,43 @@ func TestWaitForCommand_ACommandThatLeftNothingBehindLogsNothing(t *testing.T) {
 // which is a broken guarantee and logged as one. The second is the one worth
 // choosing: the descendant is at least this agent's own.
 //
-// The failure is arranged by handing waitForCommand a leader this process is
-// not the parent of, which is what AwaitExit's two implementations both refuse.
-// There is no seam here and no fake: it is the product function, taking the
-// branch it takes on a real error.
+// The failure is arranged by giving the group a leader this process is not the
+// parent of, which is what AwaitExit's two implementations both refuse. There
+// is no seam here and no fake: it is the product function, taking the branch it
+// takes on a real error.
+//
+// What a sweep sent anyway would have *reached* is asserted where an id can be
+// pointed at something on purpose: platform's
+// TestCollect_AnExitItCouldNotEstablishGivesUpTheIDWithoutSweepingIt puts a
+// stranger's live session on the id and requires it to survive. Here the
+// assertion is the daemon's own report, which is the half this package owns.
 func TestWaitForCommand_DoesNotSweepAGroupItCouldNotGround(t *testing.T) {
-	group, child := isolatedChild(t, "sleep", "600")
-	logs := &strings.Builder{}
+	group, err := platform.NewProcessGroup(platform.GroupConfig{KillOnClose: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = group.Close() })
+
+	// Configured, so the group believes a session was asked for: a pid that is
+	// already gone reads as "the child led its own session and exited", which
+	// is the state a fast leader is really in and the one that leaves this
+	// group with an id it thinks it can sweep.
+	var attr syscall.SysProcAttr
+	group.Configure(&attr)
 
 	stranger, err := os.FindProcess(noSuchPID)
 	require.NoError(t, err)
-	cmd := &osexec.Cmd{Path: mustExecutable(t)}
-	cmd.Process = stranger
+	require.NoError(t, group.Adopt(stranger))
+	require.True(t, group.Isolated(),
+		"the group does not think it has an id of its own, so there is nothing here for the check to refuse")
 
+	logs := &strings.Builder{}
+	cmd := &osexec.Cmd{Path: mustExecutable(t), Process: stranger}
 	require.Error(t, waitForCommand(cmd, group, testLogger(logs)),
 		"there is no such process to wait for, so Wait has nothing to report either")
 
-	// What the child ends up dying of is the recorded fact, and the only one
-	// that settles it: a process that has been sent SIGKILL is not
-	// distinguishable from a running one by asking whether its pid exists — the
-	// answer is yes either way until somebody reaps the zombie. So this kills
-	// it deliberately, with a different signal, and reads back which arrived. A
-	// sweep that went out first is already pending and wins.
-	require.NoError(t, child.Process.Signal(syscall.SIGTERM))
-	_ = child.Wait()
-	require.NotNil(t, child.ProcessState)
-	sig, signalled := terminatingSignal(child.ProcessState)
-	require.True(t, signalled)
-	require.Equal(t, "SIGTERM", sig,
-		"the child died of a SIGKILL: the group was swept even though nothing had established that it was still the command's")
-
-	require.Contains(t, logs.String(), "so it was not swept; a descendant may have outlived the call",
+	require.Contains(t, logs.String(), "could not sweep the command's process group; a descendant may have outlived the call",
 		"the guarantee was dropped silently: a descendant is still running on the host and nothing in the daemon's log says so")
+	require.Contains(t, logs.String(), "without being swept",
+		"the log says the sweep failed rather than that it was never sent, which are different things to whoever reads it")
 }
 
 // isolatedChild starts a helper leading its own process group, the way run

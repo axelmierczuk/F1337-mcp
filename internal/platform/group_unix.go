@@ -20,17 +20,60 @@ import (
 // grandchildren: signalling the leader alone leaves `npm run dev`'s bundler
 // running and holding the port.
 type ProcessGroup struct {
-	mu       sync.Mutex
-	pid      int
-	pgid     int
+	mu   sync.Mutex
+	pid  int
+	pgid int
+	// proc is the leader as os/exec handed it over, kept because a pid is not
+	// a name and this is. See [groupPin] and signalLeaderLocked. It is nil for
+	// a group opened by pid, which is the one case where there is nothing to
+	// keep.
+	proc     *os.Process
 	isolated bool
-	closed   bool
+	// pin is what this group may still name; see [groupPin]. It is the whole
+	// of the ordering that keeps a signal from reaching a process group the
+	// agent never started.
+	pin    groupPin
+	closed bool
 	// configured records that Configure was applied to the command this group
 	// is about to adopt, and so that a session was actually asked for. Adopt
 	// needs to know: "the child is not leading its own group" is a wait when
 	// one was requested and a settled answer when one was not.
 	configured bool
 }
+
+// groupPin is what a ProcessGroup still holds, and so what it may still name
+// when it is asked to signal.
+//
+// The rule the type turns on: a pid is a durable name only while something
+// holds it, and a process group id is a pid. What holds this group's id is the
+// leader — alive or an unreaped zombie, it is a member of its own group, and
+// the kernel keeps the id reserved while any member is there. Nobody else can
+// take that away, because nobody else can reap another process's child. So the
+// id is unambiguously this group's from Adopt until this package collects the
+// leader, and is nobody's afterwards.
+//
+// Which is why the collection goes through the group rather than around it: it
+// is the one event that changes the answer, and a caller that performs it
+// somewhere else leaves this type signalling a number it no longer owns. See
+// [ProcessGroup.Collect] and [AwaitExit].
+type groupPin uint8
+
+const (
+	// pinGroup: the leader leads its own group and has not been collected, so
+	// kill(-pgid) names this group and can name nothing else.
+	pinGroup groupPin = iota
+
+	// pinLeader: the group id is not this group's to name — the child never
+	// entered a session of its own, or its exit could not be established
+	// before the collection — but the leader is still the leader, and
+	// [os.Process] names it without going through its number. Descendants are
+	// out of reach from here; that is the loss the state records.
+	pinLeader
+
+	// pinNone: the leader has been collected. Its pid, and the group id that
+	// was its pid, belong to the kernel now, and this group names nothing.
+	pinNone
+)
 
 func newProcessGroup(_ GroupConfig) (*ProcessGroup, error) {
 	// Nothing to allocate: the group is created by the child itself, in the
@@ -49,7 +92,18 @@ func openProcessGroup(pid int, _ string) (*ProcessGroup, error) {
 		}
 		return nil, fmt.Errorf("platform: reading process group of pid %d: %w", pid, err)
 	}
-	return &ProcessGroup{pid: pid, pgid: pgid, isolated: pgid == pid}, nil
+	// pinGroup for a leader that leads its own group, and it is the weakest
+	// claim this file makes. Nothing here holds the id: the agent did not spawn
+	// this process and cannot reap it, so the id is released by whoever does —
+	// init, after a reparented process exits — and no state in this type can
+	// see that happen. The caller owns that check; see [SameProcess] and the
+	// supervisor's re-adoption path, which re-reads start identity before every
+	// signal.
+	g := &ProcessGroup{pid: pid, pgid: pgid, isolated: pgid == pid, pin: pinLeader}
+	if g.isolated {
+		g.pin = pinGroup
+	}
+	return g, nil
 }
 
 // Configure requests a new session for the child, which also makes it the
@@ -223,6 +277,16 @@ func (g *ProcessGroup) Adopt(p *os.Process) error {
 	g.pid = p.Pid
 	g.pgid = pgid
 	g.isolated = isolated
+	// The process itself, not just its number. os/exec keeps enough state on it
+	// to refuse a signal for a process it has already collected — a pidfd where
+	// the kernel has them, a lock and a flag everywhere else — which is what
+	// makes it a name rather than a number. It is what Signal aims at whenever
+	// the group id is not this group's to name.
+	g.proc = p
+	g.pin = pinLeader
+	if isolated {
+		g.pin = pinGroup
+	}
 	return err
 }
 
@@ -270,8 +334,9 @@ func (g *ProcessGroup) GroupID() int {
 // What is worth depending on is the other side of that rule: a group id belongs
 // to its members until the last of them is reaped, so a group that has outlived
 // its leader is still reachable, and a pgid that has been fully released is free
-// for the kernel to hand to somebody else. Signalling one is signalling whatever
-// holds it now. See ErrProcessNotFound and platform.SameProcess.
+// for the kernel to hand to somebody else. That is not a hazard this caller has
+// to reason about any more — it is what [groupPin] records and what this call
+// refuses on — but it is the reason the refusal exists. See [ErrGroupReleased].
 func (g *ProcessGroup) Signal(sig Signal) error {
 	osSig, err := sig.OSSignal()
 	if err != nil {
@@ -283,29 +348,123 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 	}
 
 	g.mu.Lock()
-	pid, pgid, isolated, closed := g.pid, g.pgid, g.isolated, g.closed
-	g.mu.Unlock()
+	defer g.mu.Unlock()
+	return g.signalLocked(unixSig, sig)
+}
 
-	if closed {
+// signalLocked delivers sig with the lock held, and the lock is held across the
+// kill(2) rather than only across the field read it used to guard.
+//
+// That is the half of the ordering the kernel cannot supply. [Collect] takes
+// the same lock to record that the leader has been collected, so a signal that
+// has passed the check below cannot still be on its way to the kernel when the
+// id is released: the two are mutually exclusive rather than merely written in
+// the right order. kill(2) does not block, so nothing is held for longer than a
+// syscall.
+//
+// It is os/exec's own ordering, reached for the same reason. (*os.Process).
+// pidSignal holds sigMu across its kill(2), and pidWait marks the process done
+// before wait4 and then takes that lock exclusively to wait out any signaller
+// already inside it — with a comment saying it is so a signal is not sent to a
+// process that has been reaped.
+func (g *ProcessGroup) signalLocked(unixSig syscall.Signal, sig Signal) error {
+	if g.closed {
 		return ErrGroupClosed
 	}
-	if pid == 0 {
+	if g.pid == 0 {
 		return ErrNoProcess
 	}
 
-	target := pid
-	if isolated {
+	switch g.pin {
+	case pinGroup:
 		// Negative pid means "the process group with this id". This is the
 		// whole reason the group exists.
-		target = -pgid
-	}
-	if err := syscall.Kill(target, unixSig); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			return fmt.Errorf("platform: signalling group %d: %w", pgid, ErrProcessNotFound)
+		if err := syscall.Kill(-g.pgid, unixSig); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return fmt.Errorf("platform: signalling group %d: %w", g.pgid, ErrProcessNotFound)
+			}
+			return fmt.Errorf("platform: signalling group %d with %s: %w", g.pgid, sig, err)
 		}
-		return fmt.Errorf("platform: signalling group %d with %s: %w", pgid, sig, err)
+		return nil
+	case pinLeader:
+		return g.signalLeaderLocked(unixSig, sig)
+	case pinNone:
+		return fmt.Errorf("platform: group %d: %w", g.pgid, ErrGroupReleased)
+	default:
+		return fmt.Errorf("platform: group %d is in an unknown state", g.pgid)
+	}
+}
+
+// signalLeaderLocked delivers sig to the leader alone, for a group that cannot
+// name its group id: the child never entered a session of its own, or its exit
+// could not be established before the collection. Called with the lock held.
+//
+// Through the [os.Process] Adopt was given, and that is the point rather than a
+// convenience. A bare kill(2) on g.pid is the same defect one scale smaller —
+// after the reap that number names whatever the kernel gave it to — while
+// os/exec's own handle refuses a signal for a process it has already collected:
+// on Linux by signalling through a pidfd, which names the process and not the
+// number, and everywhere else by holding a lock across the kill and marking the
+// process done under it.
+//
+// A group opened by pid has no such handle, and the fallback is the bare
+// kill(2) with everything that implies. Nothing this package holds keeps a
+// pid alive that this process is not the parent of, so the check belongs to the
+// caller: see [SameProcess], and the supervisor's re-adoption path, which
+// re-reads start identity before every signal it sends.
+func (g *ProcessGroup) signalLeaderLocked(unixSig syscall.Signal, sig Signal) error {
+	if g.proc == nil {
+		if err := syscall.Kill(g.pid, unixSig); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return fmt.Errorf("platform: signalling pid %d: %w", g.pid, ErrProcessNotFound)
+			}
+			return fmt.Errorf("platform: signalling pid %d with %s: %w", g.pid, sig, err)
+		}
+		return nil
+	}
+
+	if err := g.proc.Signal(unixSig); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("platform: signalling pid %d: %w", g.pid, ErrProcessNotFound)
+		}
+		return fmt.Errorf("platform: signalling pid %d with %s: %w", g.pid, sig, err)
 	}
 	return nil
+}
+
+// SignalLeader delivers sig to the group's leader alone, for the caller that
+// explicitly asked not to reach the tree.
+//
+// It is [ProcessGroup.Signal] with the group left out, and it exists so that
+// "just this process" is still a name rather than a number: the leader is
+// signalled through the [os.Process] Adopt was given, which os/exec refuses to
+// signal once it has collected it, and the collection is this group's own — so
+// a stop racing an exit is refused instead of landing on whatever the kernel
+// gave the pid to next. A caller that reaches for os.FindProcess and the pid
+// instead has re-opened exactly that window, however carefully it checked
+// first.
+func (g *ProcessGroup) SignalLeader(sig Signal) error {
+	osSig, err := sig.OSSignal()
+	if err != nil {
+		return err
+	}
+	unixSig, ok := osSig.(syscall.Signal)
+	if !ok {
+		return ErrSignalUnsupported
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return ErrGroupClosed
+	}
+	if g.pid == 0 {
+		return ErrNoProcess
+	}
+	if g.pin == pinNone {
+		return fmt.Errorf("platform: pid %d: %w", g.pid, ErrGroupReleased)
+	}
+	return g.signalLeaderLocked(unixSig, sig)
 }
 
 // Kill sends SIGKILL to the group. It is the escalation step of a graceful
@@ -313,9 +472,9 @@ func (g *ProcessGroup) Signal(sig Signal) error {
 func (g *ProcessGroup) Kill() error { return g.Signal(SignalKill) }
 
 // Sweep kills whatever the group's leader left behind, for a caller that has
-// just watched that leader exit and has not yet collected it. See [AwaitExit]
-// for the ordering this belongs to, and why the two halves are not
-// interchangeable with writing them in that order.
+// just watched that leader exit and has not yet collected it. It is what
+// [ProcessGroup.SweepAndCollect] sends, from inside the interval where sending
+// it is safe; see [AwaitExit] for the ordering.
 //
 // It is Kill with one answer changed. A group whose only remaining member is
 // its leader's uncollected zombie has nothing that can receive a signal, and
@@ -343,10 +502,138 @@ func (g *ProcessGroup) Kill() error { return g.Signal(SignalKill) }
 // therefore means no member could receive it, which is the same fact ESRCH
 // reports one moment later, and it is reported the same way.
 func (g *ProcessGroup) Sweep() error {
-	err := g.Signal(SignalKill)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.sweepLocked()
+}
+
+// sweepLocked is Sweep with the lock already held, so the sweep and the
+// collection that follows it are one critical section.
+func (g *ProcessGroup) sweepLocked() error {
+	err := g.signalLocked(syscall.SIGKILL, SignalKill)
 	if errors.Is(err, syscall.EPERM) {
-		return fmt.Errorf("platform: sweeping group %d: %w", g.GroupID(), ErrProcessNotFound)
+		return fmt.Errorf("platform: sweeping group %d: %w", g.pgid, ErrProcessNotFound)
 	}
+	return err
+}
+
+// Collect reaps the group's leader, and is the only thing that may: collecting
+// it is what releases the group id, so it belongs to the type that owns the id
+// rather than to each caller that happens to hold a Cmd.
+//
+// wait is the caller's own collection — cmd.Wait, whichever Cmd that is — and
+// its error is returned unchanged as waitErr. groupErr is separate and is not a
+// failure of the collection: it reports that this group can no longer reach a
+// tree, which is a guarantee worth a line in the daemon's log and never a
+// reason to fail a call.
+//
+// # What is ordered against what
+//
+// [AwaitExit] first, which reports the leader's exit without collecting it, so
+// the leader is a zombie and still a member of its own group. Then, under the
+// lock every signal takes, the group is marked released — and only then is the
+// leader collected. A signal that arrives before that mark is aimed at an id an
+// uncollected member is still holding; one that arrives after is refused with
+// [ErrGroupReleased]. There is no third case: the leader is this process's
+// child, so nothing but this call can reap it, and until it does the id cannot
+// go anywhere.
+//
+// That is os/exec's ordering, arrived at for the same reason: pidWait blocks on
+// waitid(WNOWAIT), marks the process done *before* wait4, and then takes the
+// signal lock to wait out anything already inside it.
+//
+// # When the exit cannot be established
+//
+// The group gives up the group id at that point rather than after the
+// collection, and says so in groupErr. The collection is the one moment nothing
+// can be ordered against: the lock cannot be held across it — a Wait for a
+// process that is still running would block the very kill that would end it —
+// and there is no way to learn from outside when the kernel releases the id
+// inside it. So the group degrades to its leader, which [os.Process] names
+// through a pidfd where there is one and through a lock of its own everywhere
+// else, and no kill(-pgid) is ever sent again. What is given up is the
+// descendants; what is kept is the ability to end the process the caller
+// actually has to end.
+//
+// A group whose child never led one degrades the same way, from the start, for
+// the same reason: there is no group id to be right about.
+func (g *ProcessGroup) Collect(wait func() error) (groupErr, waitErr error) {
+	return g.collect(false, wait)
+}
+
+// SweepAndCollect is [ProcessGroup.Collect] with the sweep sent inside the
+// interval where it is safe to send: after the leader has exited and before it
+// has been collected, holding the lock across both so nothing can slip between
+// them.
+//
+// groupErr covers both ways the tree guarantee can break here — an exit that
+// could not be established, so no sweep went out, and a sweep that failed — and
+// both mean the same thing to the caller: a descendant may still be running on
+// this host. The wording of the log line is the caller's, because "the call"
+// and "the session" are different things to the operator reading it.
+func (g *ProcessGroup) SweepAndCollect(wait func() error) (groupErr, waitErr error) {
+	return g.collect(true, wait)
+}
+
+func (g *ProcessGroup) collect(sweep bool, wait func() error) (groupErr, waitErr error) {
+	g.mu.Lock()
+	pin, pid := g.pin, g.pid
+	g.mu.Unlock()
+
+	if pin != pinGroup {
+		// Nothing to establish and nothing to sweep: a leader that never got
+		// its own group had no group for its descendants to be in, and one
+		// this call has already released cannot be collected twice. Either way
+		// the leader is all there is, and it is named by its handle.
+		return nil, g.collectLeader(wait)
+	}
+
+	// Outside the lock, and it has to be: this blocks until the leader exits,
+	// and the kill that makes it exit comes through the lock.
+	if err := AwaitExit(pid); err != nil {
+		groundErr := fmt.Errorf(
+			"platform: could not establish that pid %d has exited, so its group id was given up without being swept: %w", pid, err)
+		g.mu.Lock()
+		// Before the collection rather than after it, which is the whole point:
+		// past here no signal from this group can name a group id, so the
+		// collection below has nothing to race with. See the doc comment.
+		if g.pin == pinGroup {
+			g.pin = pinLeader
+		}
+		g.mu.Unlock()
+		return groundErr, g.collectLeader(wait)
+	}
+
+	// The leader has exited and nothing has collected it, so its own zombie is
+	// holding the group id: the sweep below cannot be aimed anywhere else, and
+	// the collection cannot happen until this section ends.
+	g.mu.Lock()
+	if sweep {
+		if err := g.sweepLocked(); err != nil &&
+			!errors.Is(err, ErrProcessNotFound) && !errors.Is(err, ErrGroupClosed) {
+			groupErr = fmt.Errorf("platform: sweeping group %d: %w", g.pgid, err)
+		}
+	}
+	g.pin = pinNone
+	g.mu.Unlock()
+
+	return groupErr, wait()
+}
+
+// collectLeader performs a collection this call could not order anything
+// against, and gives the group up as soon as it has.
+//
+// The window it leaves is between wait4 returning inside wait and the mark
+// below: a signal in exactly that gap is aimed at the leader through its
+// handle, which os/exec refuses once it has collected it, rather than at a
+// number. That is the floor, and it is Go's own — see (*os.Process).pidWait,
+// which marks the process done before wait4 only when waitid could tell it the
+// wait would not block.
+func (g *ProcessGroup) collectLeader(wait func() error) error {
+	err := wait()
+	g.mu.Lock()
+	g.pin = pinNone
+	g.mu.Unlock()
 	return err
 }
 

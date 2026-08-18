@@ -35,7 +35,7 @@ func TestKillGroup_StillSignalsAfterTheWaitHasCollectedTheLeader(t *testing.T) {
 	pid := live.Process.Pid
 
 	logs := &syncBuffer{}
-	wait.killGroup(aimedAt, testLogger(logs))
+	killGroup(aimedAt, testLogger(logs))
 	require.Empty(t, logs.String())
 
 	waitFor(t, "pid "+strconv.Itoa(pid)+" to be gone", func() (bool, string) {

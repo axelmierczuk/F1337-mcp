@@ -32,7 +32,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: helpers <serve|serve-when|spew|orphan|tree|sleep|winsize|tui> ...")
+		fail("usage: helpers <serve|serve-when|spew|orphan|linger|tree|sleep|winsize|tui> ...")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -43,6 +43,8 @@ func main() {
 		spew(os.Args[2:])
 	case "orphan":
 		orphan()
+	case "linger":
+		linger(os.Args[2:])
 	case "tree":
 		tree(os.Args[2:])
 	case "sleep":
@@ -54,6 +56,49 @@ func main() {
 	default:
 		fail("unknown command " + os.Args[1])
 	}
+}
+
+// linger runs for a while, leaves a child holding this process's stdout in a
+// session of its own, and exits.
+//
+// It is the one shape in which a command's process group is released while the
+// call that started it is still running, which is the state #105 is about. The
+// child is out of the group, so the post-exec sweep cannot reach it; it holds
+// the command's stdout, so os/exec's Wait stays parked on the output copiers
+// for the whole of Cmd.WaitDelay after the leader has exited and been
+// collected. Everything the agent decides in that window — a timeout, a caller
+// hanging up — is decided about a process group id the kernel has taken back.
+//
+// The pids go in a file rather than on stdout, because the caller of an exec
+// RPC does not see stdout until the call ends and a scenario has to know them
+// while it is still running.
+//
+// Unix only in effect: detach is what puts the child outside the group, and on
+// Windows there is no group to be outside of.
+func linger(args []string) {
+	if len(args) < 2 {
+		fail("usage: helpers linger <seconds-before-exit> <pidfile>")
+	}
+	before, err := strconv.Atoi(args[0])
+	if err != nil {
+		fail("linger: " + err.Error())
+	}
+	time.Sleep(time.Duration(before) * time.Second)
+
+	// #nosec G204 -- this is a self-exec: the binary is os.Args[0] and there is
+	// no interpolated value at all.
+	child := exec.Command(os.Args[0], "sleep")
+	child.Stdout = os.Stdout
+	detach(child)
+	if err := child.Start(); err != nil {
+		fail("spawn child: " + err.Error())
+	}
+
+	pids := fmt.Sprintf("%d\n%d\n", os.Getpid(), child.Process.Pid)
+	if err := os.WriteFile(args[1], []byte(pids), 0o600); err != nil {
+		fail("write pidfile: " + err.Error())
+	}
+	fmt.Printf("pid %d pgid %d\n", os.Getpid(), processGroup())
 }
 
 func fail(msg string) {
