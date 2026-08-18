@@ -96,15 +96,87 @@ func serverOptions(cfg *agent.Config, log *slog.Logger, opts serveOptions) agent
 	}
 }
 
+// runServe hosts the daemon, through the platform's service manager when one
+// started this process.
+//
+// The order is the whole of #98. Everything that can fail — resolving the
+// config, refusing a posture the agent must not serve, opening the log, binding
+// the listener — now happens *inside* the manager's own start callback, which
+// kardianos calls after it has reported SERVICE_START_PENDING to the SCM. Before
+// this it happened first, so a daemon that refused to serve exited before it
+// could perform the handshake at all: the SCM waited its 30 seconds and reported
+// the silence as "Error 1053: the service did not respond to the start or
+// control request in a timely fashion", and the four lines naming the listen
+// address went to a stderr nobody was reading. From inside the callback the same
+// refusal is a service that stopped with a service-specific error, reported in
+// milliseconds, with the reason in the event log and in the record `service
+// status` reads.
 func runServe(ctx context.Context, opts serveOptions) error {
+	prg := &program{
+		start: func(c context.Context) (*agent.Server, *slog.Logger, error) {
+			return startAgent(c, opts)
+		},
+	}
+
+	host, managed := serviceManagerHost(prg)
+	if !managed {
+		// An operator started this: no manager to hand a failure to, and a
+		// stderr they are looking at. `serve` under a shell and every test take
+		// this path, and kardianos is deliberately not in it — it installs its
+		// own signal handler and ignores the command's context, which is what a
+		// caller cancelling MainContext needs.
+		srv, _, err := prg.start(ctx)
+		if err != nil {
+			return err
+		}
+		return runWithSignals(ctx, srv)
+	}
+
+	err := host.run()
+	if err != nil && host.log != nil {
+		// The one place the reason can still reach the operator. A service's
+		// stderr is discarded by the SCM, so this is what puts it in
+		// services.msc and in `Get-EventLog -LogName Application -Source
+		// fleet-agent`; on the other two platforms the manager's log is
+		// journald and launchd's error path, which already have the same text
+		// from stderr.
+		host.log(startupFailureMessage(err))
+	}
+	return err
+}
+
+// startAgent does everything that can fail before the daemon is serving, and
+// records why when something does.
+//
+// The record is the half of #98 that no amount of care in the service manager
+// covers. A Scheduled Task is started by `schtasks /Run`, which succeeds
+// whatever the daemon then does, and its stderr goes to the scheduler rather
+// than to a log; a service under an account that cannot read its own config
+// fails at a moment no operator is watching. `service status` is the command an
+// operator runs next in both cases, and until now the only thing it could say
+// about a daemon that never started was that the service was installed and
+// stopped.
+func startAgent(ctx context.Context, opts serveOptions) (srv *agent.Server, log *slog.Logger, err error) {
+	// Where the failure below would be recorded, narrowed by each step that
+	// learns more about this host. Deferred so that every return in this
+	// function is recorded, including the ones added after it.
+	site := startFailureSite{configPath: opts.configPath}
+	defer func() {
+		if err != nil {
+			site.record(err)
+		}
+	}()
+
 	path, err := agent.ResolveConfigPath(opts.configPath)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
+	site.configPath = path
 	cfg, err := agent.Load(path)
 	if err != nil {
-		return fmt.Errorf("%w\n\nRun `fleet-agent enroll` to create one, or pass --config", err)
+		return nil, nil, fmt.Errorf("%w\n\nRun `fleet-agent enroll` to create one, or pass --config", err)
 	}
+	site.stateDir = cfg.StateDir
 	if opts.listen != "" {
 		cfg.Listen = opts.listen
 	}
@@ -117,25 +189,25 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		AllowUnauthenticatedPublic: opts.allowPublic,
 	}); err != nil {
 		if errors.Is(err, agent.ErrNoAllowedRoots) {
-			return fmt.Errorf("%w\n\nconfig: %s", err, path)
+			return nil, nil, fmt.Errorf("%w\n\nconfig: %s", err, path)
 		}
 		if errors.Is(err, agent.ErrUnauthenticatedPublicListen) {
 			// The remedy, and the file to edit. This is the one refusal an
 			// operator meets while trying to start an agent that works fine on
 			// their laptop, so it has to say what to do rather than only what
 			// was wrong.
-			return fmt.Errorf("%w%s\n\nconfig: %s", err, agent.UnauthenticatedListenRemedy, path)
+			return nil, nil, fmt.Errorf("%w%s\n\nconfig: %s", err, agent.UnauthenticatedListenRemedy, path)
 		}
-		return err
+		return nil, nil, err
 	}
 
 	// Logs go to stderr so that stdout stays available for anything a future
 	// subcommand wants to write, and because every service manager this agent
 	// is installed under captures stderr: journald, launchd's
 	// StandardErrorPath, and the Windows event log.
-	log, err := cfg.Logger(os.Stderr)
+	log, err = cfg.Logger(os.Stderr)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	log.Info("agent starting",
@@ -157,11 +229,16 @@ func runServe(ctx context.Context, opts serveOptions) error {
 
 	// The jail state is announced by agent.New, which is the one place that
 	// decides it — see jailFor. Doing it here as well would let the two drift.
-	srv, err := agent.New(serverOptions(cfg, log, opts))
+	srv, err = agent.New(serverOptions(cfg, log, opts))
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	return run(ctx, srv, log.Error)
+
+	// The listener is open, so this start is not a failed one. Anything the last
+	// failure left behind would otherwise have `service status` reporting a
+	// fault an operator has already fixed.
+	site.clear()
+	return srv, log, nil
 }
 
 // recordRuntime works out what this daemon can actually reach, says so when the
@@ -205,20 +282,45 @@ func recordRuntime(ctx context.Context, cfg *agent.Config, log *slog.Logger) {
 	}
 }
 
-// program adapts the daemon to kardianos/service's lifecycle: Start must
-// return promptly and Stop must block until the daemon has finished draining.
+// program adapts the daemon to kardianos/service's lifecycle: Start does
+// everything that can fail and must return promptly, and Stop must block until
+// the daemon has finished draining.
+//
+// Start builds the daemon rather than being handed one. That is what puts the
+// startup inside the manager's own callback — see runServe — and it is why a
+// failure to start is now something the manager is *told* rather than something
+// it infers from a process that vanished.
 type program struct {
-	serve  func(context.Context) error
+	// start builds the daemon. nil in the several places that need a
+	// service.Interface only to address an already-installed registration by
+	// name; those never call Run, and Start refuses rather than panicking if a
+	// future one does.
+	start  func(context.Context) (*agent.Server, *slog.Logger, error)
 	onErr  func(msg string, args ...any)
 	cancel context.CancelFunc
 	done   chan error
 }
 
 func (p *program) Start(service.Service) error {
+	if p.start == nil {
+		return errors.New("this registration was built to address an installed service, not to run one")
+	}
+	// Not the command's context: kardianos owns the lifecycle here, and Stop is
+	// what ends this one.
 	ctx, cancel := context.WithCancel(context.Background())
+	srv, log, err := p.start(ctx)
+	if err != nil {
+		cancel()
+		// Returned, not logged and swallowed. kardianos hands this back out of
+		// Run — and on Windows reports the service as stopped with a
+		// service-specific exit code — which is the difference between an
+		// operator seeing a reason and an operator seeing error 1053.
+		return err
+	}
+	p.onErr = log.Error
 	p.cancel = cancel
 	p.done = make(chan error, 1)
-	go func() { p.done <- p.serve(ctx) }()
+	go func() { p.done <- srv.Serve(ctx) }()
 	return nil
 }
 
@@ -237,28 +339,60 @@ func (p *program) Stop(service.Service) error {
 	return err
 }
 
-// run hosts the server, through the platform's service manager when there is
-// one to speak to.
-//
-// The indirection earns its keep on Windows, where a service must implement
-// the SCM control protocol or the manager kills it for failing to report
-// started. Elsewhere kardianos waits on SIGTERM and SIGINT exactly as the
-// fallback below does, so the two paths agree on behaviour and differ only in
-// who owns the signal handler.
-func run(ctx context.Context, srv *agent.Server, onErr func(string, ...any)) error {
-	prg := &program{serve: srv.Serve, onErr: onErr}
+// managedHost is what the platform's service manager gives a daemon it started:
+// somewhere to run, and somewhere to report a failure that stderr will not
+// carry.
+type managedHost struct {
+	// run performs the manager's start handshake, calls the program's Start, and
+	// blocks until the manager asks the daemon to stop. It returns whatever
+	// Start or Stop returned.
+	run func() error
+	// log writes one message where the platform's service manager collects a
+	// daemon's own account of itself: the Windows event log, journald, launchd's
+	// error path. nil when there is nothing to write to.
+	log func(string)
+}
 
+// serviceManagerHost reports how this process was started, and is the seam every
+// test drives #98 through.
+//
+// It is indirected for the reason controlRegistration is: no runner here is a
+// service manager, and on Windows the log it returns is an event-log handle that
+// only exists inside a real service — kardianos opens it with eventlog.Open
+// against the source its own Install registered. The decisions built on both —
+// that startup happens inside the manager's handshake, and that a daemon which
+// cannot start says why somewhere the operator can read it rather than exiting
+// into a discarded stderr — are the whole of #98 and would otherwise be reachable
+// by nothing.
+//
+// Assigned only by a test, and only for the duration of one.
+var serviceManagerHost = hostServiceManagerHost
+
+// hostServiceManagerHost answers for the real host: a manager when one started
+// this process, and nothing when an operator did.
+func hostServiceManagerHost(prg *program) (*managedHost, bool) {
+	if service.Interactive() {
+		// A terminal, a test, or anything else an operator started. kardianos
+		// would install its own signal handler and ignore the command's
+		// context, which is what a cancellable MainContext needs.
+		return nil, false
+	}
 	svc, err := service.New(prg, minimalServiceConfig())
 	if err != nil {
-		return runWithSignals(ctx, srv)
+		// No init system this library recognises — a bare container, most
+		// likely. There is nothing to hand a failure to and nothing to perform a
+		// handshake with, so the plain path is the whole of what this host can
+		// do.
+		return nil, false
 	}
-	if service.Interactive() {
-		// Run from a terminal: kardianos would install its own signal handler
-		// and ignore the command's context, which is what tests and `serve`
-		// under a shell need to be able to cancel.
-		return runWithSignals(ctx, srv)
+	host := &managedHost{run: svc.Run}
+	if logger, err := svc.Logger(nil); err == nil {
+		// Not fatal when it fails. A daemon that cannot open the event log or
+		// the syslog socket still has to start, and a failure to start still has
+		// the record `service status` reads.
+		host.log = func(msg string) { _ = logger.Error(msg) }
 	}
-	return svc.Run()
+	return host, true
 }
 
 // runWithSignals is the plain path: serve until the context is cancelled or a

@@ -258,6 +258,26 @@ func TestAgentRefusesToServeUnauthenticatedOnAPublicAddress(t *testing.T) {
 		t.Fatalf("something is listening on %s after the daemon refused to serve", wildcard)
 	}
 
+	// And the reason outlives the process that produced it, which is the whole of
+	// #98. Started as a Windows service, everything above goes to a stderr the
+	// SCM discards: the daemon exits before it can perform the start handshake,
+	// the manager reports the silence as "Error 1053 ... did not respond to the
+	// start or control request in a timely fashion", and nothing anywhere names
+	// the listen address. So the daemon writes it down where `fleet-agent service
+	// status` reads, and here that record is a real file written by a real daemon
+	// on its way out rather than a fixture.
+	recorded := readStartFailureRecord(t, a)
+	for _, want := range []string{
+		"refusing to serve without mTLS",
+		wildcard,
+		"--allow-unauthenticated-public",
+		filepath.Join(a.dir, "agent.yaml"),
+	} {
+		if !contains(recorded, want) {
+			t.Fatalf("the record a failed start leaves for `service status` does not say %q:\n%s", want, recorded)
+		}
+	}
+
 	// And the same refusal when the wildcard arrives on the command line rather
 	// than in the file. `--listen 0.0.0.0:8722` on a config that is otherwise
 	// fine is the shape #85 names: the override is applied before the check,
@@ -291,6 +311,37 @@ func TestAgentRefusesToServeUnauthenticatedOnAPublicAddress(t *testing.T) {
 		}
 		return false, "no posture warning yet"
 	})
+
+	// The other half of the record above: a daemon that started leaves none. A
+	// file written unconditionally would have `service status` reporting a
+	// failure on a host whose agent is serving.
+	if path := startFailureRecordPath(allowed); fileExists(path) {
+		t.Fatalf("a daemon that started left a failed-start record behind at %s", path)
+	}
+}
+
+// startFailureRecordPath is where a daemon that could not start records why: in
+// the state directory, beside the report a running one writes.
+func startFailureRecordPath(a *agent) string {
+	return filepath.Join(a.dir, "state", "start-failure.json")
+}
+
+// readStartFailureRecord returns that record's contents, failing the test when
+// there is none.
+func readStartFailureRecord(t *testing.T, a *agent) string {
+	t.Helper()
+	path := startFailureRecordPath(a)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the record a failed start leaves for `service status` at %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// fileExists reports whether path is there at all.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // A public listen address with mTLS on is an ordinary deployment, and the guard

@@ -680,6 +680,15 @@ func TestServiceInstall_DryRunSaysItWillAskForAPassword(t *testing.T) {
 		"an unattended installer that does not know install stops to ask hangs on the prompt")
 	assert.Contains(t, text, "Log on as a service",
 		"and the right the SCM stores the password for but does not grant, without which every start fails with error 1069")
+	// And what the mechanism costs, which is the half #99 arrived as: a service
+	// under a named account is session 0 with a profile the SCM may not have
+	// loaded, and `install` printed nothing about it at all. The wording is
+	// asserted from every runner in TestMechanismNotes; this is the command
+	// being shown to print it, on the only runner that resolves this mechanism.
+	assert.Contains(t, text, "session 0",
+		"a Windows service runs in session 0 whoever it runs as, and an operator who asked for their own account has to be told")
+	assert.Contains(t, text, "service status",
+		"install cannot know whether the profile was loaded, so it has to name the command that checks")
 }
 
 // The Unix half of the same refusal, and the half that proves it is wired into

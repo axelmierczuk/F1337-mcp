@@ -102,13 +102,30 @@ var sessionZeroAccounts = []string{
 // --mechanism task — a logon trigger for an account that never logs on, which
 // is the one combination resolveMechanism exists to refuse — and made install
 // prompt for the password of an account that has none.
+//
+// The `.\` prefix is the same defect in the other spelling this codebase itself
+// produces and asks for. `.\name` is how CreateService is told "this machine,
+// not the domain" — serviceAccountName exists to add it, and the account prompt
+// offers `DOMAIN\name, .\name, or name@domain` as the three shapes to type. So
+// `.\LocalSystem` is a spelling an operator reaches by following this program's
+// own instructions, and unfolded it was an ordinary named account to every rule
+// built on this key: `install --user .\LocalSystem` resolved to a logon-
+// triggered task for the machine account — the one combination resolveMechanism
+// exists to refuse — with no warning that every command would run as SYSTEM, a
+// prompt for the password of an account that has none, and a lookup in
+// ensureServiceUser that a built-in identity has no entry to satisfy. #99 named
+// account spelling as one of its two hypotheses for exactly this reason.
+//
+// Stripping it cannot promote an ordinary account: `.\admin` folds to `admin`,
+// which is not on the list and is still the named account it was.
 func sessionZeroKey(name string) string {
-	return strings.Map(func(r rune) rune {
+	key := strings.Map(func(r rune) rune {
 		if r == ' ' {
 			return -1
 		}
 		return r
 	}, strings.ToLower(strings.TrimSpace(name)))
+	return strings.TrimPrefix(key, `.\`)
 }
 
 // runsInSessionZero reports whether name is a built-in Windows service identity

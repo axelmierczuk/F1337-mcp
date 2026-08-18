@@ -692,6 +692,28 @@ func mechanismNotes(m Mechanism, goos, account string, logonVerified bool) []str
 			"           you meant, re-install with --mechanism task.",
 		}
 	}
+	var notes []string
+	if goos == "windows" {
+		// The one mechanism that had nothing to say for itself, and the one #99
+		// arrived as. A Windows service under a *named* account is not the
+		// built-in-identity case above and is not the task either: it is session
+		// 0 with a profile that may or may not have been loaded, which is
+		// precisely the #74 outcome when it was not. docs/service.md has argued
+		// this since #79 — "the account is still in session 0; whether it sees
+		// its own per-user toolchains depends on whether its profile is loaded,
+		// which the SCM does not guarantee" — and `install` said none of it, so
+		// an operator who asked for a service under their own account got a
+		// clean success and discovered the isolation one failed command at a
+		// time. The claim is deliberately the document's claim: what it depends
+		// on, and which command answers it.
+		notes = append(notes,
+			"  NOTE: a Windows service runs in session 0, whoever it runs as. Whether the",
+			"        agent can reach the toolchains installed under "+account+" depends on",
+			"        whether the SCM loaded that account's profile, which it does not",
+			"        guarantee — `service status` reports what this daemon can actually",
+			"        reach rather than assuming. For an agent in an operator's own session,",
+			"        with their PATH, install with --mechanism task.")
+	}
 	if serviceNeedsPassword(m, goos, account) && !logonVerified {
 		// The other half of the credentials the SCM needs, and the one
 		// CreateService does not supply. It takes the password and stores it;
@@ -707,9 +729,9 @@ func mechanismNotes(m Mechanism, goos, account string, logonVerified bool) []str
 		// case where the check could not run at all — and it is deliberately
 		// the same text as the refusal, composed once in
 		// serviceLogonRightAdvice.
-		return serviceLogonRightNote(account)
+		notes = append(notes, serviceLogonRightNote(account)...)
 	}
-	return nil
+	return notes
 }
 
 // suggestedServiceAccount is the account the prompt offers, and pressing return
@@ -984,7 +1006,7 @@ func runServiceControl(out io.Writer, verb string) error {
 			err = svc.Restart()
 		}
 		if err != nil {
-			failures = append(failures, fmt.Errorf("%s %s: %w", verb, mechanism.Describe(), err))
+			failures = append(failures, fmt.Errorf("%s %s: %w%s", verb, mechanism.Describe(), err, startFailureHint(verb)))
 			continue
 		}
 		p.Printf("service %s: %s requested (%s)\n", ServiceName, verb, mechanism.Describe())
@@ -993,6 +1015,26 @@ func runServiceControl(out io.Writer, verb string) error {
 		return err
 	}
 	return p.Err()
+}
+
+// startFailureHint is what a failed start adds to the service manager's own
+// error.
+//
+// What the manager says is about the manager: ERROR_SERVICE_REQUEST_TIMEOUT for
+// a daemon that exited before its handshake, a service-specific exit code for
+// one that refused to serve, and — on a Scheduled Task — nothing at all, because
+// `schtasks /Run` succeeds whatever the process does next. The daemon's own
+// reason is somewhere else, and this is the line that says where. See
+// startFailure.
+//
+// Composed here rather than inline for the reason mechanismNotes is: it is the
+// text an operator acts on, and the branch that produces it fires only when a
+// service manager refuses.
+func startFailureHint(verb string) string {
+	if verb != "start" && verb != "restart" {
+		return ""
+	}
+	return "\n\nIf the agent started and then refused to serve, it recorded why: run `fleet-agent service status`"
 }
 
 func newServiceStatusCommand(out io.Writer) *cobra.Command {
@@ -1052,6 +1094,12 @@ func runServiceStatus(out io.Writer) error {
 	stateDir := stateDirForStatus()
 	report, reportErr := readLiveRuntimeReport(stateDir)
 	confinement := confinementFor(report)
+
+	// And the record a daemon that never got that far leaves instead. A start
+	// that failed is the state this command was least able to describe: an
+	// installed, stopped service, with the reason discarded by the SCM as a
+	// timeout. See startFailure.
+	failure, failureErr := readStartFailure(stateDir)
 
 	unusable, running := false, false
 	for _, mechanism := range mechanisms {
@@ -1121,6 +1169,18 @@ func runServiceStatus(out io.Writer) error {
 		p.Println("      cannot tell a confined agent from a working one — if `install` was")
 		p.Println("      given a --config other than the one above, this command is looking")
 		p.Println("      in the wrong place.")
+	}
+
+	// Why the last start failed, when one did. Printed after the state above and
+	// before the confinement verdict, because it explains a headline the operator
+	// has just read — "installed, stopped" for a service they asked Windows to
+	// start and were told had timed out.
+	if failureErr != nil {
+		p.Println("NOTE: could not read the record a failed start leaves behind:")
+		p.Printf("        %v\n", failureErr)
+	}
+	for _, line := range startFailureNotes(failure) {
+		p.Println(line)
 	}
 
 	if confinement != nil && unusable {
