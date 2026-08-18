@@ -226,8 +226,8 @@ This means the download was corrupted or tampered with. Not installing.
 
         if ($Service -eq 'yes') {
             # `service install` prints which mechanism it chose, the account,
-            # and what that account costs — a task stops at logout, a service in
-            # session 0 cannot see a per-user toolchain.
+            # and what that account costs: a task stops at logout, and a
+            # service in session 0 cannot see a per-user toolchain.
             Write-Step 'registering the agent to start at logon'
             & $target service install
             if ($LASTEXITCODE -ne 0) {

@@ -1,7 +1,6 @@
 package fleetagent_test
 
 import (
-	"runtime"
 	"strings"
 	"testing"
 
@@ -181,8 +180,13 @@ func TestExecutableAccessAdvice(t *testing.T) {
 	assert.Contains(t, advice, `Copy-Item`)
 	assert.Contains(t, advice, `C:\Program Files\fleet`)
 
-	advice = fleetagent.ExecutableAccessAdviceForTest(
-		"/root/fleet-agent is mode 0700", "/root/fleet-agent", "fleet", runtime.GOOS)
-	assert.Contains(t, advice, "203/EXEC")
-	assert.Contains(t, advice, "/usr/local/bin/fleet-agent")
+	// "linux", not runtime.GOOS. The parameter exists so that both platforms'
+	// wording is asserted from every runner; reading the host's GOOS here made
+	// this half run on two runners out of three and fail on the third.
+	for _, goos := range []string{"linux", "darwin"} {
+		advice = fleetagent.ExecutableAccessAdviceForTest(
+			"/root/fleet-agent is mode 0700", "/root/fleet-agent", "fleet", goos)
+		assert.Contains(t, advice, "203/EXEC", "goos %s", goos)
+		assert.Contains(t, advice, "/usr/local/bin/fleet-agent", "goos %s", goos)
+	}
 }

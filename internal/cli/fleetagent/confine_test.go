@@ -387,7 +387,7 @@ func TestServiceInstall_DryRunReportsThePlan(t *testing.T) {
 	case "windows":
 		assert.Contains(t, text, "Scheduled Task",
 			"the Windows default is the operator's own session, not session 0")
-		assert.Contains(t, text, "logs off", "and the trade has to be said at the moment it is made")
+		assert.Contains(t, text, "when they log off", "and the trade has to be said at the moment it is made")
 	default:
 		assert.Contains(t, text, "service manager registration")
 	}
