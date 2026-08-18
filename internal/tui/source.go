@@ -204,10 +204,10 @@ func (s *fleetSource) Logs(ctx context.Context, sandbox, address, processID stri
 		return Logs{}, client.MapError(err)
 	}
 
-	follow := opts.FollowFor
-	if !opts.Follow || follow <= 0 {
-		follow = 0
-	}
+	// Clamped on both sides here rather than trusted: this is the one request
+	// in the program whose duration decides how long a call can last, and the
+	// bound has to hold even for a caller that asked for something absurd.
+	follow := clampDuration(opts.FollowFor, 0, maxFollow)
 	req := &sandboxdv1.GetProcessLogsRequest{
 		ProcessId: processID,
 		TailLines: uint32(clamp(opts.TailLines, 0, 1<<20)), //nolint:gosec // clamped
@@ -364,6 +364,22 @@ func (s *fleetSource) Detail(ctx context.Context, sandbox, address string, toolc
 		})
 	}
 	return d, nil
+}
+
+// maxFollow bounds a single log window whatever it was asked for. The agent
+// clamps its own follow too; this is the near side of the same rule, and it is
+// what keeps a bad schedule from producing a call that outlives the frame it
+// was meant to fill.
+const maxFollow = time.Minute
+
+func clampDuration(d, lo, hi time.Duration) time.Duration {
+	if d < lo {
+		return lo
+	}
+	if d > hi {
+		return hi
+	}
+	return d
 }
 
 // gracePeriod is the agent's own default graceful-stop grace period, mirrored

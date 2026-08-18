@@ -261,3 +261,36 @@ func texts(l Logs) []string {
 	}
 	return out
 }
+
+// TestAFollowCannotBeUnbounded, whatever it is asked for.
+//
+// The bound is the acceptance criterion for this pane, and it is enforced at
+// the field rather than by convention: there is no way to spell "follow with no
+// deadline", and a schedule that asked for an hour gets a minute.
+func TestAFollowCannotBeUnbounded(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, LogOptions{}.Follows(), "the zero window follows nothing")
+	require.False(t, LogOptions{FollowFor: -time.Second}.Follows())
+	require.True(t, LogOptions{FollowFor: time.Second}.Follows())
+
+	require.Equal(t, time.Minute, clampDuration(time.Hour, 0, maxFollow))
+	require.Equal(t, time.Duration(0), clampDuration(-time.Hour, 0, maxFollow))
+	require.Equal(t, 2*time.Second, clampDuration(2*time.Second, 0, maxFollow))
+
+	// And the window the model actually asks for is inside it.
+	m := demoModel(80, 24)
+	m.now = fixedNow
+	m.logState = paneState{}
+	_, effects := m.tick(fixedNow.Add(time.Hour))
+	var seen bool
+	for _, e := range effects {
+		if e.Kind != EffectLogs {
+			continue
+		}
+		seen = true
+		require.True(t, e.Logs.Follows())
+		require.LessOrEqual(t, e.Logs.FollowFor, maxFollow)
+	}
+	require.True(t, seen, "no log window was asked for")
+}

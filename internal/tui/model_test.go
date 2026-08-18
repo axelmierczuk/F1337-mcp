@@ -273,7 +273,7 @@ func TestLogsRearmAsSoonAsAWindowCloses(t *testing.T) {
 	// And every window is bounded, both in time and in lines retained.
 	for _, e := range effects {
 		if e.Kind == EffectLogs {
-			require.True(t, e.Logs.Follow)
+			require.True(t, e.Logs.Follows())
 			require.Greater(t, e.Logs.FollowFor, time.Duration(0), "a follow with no bound is an unbounded stream")
 			require.LessOrEqual(t, e.Logs.FollowFor, time.Minute)
 			require.Greater(t, e.Logs.MaxLines, 0)

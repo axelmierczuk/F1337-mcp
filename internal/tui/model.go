@@ -616,7 +616,6 @@ func (m Model) effect(kind EffectKind, sb Sandbox) Effect {
 	case EffectLogs:
 		e.Logs = LogOptions{
 			TailLines: logTailLines,
-			Follow:    true,
 			FollowFor: m.schedule.LogWindow,
 			MaxLines:  maxLogLines,
 		}

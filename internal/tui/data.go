@@ -147,11 +147,19 @@ type Source interface {
 type LogOptions struct {
 	// TailLines is how much history to replay before following.
 	TailLines int
-	// Follow, with FollowFor, is the bound. FollowFor is always finite and the
-	// agent clamps it again to its own maximum.
-	Follow    bool
+	// FollowFor is how long to keep the stream open after the replay, and is
+	// the whole of "following is bounded": a positive value follows for exactly
+	// that long — the agent clamps it again to its own maximum — and zero does
+	// not follow at all.
+	//
+	// One field rather than a bool and a duration, because two fields have a
+	// fourth state (follow with no bound) that this program must never be able
+	// to express.
 	FollowFor time.Duration
 	// MaxLines caps what the window keeps, oldest first, so a process that
 	// outruns the pane costs a bounded amount of memory.
 	MaxLines int
 }
+
+// Follows reports whether this window keeps the stream open after the replay.
+func (o LogOptions) Follows() bool { return o.FollowFor > 0 }
