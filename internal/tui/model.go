@@ -124,11 +124,11 @@ type Confirmation struct {
 type paneState struct {
 	// inFlight stops a tick starting a second fetch on top of the first, which
 	// on a slow sandbox is how a view ends up with a queue of stale answers.
+	// Every path that asks for data sets it and every path that answers clears
+	// it, including the paths that drop an answer for somewhere else.
 	inFlight bool
-	// requested is when the in-flight fetch was asked for; last is when one
-	// most recently returned.
-	requested time.Time
-	last      time.Time
+	// last is when a fetch most recently returned.
+	last time.Time
 	// err is the most recent failure. Data from before it is kept and still
 	// shown: a sandbox that stopped answering has not stopped having had
 	// processes, and blanking the pane loses the last thing an operator saw
@@ -308,7 +308,7 @@ func (m Model) key(k string) (Model, []Effect) {
 		// way and refreshes the panes it just changed the subject of.
 		if m.focus == PaneFleet {
 			m.focus = PaneProcesses
-			return m, m.focusEffects()
+			return m.focusEffects()
 		}
 		return m, nil
 
@@ -334,11 +334,11 @@ func (m Model) key(k string) (Model, []Effect) {
 		}
 		m.status = "probing for toolchains; this is measurably slower"
 		m.statusAt = m.now
-		return m, m.request(EffectDetail)
+		return m.request(EffectDetail)
 
 	case "ctrl+r":
 		m.status, m.statusAt = "refreshing", m.now
-		return m, m.refreshAll()
+		return m.refreshAll()
 
 	case "s":
 		return m.openShell()
@@ -538,7 +538,7 @@ func (m Model) tick(now time.Time) (Model, []Effect) {
 
 	var out []Effect
 	if due(m.sbState, now, m.schedule.Sandboxes) {
-		m.sbState.inFlight, m.sbState.requested = true, now
+		m.sbState.inFlight = true
 		out = append(out, Effect{Kind: EffectSandboxes})
 	}
 
@@ -550,18 +550,18 @@ func (m Model) tick(now time.Time) (Model, []Effect) {
 	}
 
 	if due(m.procState, now, m.schedule.Processes) {
-		m.procState.inFlight, m.procState.requested = true, now
+		m.procState.inFlight = true
 		out = append(out, m.effect(EffectProcesses, sb))
 	}
 	if due(m.detailState, now, m.schedule.Detail) {
-		m.detailState.inFlight, m.detailState.requested = true, now
+		m.detailState.inFlight = true
 		out = append(out, m.effect(EffectDetail, sb))
 	}
 	// The log window is re-armed the moment the previous one closes rather
 	// than on a period of its own: the window *is* the period, and waiting out
 	// a second timer after it would leave a gap in what the pane can see.
 	if p, ok := m.selectedProcess(); ok && !m.logState.inFlight && m.logDue(now) {
-		m.logState.inFlight, m.logState.requested = true, now
+		m.logState.inFlight = true
 		e := m.effect(EffectLogs, sb)
 		e.ProcessID, e.ProcessName = p.ID, p.Name
 		out = append(out, e)
@@ -614,42 +614,67 @@ func (m Model) effect(kind EffectKind, sb Sandbox) Effect {
 	return e
 }
 
-// request asks for one pane's data now, regardless of when it last arrived.
-func (m Model) request(kind EffectKind) []Effect {
+// request asks for one pane's data now, regardless of when it last arrived,
+// and marks it in flight.
+//
+// Marking matters: an on-demand fetch that left the flag alone would be joined
+// by the scheduled one on the next tick, and the pane an operator just asked to
+// refresh would be the one place two answers race.
+func (m Model) request(kind EffectKind) (Model, []Effect) {
 	sb, ok := m.selectedSandbox()
 	if !ok {
-		return nil
+		return m, nil
 	}
 	e := m.effect(kind, sb)
 	if kind == EffectLogs {
 		p, ok := m.selectedProcess()
 		if !ok {
-			return nil
+			return m, nil
 		}
 		e.ProcessID, e.ProcessName = p.ID, p.Name
 	}
-	return []Effect{e}
+	m = m.markInFlight(kind)
+	return m, []Effect{e}
+}
+
+// markInFlight records that a fetch of this kind has been asked for.
+func (m Model) markInFlight(kind EffectKind) Model {
+	switch kind {
+	case EffectSandboxes:
+		m.sbState.inFlight = true
+	case EffectProcesses:
+		m.procState.inFlight = true
+	case EffectLogs:
+		m.logState.inFlight = true
+	case EffectDetail:
+		m.detailState.inFlight = true
+	}
+	return m
 }
 
 // focusEffects is what a change of focused sandbox owes: everything scoped to
 // it, at once, so the panes are not showing the previous machine's data while
 // three separate timers come due.
-func (m Model) focusEffects() []Effect {
+func (m Model) focusEffects() (Model, []Effect) {
 	sb, ok := m.selectedSandbox()
 	if !ok {
-		return nil
+		return m, nil
 	}
 	out := []Effect{m.effect(EffectProcesses, sb), m.effect(EffectDetail, sb)}
+	m = m.markInFlight(EffectProcesses).markInFlight(EffectDetail)
 	if p, ok := m.selectedProcess(); ok {
 		e := m.effect(EffectLogs, sb)
 		e.ProcessID, e.ProcessName = p.ID, p.Name
 		out = append(out, e)
+		m = m.markInFlight(EffectLogs)
 	}
-	return out
+	return m, out
 }
 
-func (m Model) refreshAll() []Effect {
-	return append([]Effect{{Kind: EffectSandboxes}}, m.focusEffects()...)
+func (m Model) refreshAll() (Model, []Effect) {
+	m, out := m.focusEffects()
+	m = m.markInFlight(EffectSandboxes)
+	return m, append([]Effect{{Kind: EffectSandboxes}}, out...)
 }
 
 // ------------------------------------------------------------- results
@@ -753,8 +778,10 @@ func (m Model) applyAction(msg actionMsg) (Model, []Effect) {
 		return m, nil
 	}
 	m.status, m.statusAt = msg.what, m.now
+	// An action's result is the one thing worth interrupting an in-flight
+	// fetch for: whatever it is about to report was read before the change.
 	m.procState.inFlight = false
-	return m, m.request(EffectProcesses)
+	return m.request(EffectProcesses)
 }
 
 // ------------------------------------------------------------ selection

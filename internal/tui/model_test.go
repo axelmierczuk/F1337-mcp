@@ -510,3 +510,53 @@ func TestEveryKeyIsInTheHelp(t *testing.T) {
 		require.Truef(t, documented[k], "key %q is bound but not in the help", k)
 	}
 }
+
+// TestAnOnDemandFetchIsNotJoinedByTheScheduledOne.
+//
+// Every key that asks for data now has to mark the pane in flight, or the next
+// tick sends a second request for the same thing — and the pane an operator
+// just asked to refresh becomes the one place two answers race.
+func TestAnOnDemandFetchIsNotJoinedByTheScheduledOne(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		key  string
+		kind EffectKind
+	}{
+		{"t", EffectDetail},
+		{"ctrl+r", EffectSandboxes},
+	}
+	for _, tc := range cases {
+		m := demoModel(80, 24)
+		m.now = fixedNow
+		m, asked := m.Step(key(tc.key))
+		require.Containsf(t, kinds(asked), tc.kind, "%q did not ask for %s", tc.key, tc.kind)
+
+		_, again := m.tick(fixedNow.Add(time.Hour))
+		require.NotContainsf(t, kinds(again), tc.kind,
+			"%q asked for %s and the next tick asked again while it was still in flight", tc.key, tc.kind)
+	}
+
+	// Same for enter, which asks for everything scoped to the sandbox at once.
+	m := demoModel(80, 24)
+	m.now = fixedNow
+	m, asked := m.Step(key("enter"))
+	require.ElementsMatch(t, []EffectKind{EffectProcesses, EffectDetail, EffectLogs}, kinds(asked))
+	_, again := m.tick(fixedNow.Add(time.Hour))
+	require.Equal(t, []EffectKind{EffectSandboxes}, kinds(again),
+		"a tick after enter re-asked for what enter had already asked for")
+}
+
+// TestAnActionInterruptsTheFetchItInvalidates. Whatever an in-flight process
+// list is about to report was read before the stop landed, so the answer that
+// matters is the one asked for after it.
+func TestAnActionInterruptsTheFetchItInvalidates(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.now = fixedNow
+	m.procState.inFlight = true
+	m, effects := m.Step(actionMsg{what: "stopped web-dev-server on alpha"})
+	require.Equal(t, []EffectKind{EffectProcesses}, kinds(effects))
+	require.True(t, m.procState.inFlight, "the replacement fetch is not marked in flight")
+}
