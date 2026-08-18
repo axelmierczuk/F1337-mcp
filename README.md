@@ -116,17 +116,22 @@ into. See [docs/service.md](docs/service.md).
 ```
 
 **5. Register the sandbox.** There is no CA, so there is no enrollment: nothing
-is issued and nothing is proved. What is left is giving the host a name, which
-your agent does with one tool call:
+is issued and nothing is proved. What is left is giving the host a name:
 
-```
-fleet_add(name="build-box", address="100.83.4.17:8722", insecure=true)
+```sh
+fleetctl add build-box --address 100.83.4.17:8722 --insecure
 ```
 
-`insecure` has to be said because it cannot be discovered — an agent serving
+`--insecure` has to be said because it cannot be discovered — an agent serving
 plaintext and one refusing a handshake look identical to a dialer that has not
-been told. Get it wrong and the connection fails; it never quietly downgrades.
-The call writes an entry to `~/.config/fleet/registry.yaml`, which you can write
+been told. So `add` contacts the host before it writes anything and refuses a
+posture the host contradicts, in either direction: it never quietly downgrades,
+and it never records an identity check nothing performs. An address nothing
+answers at is refused too — pass `--no-probe` for a host that is not up yet.
+
+Your agent can do the same thing with `fleet_add(name="build-box",
+address="100.83.4.17:8722", insecure=true)` for a host it discovers. Either
+writes the same entry to `~/.config/fleet/registry.yaml`, which you can write
 yourself instead:
 
 ```yaml

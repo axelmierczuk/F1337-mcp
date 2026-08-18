@@ -119,6 +119,7 @@ func NewRootCommandWithView(out io.Writer, view View) *cobra.Command {
 		newCACommand(out),
 		newEnrollCommand(out),
 		newServeCommand(out),
+		newAddCommand(out),
 		newListCommand(out),
 		newInfoCommand(out),
 		newRemoveCommand(out),

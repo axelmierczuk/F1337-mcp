@@ -71,6 +71,25 @@ func runAsync(t *testing.T, configDir string, args ...string) <-chan string {
 	return done
 }
 
+// runAsyncCapturingErrors is runAsync with both streams pointed at one buffer,
+// for a test that must be able to give up waiting on a command *and* assert on
+// the message a failure produces. Same reason the environment is set here rather
+// than in the goroutine.
+func runAsyncCapturingErrors(t *testing.T, configDir string, args ...string) <-chan string {
+	t.Helper()
+	t.Setenv("FLEET_CONFIG_DIR", configDir)
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		root := fleetctl.NewRootCommand(&buf)
+		root.SetErr(&buf)
+		root.SetArgs(args)
+		_ = root.Execute()
+		done <- buf.String()
+	}()
+	return done
+}
+
 func TestCAInit_ProducesFingerprintAndRefusesReinit(t *testing.T) {
 	dir := t.TempDir()
 

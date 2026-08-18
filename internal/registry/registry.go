@@ -76,6 +76,12 @@ type Sandbox struct {
 	// plaintext agent and a plaintext dial to an mTLS agent are both connection
 	// failures, not downgrades. What it must never do is go unsaid, which is
 	// why `fleetctl list`, `fleet_list` and `fleet_info` all show it.
+	//
+	// Nothing derives it, but `fleetctl add` does check it: before writing an
+	// entry it contacts the host in the posture it was given, and refuses the
+	// registration if the host answers in the other one. That closes the gap at
+	// the one moment an operator can still fix it, and leaves the field the
+	// operator's decision everywhere else.
 	Insecure bool `json:"insecure,omitempty" yaml:"insecure,omitempty"`
 	// EnrolledAt is when this sandbox joined the fleet.
 	EnrolledAt time.Time `json:"enrolled_at" yaml:"enrolled_at"`

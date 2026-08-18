@@ -143,8 +143,9 @@ opaque enough that a model cannot construct one for a sandbox it was never
 given.
 
 A reference carrying the `sbx_` prefix resolves as a handle first and only then
-as a name. `fleet_add` refuses to register a name with that prefix, but it is
-not the only way a name reaches the registry: an enrollment token that reserves
+as a name. Registering refuses a name with that prefix — one check in
+`internal/registry`, shared by `fleetctl add` and `fleet_add` — but registering
+is not the only way a name reaches the registry: an enrollment token that reserves
 no name lets the enrolling host choose its own. Matching names first would let
 such a host name itself after another sandbox's handle and receive every call
 aimed at it.

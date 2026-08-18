@@ -70,7 +70,12 @@ Register an already-enrolled agent that is not in the local registry.
 | `insecure` | bool | The agent on this host runs with `tls.enabled: false`. Reach it without mTLS. |
 
 Does not enroll. Enrollment mints credentials and is an operator action via
-`fleetctl`.
+`fleetctl`. The operator's equivalent of this tool is `fleetctl add <name>
+--address <host:port> [--insecure]`, which writes the same entry through the same
+code path and additionally contacts the host to check the posture before writing
+it. This tool does not probe: a model registering a host it just discovered has
+usually already reached it, and the probe belongs where the operator can act on a
+refusal.
 
 `insecure` has to be stated because it cannot be discovered: an agent serving
 plaintext and one refusing a handshake look the same to a dialer that has not

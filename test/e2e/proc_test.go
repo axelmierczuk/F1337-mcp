@@ -174,6 +174,31 @@ func tryCLI(bin string, args []string, env []string) (string, error) {
 	return string(out), err
 }
 
+// splitCLI is runCLI with the two streams kept apart, for a --json result.
+//
+// runCLI combines them, which is right for a test reading prose and wrong for
+// one parsing a document: a command that warns about anything — and registering
+// a host this fleet does not authenticate warns every time — would hand a
+// parser a log line where it expected a brace. Keeping them apart is also the
+// assertion. The rule is that stdout carries the result and stderr carries
+// everything said about it, and a test that combined the streams could not tell
+// a compliant command from one that had started writing warnings into the
+// document.
+func splitCLI(t *testing.T, bin string, args []string, env []string) (stdout, stderr string) {
+	t.Helper()
+
+	var outBuf, errBuf bytes.Buffer
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%s %s: %v\nstdout:\n%s\nstderr:\n%s",
+			filepathBase(bin), strings.Join(args, " "), err, outBuf.String(), errBuf.String())
+	}
+	return outBuf.String(), errBuf.String()
+}
+
 func filepathBase(path string) string {
 	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
 		return path[i+1:]

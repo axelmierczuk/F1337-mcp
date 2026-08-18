@@ -84,12 +84,18 @@ product will not let the posture be held by accident:
   way its entry says.
 - **The audit record says so.** See [Audit](#audit).
 
-The client half is symmetrical and explicit. `fleet_add … insecure: true`
-registers a sandbox the control plane will reach without mTLS; nothing infers
-it, because an agent serving plaintext and one refusing a handshake are
-indistinguishable to a dialer that has not been told. Registering it wrongly
-costs a failed connection in either direction — never a silent downgrade. The
-control plane announces every unauthenticated dial it makes.
+The client half is symmetrical and explicit. `fleetctl add … --insecure`, and
+`fleet_add … insecure: true` for a model, register a sandbox the control plane
+will reach without mTLS; nothing infers it, because an agent serving plaintext
+and one refusing a handshake are indistinguishable to a dialer that has not been
+told. `fleetctl add` does contact the host once before writing the entry, and
+refuses a posture the host contradicts in either direction: it will not record
+`auth mtls` for a host answering in plaintext, and it will not record `auth none`
+for one that completed a handshake. What it cannot confirm — a host that is down,
+or a workstation holding no control certificate — is registered and marked as
+unconfirmed rather than guessed at. Registering wrongly by hand still costs a
+failed connection in either direction, never a silent downgrade. The control
+plane announces every unauthenticated dial it makes.
 
 ### What enrollment means without a CA
 
@@ -103,7 +109,7 @@ nothing on the wire to check a signature against — and it also has nothing to 
 skip.
 
 The first half remains, and remains useful: a sandbox still has a name, an
-address, labels and a registry entry, added with `fleet_add`. But that name is a
+address, labels and a registry entry, added with `fleetctl add` or `fleet_add`. But that name is a
 label this workstation assigned to an address, exactly as it is for a sandbox
 enrolled without `--name`. **The host never proves it.** If something else
 answers on that address, the fleet will call it by the name in the registry, and

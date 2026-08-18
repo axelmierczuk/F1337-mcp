@@ -170,6 +170,7 @@ fleet_exec(argv=["go","test","./..."])          → exit 0
 ## Operating the fleet
 
 ```sh
+fleetctl add box --address host:8722 --insecure   # register a host that is already running an agent
 fleetctl list                     # the fleet, with health
 fleetctl list --json              # the same, for scripting
 fleetctl info build-box           # one host in full: resources, roots, uptime
@@ -290,11 +291,21 @@ it writes to the system state directory (`/var/lib/fleet`, or
 `/Library/Application Support/fleet/state` on macOS), so it wants the same
 privileges `service install` does.
 
-Then register it from the workstation — `fleet_add(name="tailnet-box",
-address="100.83.4.17:8722", insecure=true)` — and it appears in `fleetctl list`
-as `auth none`. There is no `fleetctl` equivalent: enrollment is what normally
-writes a registry entry, and this path has no enrollment. To write it by hand
-instead, add the sandbox to `~/.config/fleet/registry.yaml`:
+Then register it from the workstation:
+
+```sh
+fleetctl add tailnet-box --address 100.83.4.17:8722 --insecure
+```
+
+It appears in `fleetctl list` as `auth none`. `add` contacts the host first and
+refuses a posture the host contradicts in either direction — an agent serving
+plaintext registered as authenticated would report `auth mtls` for a connection
+nothing authenticates, and an enrolled one registered `--insecure` would fail
+every call. An address nothing answers at is refused too; `--no-probe` registers
+a host that is not up yet. `fleet_add(name="tailnet-box",
+address="100.83.4.17:8722", insecure=true)` is the same registration for a model
+that discovers the host. To write it by hand instead, add the sandbox to
+`~/.config/fleet/registry.yaml`:
 
 ```yaml
 version: 1
