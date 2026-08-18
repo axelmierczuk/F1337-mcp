@@ -84,7 +84,7 @@ func helperMain(mode string, args []string) int {
 		// something so the caller knows the child exists, and wait. The child
 		// gets no inherited pipes, so a test can find it without the agent's
 		// output drain depending on when it exits.
-		return spawnHelper(arg(args, ""), "sleep", true)
+		return spawnHelper(arg(args, ""), "sleep", true, false)
 
 	case "spawn-exit":
 		// spawn-exit <pidfile>: the same, except this process exits as soon as
@@ -92,14 +92,23 @@ func helperMain(mode string, args []string) int {
 		// outlived its parent — `sh -c 'daemon &'` — which nothing on the kill
 		// path has reached, because the command was never killed. Only the
 		// post-exec sweep gets it.
-		return spawnHelper(arg(args, ""), "sleep", false)
+		return spawnHelper(arg(args, ""), "sleep", false, false)
+
+	case "spawn-exit-holding-stdout":
+		// spawn-exit-holding-stdout <pidfile>: spawn-exit, except the
+		// grandchild inherits this process's stdout. The agent's read end
+		// therefore never sees EOF once the command itself has exited, which
+		// is the case Cmd.WaitDelay bounds — see defaultIODrain. Every other
+		// grandchild in this file is started with no pipes at all, so nothing
+		// else here can tell a drain that is bounded from one that is not.
+		return spawnHelper(arg(args, ""), "sleep", false, true)
 
 	case "ignore-term-spawn":
 		// ignore-term-spawn <pidfile>: a tree in which every process declines
 		// SIGTERM, so the polite half of the escalation cannot be what ends
 		// it. Both have to die of the group SIGKILL or not at all.
 		ignoreTerm()
-		return spawnHelper(arg(args, ""), "ignore-term", true)
+		return spawnHelper(arg(args, ""), "ignore-term", true, false)
 
 	case "env":
 		// env <NAME>: print one variable's value, or nothing when unset. Used
@@ -157,10 +166,11 @@ func arg(args []string, fallback string) string {
 // spawnHelper starts a grandchild in childMode and records both pids, then
 // either waits or returns.
 //
-// The grandchild is started without inheriting this process's stdout, so it
-// cannot hold the agent's output pipe open. What it does hold is membership of
-// the process group, which is the whole point: killing the leader alone leaves
-// it running, and the tests assert it does not.
+// The grandchild is started without inheriting this process's stdout unless
+// holdStdout says otherwise, so by default it cannot hold the agent's output
+// pipe open. What it does hold is membership of the process group, which is the
+// whole point: killing the leader alone leaves it running, and the tests assert
+// it does not.
 //
 // Both pids go in the file — this process's and its child's — so a test can
 // check that the command itself is gone as well as its descendant. One line
@@ -171,7 +181,11 @@ func arg(args []string, fallback string) string {
 // wait false leaves the grandchild running and returns. That is the case the
 // post-exec sweep exists for: the command succeeded, so nothing killed it, and
 // its descendant is still there when Wait comes back.
-func spawnHelper(pidFile, childMode string, wait bool) int {
+//
+// holdStdout hands the grandchild this process's stdout instead, so that the
+// command's output pipe outlives the command. That is the other half of the
+// same shape, and it is the one Cmd.WaitDelay bounds rather than the sweep.
+func spawnHelper(pidFile, childMode string, wait, holdStdout bool) int {
 	self, err := os.Executable()
 	if err != nil {
 		return 1
@@ -179,6 +193,9 @@ func spawnHelper(pidFile, childMode string, wait bool) int {
 	child := osexec.Command(self, "600") //nolint:gosec // the test binary re-executing itself
 	child.Env = append(os.Environ(), helperEnvFor(childMode))
 	child.Stdout = nil
+	if holdStdout {
+		child.Stdout = os.Stdout
+	}
 	child.Stderr = nil
 	if err := child.Start(); err != nil {
 		return 1

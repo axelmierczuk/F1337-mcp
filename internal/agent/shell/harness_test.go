@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -188,7 +189,30 @@ func openSession(ctx context.Context, t *testing.T, client sandboxdv1.ShellServi
 
 	stream, err := client.Shell(ctx)
 	require.NoError(t, err)
-	if err := stream.Send(&sandboxdv1.ShellRequest{Event: &sandboxdv1.ShellRequest_Open{Open: open}}); err != nil {
+	return openOn(t, stream, open)
+}
+
+// openOn sends the ShellOpen on a stream that is already open and reads until
+// the session is.
+//
+// # io.EOF from Send is not the error
+//
+// gRPC returns io.EOF from Send whenever the *server* has already ended the
+// stream, and is explicit that the status it ended with is available only from
+// Recv. Two of this service's refusals — shell.enabled and exec.enabled — are
+// answered before its first Recv, so the status can reach this end before this
+// Send has left it, and whichever crossed the wire first decided what the
+// caller was told: the real FailedPrecondition naming the setting, or a bare
+// io.EOF that reads as Unknown/"EOF".
+//
+// That is what failed `Test (ubuntu-latest, no race)` on PR #78, at 0.00s and
+// on a package that PR does not touch. 0.00s is not a timing profile, and this
+// was not load: it is a status thrown away by the caller that asked for it.
+// See TestShell_ARefusalThatArrivesBeforeTheOpenIsStillReported.
+func openOn(t *testing.T, stream grpc.BidiStreamingClient[sandboxdv1.ShellRequest, sandboxdv1.ShellResponse], open *sandboxdv1.ShellOpen) (*clientSession, error) {
+	t.Helper()
+
+	if err := stream.Send(&sandboxdv1.ShellRequest{Event: &sandboxdv1.ShellRequest_Open{Open: open}}); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 

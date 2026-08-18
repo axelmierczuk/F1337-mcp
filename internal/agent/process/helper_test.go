@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
+	"github.com/axelmierczuk/fleet-mcp/internal/fsutil"
 	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 	"github.com/axelmierczuk/fleet-mcp/internal/security/policy"
 )
@@ -99,6 +100,30 @@ func helperMain() {
 		code, _ := strconv.Atoi(argAt(args, 1, "0"))
 		time.Sleep(durationArg(args, 2, 0))
 		os.Exit(code)
+
+	case "exit-when":
+		// exit-when <markerPath> — stays up until the file appears, and then
+		// exits with the code written in it.
+		//
+		// It is "exit" with the linger replaced by the handshake awaitFile
+		// describes: a test that needs a process to still be running while it
+		// looks at it, and then to have exited while it looks again, gets both
+		// as facts it established rather than as two sides of a race against a
+		// duration. A linger long enough to outlast a call on an idle machine
+		// is not long enough on a loaded one, which is #70.
+		//
+		// The exit code comes out of the marker rather than off the command
+		// line so that the waiting is checked rather than assumed. Deleting
+		// the awaitFile call below otherwise left TestListReflectsTransitions
+		// green on 14 of 20 runs: the helper had exited immediately, the
+		// supervisor had simply not noticed yet, and every assertion about a
+		// process that was "still running" passed on a race — which is the
+		// flake that test exists to remove, back with nothing to catch it.
+		// Now a helper that stops waiting has no file to read and leaves with
+		// markerUnread, which no test asks for.
+		path := argAt(args, 1, "")
+		awaitFile(path)
+		os.Exit(markerCode(path))
 
 	case "echo":
 		// echo <count> <intervalMs> <text>
@@ -289,6 +314,42 @@ func helperMain() {
 		fmt.Fprintln(os.Stderr, "unknown helper mode", args[0])
 		os.Exit(2)
 	}
+}
+
+// markerUnread is what a helper exits with when the marker file it was told to
+// wait for could not be read.
+//
+// Not zero and not any code a test asks for, so a run that skipped the
+// handshake cannot be mistaken for one that completed it: the supervisor
+// reports that exit as CRASHED, which is a state no caller of exit-when waits
+// for.
+const markerUnread = 97
+
+// markerCode is the exit code written in a marker file, or markerUnread when
+// there is no readable number in one.
+//
+// The marker has to arrive whole, which is why writeMarker renames one into
+// place rather than writing it where the helper is watching: os.WriteFile
+// creates the file and then writes it, awaitFile's Stat succeeds in between,
+// and a helper that read the gap saw an empty file. Under eight-way load that
+// was 19 of 200 runs.
+func markerCode(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return markerUnread
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return markerUnread
+	}
+	return code
+}
+
+// writeMarker puts contents at path in one step, for a helper that is watching
+// for it. See markerCode for why the rename is not decoration.
+func writeMarker(t *testing.T, path, contents string) {
+	t.Helper()
+	require.NoError(t, fsutil.WriteAtomic(path, []byte(contents), 0o600))
 }
 
 // awaitFile blocks until path exists. It is the helper's half of a handshake

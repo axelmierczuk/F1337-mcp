@@ -1592,6 +1592,39 @@ func TestShell_RefusedWhenDisabled(t *testing.T) {
 	assert.Equal(t, "shell.enabled: false", rec.Rule)
 }
 
+// A refusal the agent makes before reading anything still reaches the caller
+// as itself.
+//
+// ShellService answers shell.enabled and exec.enabled without a Recv, so its
+// status can arrive before this end's own ShellOpen has left. gRPC fails that
+// Send with io.EOF and keeps the status for Recv, so a caller that reports the
+// Send error reports Unknown and "EOF" for a refusal the agent named exactly —
+// and which of the two happens is whichever crossed the wire first.
+//
+// The two tests above are that race, and on a loaded runner they lost it: this
+// is the `Test (ubuntu-latest, no race)` failure on PR #78, at 0.00s, which is
+// the tell that it was never a timing margin. Header blocks until the server
+// has answered, so the Send inside openOn is on the losing side every time
+// rather than one run in twenty.
+func TestShell_ARefusalThatArrivesBeforeTheOpenIsStillReported(t *testing.T) {
+	svc := newService(t, options{shell: agent.ShellConfig{Enabled: enabled(false)}})
+	client := serve(t, svc)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	stream, err := client.Shell(ctx)
+	require.NoError(t, err)
+	// Returns once the server has responded — here, once it has ended the
+	// stream without reading anything.
+	_, _ = stream.Header()
+
+	_, err = openOn(t, stream, openOptions("exit", "0"))
+	require.Error(t, err)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+	assert.Contains(t, status.Convert(err).Message(), "shell.enabled",
+		"the refusal the agent sent was thrown away in favour of the io.EOF its own arrival caused")
+}
+
 // TestShell_RefusedOnAnAgentWithExecDisabled is the one refusal that is a
 // security boundary rather than a convenience.
 //

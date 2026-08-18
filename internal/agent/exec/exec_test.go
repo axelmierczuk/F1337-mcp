@@ -58,6 +58,14 @@ type fakeStream struct {
 	// grpc-go's Send waits for a flow-control window the client is no longer
 	// opening.
 	blockSend chan struct{}
+	// parked, when set, receives every message whose Send parked on blockSend,
+	// at the moment it parks. It is the fixture's record of what the caller
+	// stopped reading, and the two answers mean opposite things: an output
+	// chunk is a copier stuck in Send, which is the one thing os/exec's Wait
+	// cannot come back from, while a terminal result means the copiers had
+	// already finished and there was never anything to be stuck on. See
+	// TestExec_StalledOutputStreamDoesNotWedgeTheHandler.
+	parked chan *sandboxdv1.ExecResponse
 }
 
 func newFakeStream(ctx context.Context) *fakeStream { return &fakeStream{ctx: ctx} }
@@ -69,12 +77,22 @@ func (s *fakeStream) Send(msg *sandboxdv1.ExecResponse) error {
 	hook := s.onSend
 	err := s.sendErr
 	block := s.blockSend
+	parked := s.parked
 	s.mu.Unlock()
 
 	if hook != nil {
 		hook(msg)
 	}
 	if block != nil {
+		if parked != nil {
+			// Non-blocking, so the record can never be what holds a Send that
+			// is supposed to be held by the caller. A reader that wants every
+			// message rather than the first one sizes the channel for them.
+			select {
+			case parked <- msg:
+			default:
+			}
+		}
 		<-block
 	}
 	if err != nil {
@@ -413,37 +431,123 @@ func TestExec_CancellingTheCallKillsTheCommand(t *testing.T) {
 // command's own tree is what this asserts on, not just the handler returning.
 // A handler that gives up while leaving the processes it started behind has
 // traded one invisible failure for another.
+//
+// # The stall is established as a fact before any of that is asserted
+//
+// The handler only gives up on a command it has killed, and it kills on the
+// command's own timeout — a clock that starts when the process does. The stall
+// it gives up on comes from the helper's first write, which is a second clock:
+// the helper is another copy of this test binary and it starts a grandchild
+// before it writes, so two process creations have to fit inside the budget. A
+// runner slow enough to spend the whole budget on them leaves the copier
+// nothing to park on. The handler then takes the ordinary path and it is the
+// *terminal result* that parks — on a Send the abandon path deliberately never
+// touches — so the handler really does wedge and the failsafe below is what
+// ends the test. That reads as "Exec did not return", which is true and says
+// nothing about the behaviour under test.
+//
+// That is #72, whose failure was at exactly 30.00s: the bound's own value, not
+// a duration anything took. Reproduced deterministically by giving the command
+// a 1ms budget — the only Send entered is the result, and the handler does not
+// return in 10s.
+//
+// So the fixture reads back which Send parked rather than assuming, and an
+// attempt that never stalled a copier is repeated with more budget rather than
+// reported as a wedge. Nothing here is asserted on how long anything took.
 func TestExec_StalledOutputStreamDoesNotWedgeTheHandler(t *testing.T) {
+	budget := 500 * time.Millisecond
+	for attempt := 1; attempt <= 4; attempt++ {
+		if stallsTheOutputCopier(t, attempt, budget) {
+			return
+		}
+		t.Logf("attempt %d: the command's %s budget expired before the helper wrote anything, "+
+			"so the terminal result parked instead of a copier; nothing was stalled, retrying with more budget",
+			attempt, budget)
+		budget *= 2
+	}
+	t.Fatalf("no attempt stalled the output copier, the last with a %s budget: "+
+		"this machine cannot start the helper and its grandchild inside that, or the helper no longer writes to stdout", budget/2)
+}
+
+// stallFailsafe bounds a wait that only a genuine hang can exceed.
+//
+// Nothing is asserted on it: the handler's own bound is the command's budget
+// plus the harness's kill grace and IO drain, which is 1.2s at the first
+// attempt's budget. It exists so that a handler that never comes back fails the
+// test instead of hanging the suite.
+const stallFailsafe = 30 * time.Second
+
+// stallsTheOutputCopier runs the scenario once with the given command budget
+// and reports whether the copier ended up parked in Send — the state the
+// handler's abandon path exists for.
+//
+// Everything the handler owes such a caller is asserted here. false means the
+// fixture never got it into that state, which is a fact about this machine and
+// says nothing about the handler either way.
+func stallsTheOutputCopier(t *testing.T, attempt int, budget time.Duration) bool {
 	h := newHarness(t)
 
 	block := make(chan struct{})
-	// Released at the end so the parked copier can finish; the handler must
-	// have returned long before this runs.
-	defer close(block)
+	// Released at the end so the parked Send can finish; on the path this test
+	// is about, the handler has returned long before this runs. Idempotent
+	// because the abandoned-attempt path below releases it early, to get the
+	// handler back before the next attempt starts another command.
+	release := sync.OnceFunc(func() { close(block) })
+	defer release()
 
 	stream := newFakeStream(context.Background())
 	stream.blockSend = block
+	stream.parked = make(chan *sandboxdv1.ExecResponse, 4)
 
 	// The spawn helper rather than a bare producer of output: it writes its
 	// pids to a file before its first write to stdout, so the pids survive a
 	// stream that never accepts anything.
 	pidFile := filepath.Join(t.TempDir(), "stalled.pid")
 	req := helperReq("spawn", pidFile)
-	req.Timeout = durationpb.New(500 * time.Millisecond)
+	req.Timeout = durationpb.New(budget)
 
 	returned := make(chan error, 1)
 	go func() { returned <- h.svc.Exec(req, stream) }()
 
+	// Which Send parked is the recorded fact this test turns on.
+	var stalled *sandboxdv1.ExecResponse
+	select {
+	case stalled = <-stream.parked:
+	case err := <-returned:
+		t.Fatalf("attempt %d: Exec returned %v without any Send parking, so the caller never stalled anything", attempt, err)
+	case <-time.After(stallFailsafe):
+		t.Fatalf("attempt %d: nothing reached the stream in %s and Exec has not returned, so the command never produced output nor failed", attempt, stallFailsafe)
+	}
+	if stalled.GetOutput() == nil {
+		require.NotNil(t, stalled.GetResult(), "a stream carries output chunks and one terminal result, nothing else")
+		// The copiers had already finished, so there is no wedge to be rescued
+		// from and the handler is parked where nothing will free it. Let it go
+		// and say so; the caller retries with a budget the helper can beat.
+		release()
+		select {
+		case <-returned:
+		case <-time.After(stallFailsafe):
+			t.Fatalf("attempt %d: Exec did not return in %s even after the stream started accepting again", attempt, stallFailsafe)
+		}
+		return false
+	}
+
 	var err error
 	select {
 	case err = <-returned:
-	case <-time.After(30 * time.Second):
-		t.Fatal("Exec did not return for a caller that stopped reading its stream")
+	case <-time.After(stallFailsafe):
+		t.Fatalf("attempt %d: Exec did not return for a caller that stopped reading its stream, "+
+			"whose output copier has been parked in Send since before the command's %s budget expired", attempt, budget)
 	}
 
 	require.Error(t, err)
 	require.Equal(t, codes.Aborted, status.Code(err))
 	require.Contains(t, status.Convert(err).Message(), "stopped reading")
+
+	// The handler's own record of the decision, written where it made it: it
+	// saw the stream stop accepting data and took the exit path, rather than
+	// returning for some other reason that also ends in Aborted.
+	require.Contains(t, h.logs.String(), "giving up on a command whose output stream stopped accepting data")
 
 	// The slot is back, so the next call is not queued behind a call that will
 	// never end.
@@ -460,6 +564,7 @@ func TestExec_StalledOutputStreamDoesNotWedgeTheHandler(t *testing.T) {
 	require.Equal(t, policy.OutcomeTimedOut, records[0].Outcome)
 	require.True(t, records[0].TimedOut)
 	require.NotEmpty(t, records[0].Error)
+	return true
 }
 
 // A descendant that outlived its parent does not outlive the RPC.
@@ -491,6 +596,104 @@ func TestExec_ADescendantThatOutlivesItsParentDoesNotOutliveTheCall(t *testing.T
 	// ten minutes unless the sweep took it.
 	_, grandchild := readPIDs(t, pidFile)
 	requireProcessGone(t, grandchild)
+}
+
+// The escalation starts politely, and that half is a guarantee of its own.
+//
+// docs/tools.md promises SIGTERM to the process group on expiry and SIGKILL
+// only after the grace period, which is what lets a command that traps it flush
+// and exit on its own terms. Nothing here looked at that: every other kill test
+// in this file either runs a tree that ignores SIGTERM — where only the KILL
+// can be what ended it — or asserts that the process is gone without asking
+// what it died of. Deleting the TERM step therefore left the whole package
+// green, with every command in the fleet killed outright.
+func TestExec_TheEscalationStartsWithSIGTERM(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no catchable termination request: SignalTerm terminates the job object, and terminatingSignal reports no signal at all")
+	}
+	h := newHarness(t)
+	// The product's own grace rather than the harness's shortened one. Nothing
+	// below is asserted on how long anything took: a command that has not died
+	// of SIGTERM within the grace is a command SIGTERM did not reach, and the
+	// SIGKILL that follows is then what this test sees. Shortening it would
+	// make the assertion a race between signal delivery and the next timer.
+	h.svc.killGrace = defaultKillGrace
+
+	// A helper that takes the default disposition for SIGTERM, so what it died
+	// of is what was sent to it.
+	req := helperReq("sleep", "600")
+	req.Timeout = durationpb.New(500 * time.Millisecond)
+
+	stream, err := h.run(t, req)
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.True(t, res.GetTimedOut())
+	require.True(t, res.GetSignaled())
+	require.Equal(t, "SIGTERM", res.GetSignal(),
+		"the command took the default disposition, so SIGKILL here means the polite half of the escalation never happened")
+}
+
+// A descendant holding the output pipe open does not hold the call open.
+//
+// os/exec's Wait does not return while anything still holds the write end of
+// the command's stdout, and a grandchild that inherited it does — `sh -c
+// 'daemon &'` is the shape. So a command that finished in a millisecond would
+// keep its RPC, its concurrency slot and its audit record waiting until the
+// timeout, and then be reported as having timed out. Cmd.WaitDelay is what
+// bounds that; see defaultIODrain.
+//
+// Nothing asserted it. Every other grandchild in this file is started with no
+// pipes at all, so deleting WaitDelay left the package, and the end-to-end
+// suite, green.
+//
+// # The grandchild really holding the pipe is asserted, not assumed
+//
+// Everything below except the drain's own record is also true of a command
+// whose descendant inherited nothing: it exits, it is not timed out, its code
+// is zero, and the sweep takes the descendant with the call. The one thing
+// only this shape produces is os/exec returning ErrWaitDelay — which it does
+// only for a process that has exited while something still holds its pipes —
+// and the handler logs exactly there. Without that line asserted, deleting the
+// grandchild's inherited stdout left this test green while it measured
+// nothing, which is #70's mistake aimed at a fixture instead of a clock.
+func TestExec_ADescendantHoldingTheOutputPipeDoesNotHoldTheCall(t *testing.T) {
+	h := newHarness(t)
+
+	pidFile := filepath.Join(t.TempDir(), "holding.pid")
+	req := helperReq("spawn-exit-holding-stdout", pidFile)
+	// Far longer than the harness's drain, so a call that waited for the pipe
+	// instead of for the drain is reported as a timeout rather than as a
+	// result. The value is a bound on the failure, not on the behaviour.
+	req.Timeout = durationpb.New(10 * time.Second)
+
+	stream, err := h.run(t, req)
+	require.NoError(t, err)
+
+	res := stream.result()
+	require.NotNil(t, res)
+	require.False(t, res.GetTimedOut(),
+		"the command exited on its own; only its descendant still held the output pipe")
+	require.Equal(t, int32(0), res.GetExitCode())
+
+	// The drain is what ended the wait, and this is the handler's own record of
+	// it: os/exec reports ErrWaitDelay only for a process that exited while
+	// something still held its pipes, so this line is simultaneously the
+	// product behaviour under test and the proof the fixture established the
+	// shape it claims to. Everything else here is what a command with no
+	// descendant at all reports.
+	require.Contains(t, h.logs.String(), "stopped reading output after the process exited",
+		"the wait ended on the pipes closing rather than on the drain, so the grandchild never held the command's stdout and nothing above is about WaitDelay")
+
+	// And the descendant goes with the call like any other.
+	_, grandchild := readPIDs(t, pidFile)
+	requireProcessGone(t, grandchild)
+
+	records := h.records(t)
+	require.Len(t, records, 1)
+	require.Equal(t, policy.OutcomeOK, records[0].Outcome)
+	require.False(t, records[0].TimedOut)
 }
 
 // A tree that declines SIGTERM is still gone when the timeout expires.
