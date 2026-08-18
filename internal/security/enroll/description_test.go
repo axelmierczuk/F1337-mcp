@@ -25,6 +25,7 @@ import (
 // so a host holding one valid token could put a terminal escape sequence, a
 // newline, or two hundred kilobytes into the operator's fleet listing.
 func TestEnroll_HostDescriptionIsBounded(t *testing.T) {
+	t.Parallel()
 	cases := map[string]*sandboxdv1.EnrollRequest{
 		"escape sequence in os": {
 			Platform: &sandboxdv1.Platform{Os: "linux\x1b[2J\x1b[31m ALL SANDBOXES HEALTHY"},
@@ -78,6 +79,7 @@ func TestEnroll_HostDescriptionIsBounded(t *testing.T) {
 // version string is long and full of punctuation, and a path separator is a
 // backslash on Windows.
 func TestEnroll_OrdinaryHostDescriptionIsAccepted(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -106,6 +108,7 @@ func TestEnroll_OrdinaryHostDescriptionIsAccepted(t *testing.T) {
 // A host that names more addresses than any host has is describing something
 // other than itself. The count is bounded before the loop that walks it.
 func TestEnroll_ListenAddressCountIsBounded(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -134,6 +137,7 @@ func TestEnroll_ListenAddressCountIsBounded(t *testing.T) {
 // makes it hold the cross-process lock that `fleetctl enroll mint` and
 // `enroll list` need to make any progress at all.
 func TestTokenStore_FailedRedemptionDoesNotRewriteTheStore(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 	store, err := enroll.OpenTokenStore(path)
 	require.NoError(t, err)

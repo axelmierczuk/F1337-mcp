@@ -17,6 +17,10 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/mcpserver/tools"
 )
 
+// Nothing in this file is parallel, and nothing in it can be: every test starts
+// with localWorkspace, which calls t.Chdir. See its comment in
+// transfer_tools_test.go.
+
 // Round 2's findings. Each of these fails with its fix reverted.
 
 // TestTransfer_APulledEntryCannotLeaveTheDestinationThroughASymlinkInsideTheWorkingDirectory.

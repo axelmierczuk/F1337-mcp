@@ -38,6 +38,7 @@ func (resultlessExec) Exec(context.Context, *sandboxdv1.ExecRequest, ...grpc.Cal
 // zero — a command whose fate is unknown reported as one that succeeded, with
 // its partial output attached to make the story convincing.
 func TestExec_AStreamThatEndedWithoutAResultIsNotReportedAsAnExit(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	f.clients.execOverride = resultlessExec{}
 
@@ -87,6 +88,7 @@ func (e *erroringExecStream) Recv() (*sandboxdv1.ExecResponse, error) {
 // other code keeps the ordinary phrasing: saying "this may have run" about a
 // call the agent refused would be the same error mirrored.
 func TestExec_TheTwoCodesThatArriveAfterTheCommandRanSaySoWhileOthersDoNot(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		code  codes.Code
 		warns bool

@@ -23,6 +23,7 @@ import (
 // updates are silently lost — the file stays valid YAML, it just quietly
 // forgets sandboxes.
 func TestSeparateHandles_ConcurrentAddsAllSurvive(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 
 	const writers = 8
@@ -65,6 +66,7 @@ func TestSeparateHandles_ConcurrentAddsAllSurvive(t *testing.T) {
 // Selections are a map inside the same file, so a lost update there loses one
 // client's target rather than a fleet member.
 func TestSeparateHandles_ConcurrentSelectionsAllSurvive(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 
 	seed, err := registry.Open(path)
@@ -111,6 +113,7 @@ func TestSeparateHandles_ConcurrentSelectionsAllSurvive(t *testing.T) {
 // invariant on every platform, including the ones that cannot reproduce the
 // symptom.
 func TestOpen_ParsesUnderTheCrossProcessLock(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 	seed, err := registry.Open(path)
 	require.NoError(t, err)
@@ -122,10 +125,19 @@ func TestOpen_ParsesUnderTheCrossProcessLock(t *testing.T) {
 	require.NoError(t, err)
 
 	opened := make(chan error, 1)
+	// running is closed on the way into Open, so the window below starts when
+	// the goroutine is actually running rather than when it was created. Without
+	// it, a goroutine the scheduler has not reached yet — every other parallel
+	// test in this package is competing for the same processors — reads exactly
+	// like an Open that is blocked on the lock, and the assertion below passes
+	// having watched nothing.
+	running := make(chan struct{})
 	go func() {
+		close(running)
 		_, err := registry.Open(path)
 		opened <- err
 	}()
+	<-running
 
 	select {
 	case err := <-opened:
@@ -149,6 +161,7 @@ func TestOpen_ParsesUnderTheCrossProcessLock(t *testing.T) {
 // make — which reads downstream as a lost update, in a registry that never lost
 // one.
 func TestSeparateHandles_OpenConcurrentWithWritesAlwaysSucceeds(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 	seed, err := registry.Open(path)
 	require.NoError(t, err)
@@ -190,6 +203,7 @@ func TestSeparateHandles_OpenConcurrentWithWritesAlwaysSucceeds(t *testing.T) {
 // Exists backs the enrollment collision check, so its failure direction
 // matters: an unknown name is free, anything else is treated as taken.
 func TestExists(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 	reg, err := registry.Open(path)
 	require.NoError(t, err)

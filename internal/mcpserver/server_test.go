@@ -28,6 +28,10 @@ const negotiatedProtocolVersion = "2026-07-28"
 // a bug in framing or in the initialize response is invisible when both ends
 // are the same library.
 func TestStdio_InitializeThenListTools(t *testing.T) {
+	// No t.Parallel: this replaces os.Stdin, os.Stdout and os.Stderr for the
+	// duration — see swapStdio — and those are the process's, not this test's. A
+	// parallel test would have its output redirected into this one's pipe, and
+	// the swap itself would race every other write to the same three variables.
 	responses := runOverStdio(t, slog.LevelInfo, []string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"fixture-client","version":"1.0.0"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
@@ -101,6 +105,7 @@ func TestStdio_InitializeThenListTools(t *testing.T) {
 // protocol-level sessions and made the whole selection model necessary — so
 // serving it is not incidental here.
 func TestStdio_DiscoverNegotiatesLatestProtocol(t *testing.T) {
+	// No t.Parallel: this swaps the process's standard streams. See swapStdio.
 	responses := runOverStdio(t, slog.LevelInfo, []string{
 		`{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"fixture-client","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}`,
 	})
@@ -124,6 +129,7 @@ func TestStdio_DiscoverNegotiatesLatestProtocol(t *testing.T) {
 // TestSession_RunsAtLatestProtocol checks the negotiated result an SDK client
 // actually ends up with, rather than only what the server offers.
 func TestSession_RunsAtLatestProtocol(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	init := f.session.InitializeResult()
 	require.NotNil(t, init)
@@ -161,6 +167,7 @@ func assertEchoInSchema(t *testing.T, tool string, schema map[string]any) {
 // run asserts on both halves — the debug lines have to arrive on stderr, and
 // nothing but JSON-RPC may arrive on stdout.
 func TestStdio_StdoutCarriesOnlyJSONRPC(t *testing.T) {
+	// No t.Parallel: this swaps the process's standard streams. See swapStdio.
 	stdout, stderr := runOverStdioRaw(t, slog.LevelDebug, []string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"fixture-client","version":"1.0.0"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
@@ -193,6 +200,7 @@ func TestStdio_StdoutCarriesOnlyJSONRPC(t *testing.T) {
 // launched over stdio has exactly one client; if it outlives it, nothing will
 // ever connect to it again and it is a leaked process on the user's machine.
 func TestStdio_ExitsWhenStdinCloses(t *testing.T) {
+	// No t.Parallel: this swaps the process's standard streams. See swapStdio.
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
 	stdoutR, stdoutW, err := os.Pipe()
@@ -236,6 +244,7 @@ func TestStdio_ExitsWhenStdinCloses(t *testing.T) {
 // fleet tool that targets: the other four operate on the registry, which is
 // what makes them usable before anything has been selected.
 func TestServer_RegistersTheFleetGroup(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 
 	targeted := map[string]bool{}
@@ -278,6 +287,7 @@ func TestServer_RegistersTheFleetGroup(t *testing.T) {
 // server that starts and can tell them so, rather than one that refuses to
 // launch with nothing to ask.
 func TestServer_StartsWithoutCredentials(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	server, err := mcpserver.New(mcpserver.Options{ConfigDir: dir, LogWriter: &testWriter{t: t}})
 	require.NoError(t, err)
@@ -468,8 +478,18 @@ func scanLines(r *os.File) <-chan string {
 // swapStdio points the process's standard streams at pipes for the duration
 // of one test. Tests that call it must not run in parallel: os.Stdin,
 // os.Stdout and os.Stderr are process-wide.
+//
+// Which now has teeth. A parallel test would have its own output redirected
+// into this one's pipe, and the assignment itself would race every other read
+// of the same three variables. requireSequential is what holds the four tests
+// that call it to that, and it is not decoration: tried without it, one of the
+// four passed all three runs while its stdout was somebody else's, and the
+// three that did fail took a different dozen unrelated tests down with them
+// each time. Sequential tests all finish before the first parallel one is
+// released, so the swap is never live alongside one.
 func swapStdio(t *testing.T, stdin, stdout, stderr *os.File) func() {
 	t.Helper()
+	requireSequential(t)
 	origIn, origOut, origErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdin, os.Stdout, os.Stderr = stdin, stdout, stderr
 	return func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr }

@@ -26,6 +26,10 @@ import (
 // for embedding, it accumulates. So: real credentials, a real pool, handlers
 // racing Close, repeated — and the goroutine count has to come back down.
 func TestConcurrent_ClosingWithHandlersInFlightLeaksNoGoroutines(t *testing.T) {
+	// For the reason the goleak tests in forward_tools_test.go and
+	// socks_tools_test.go give: runtime.NumGoroutine counts the whole process, so
+	// a concurrent test's goroutines would read here as this server's leak.
+	requireSequential(t)
 	dir := t.TempDir()
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)

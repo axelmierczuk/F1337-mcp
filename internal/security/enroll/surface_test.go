@@ -75,6 +75,7 @@ var enrollRequestSurface = map[string]fieldAccount{
 // It fails when a field is added to EnrollRequest — or to any message reachable
 // from it — without someone deciding what that field is allowed to influence.
 func TestEnrollRequest_EveryFieldIsAccountedFor(t *testing.T) {
+	t.Parallel()
 	inProto := map[string]bool{}
 	walkFields(t, (&sandboxdv1.EnrollRequest{}).ProtoReflect().Descriptor(), "", inProto, 0)
 
@@ -103,6 +104,7 @@ func TestEnrollRequest_EveryFieldIsAccountedFor(t *testing.T) {
 // platform.cpu_model, records it here as bounded because every other platform
 // field is, and does not add it to checkHostDescription.
 func TestEnrollRequest_EveryBoundedFieldIsBoundedInPractice(t *testing.T) {
+	t.Parallel()
 	hostile := map[string]string{
 		// Longer than any bound in this package — 128 bytes for a name, 256 for
 		// a self-description — so one value tests them all.
@@ -144,6 +146,7 @@ func TestEnrollRequest_EveryBoundedFieldIsBoundedInPractice(t *testing.T) {
 // different bug. This is the companion assertion to the one above: the same
 // fields, populated the way an ordinary Windows or Linux host populates them.
 func TestEnrollRequest_BoundedFieldsStillAdmitARealHost(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}

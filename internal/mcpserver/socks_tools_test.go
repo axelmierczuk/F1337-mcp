@@ -40,6 +40,7 @@ import (
 // The decision #45 left open, and the one this tool exists to make: a model
 // does not inherit an operator's "any host" choice.
 func TestSocks_RefusesAnAgentThatPermitsEveryHost(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{socksEnabled: true})
 
 	msg := f.liveFails("fleet_socks", nil)
@@ -69,6 +70,7 @@ func TestSocks_RefusesAnAgentThatPermitsEveryHost(t *testing.T) {
 // this fixture runs the real HostService over the real config, so what is under
 // test is the agent's answer rather than this file's opinion of it.
 func TestSocks_RefusesAnAllowListThatCoversEveryHost(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
 		forwardAllowedHosts: []string{"0.0.0.0/0"},
@@ -84,6 +86,7 @@ func TestSocks_RefusesAnAllowListThatCoversEveryHost(t *testing.T) {
 
 // And the other two postures an agent can be in.
 func TestSocks_RefusesAnAgentThatDoesNotProxy(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{forwardAllowedHosts: []string{"db.internal"}})
 
 	msg := f.liveFails("fleet_socks", nil)
@@ -92,6 +95,7 @@ func TestSocks_RefusesAnAgentThatDoesNotProxy(t *testing.T) {
 }
 
 func TestSocks_RefusesAnAgentThatDoesNotForwardAtAll(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{forwardDisabled: true})
 
 	msg := f.liveFails("fleet_socks", nil)
@@ -123,6 +127,7 @@ func TestSocks_RefusesAnAgentThatDoesNotForwardAtAll(t *testing.T) {
 // connection can only be the capability gate: an agent that judged this as a
 // forward would permit it, dial it, and answer 0x00.
 func TestSocks_AnAgentThatDoesNotProxyRefusesTheConnectionItself(t *testing.T) {
+	t.Parallel()
 	destination := startLineServer(t)
 	f := newLiveFixture(t, liveAgentOptions{
 		// socks_enabled is off — the shipped default — and the allow list
@@ -180,6 +185,7 @@ func TestSocks_AnAgentThatDoesNotProxyRefusesTheConnectionItself(t *testing.T) {
 // The ordinary case: a narrowed agent, a proxy, and a real client reaching a
 // destination through it.
 func TestSocks_ReachesADestinationThroughTheSandbox(t *testing.T) {
+	t.Parallel()
 	destination := startLineServer(t)
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled: true,
@@ -241,6 +247,7 @@ func TestSocks_ReachesADestinationThroughTheSandbox(t *testing.T) {
 // agent is what tried to resolve it. A client that had resolved locally would
 // have failed on this side, before the proxy saw anything.
 func TestSocks_ResolvesTheDestinationNameOnTheAgent(t *testing.T) {
+	t.Parallel()
 	const unresolvable = "nowhere.invalid"
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
@@ -275,6 +282,7 @@ func TestSocks_ResolvesTheDestinationNameOnTheAgent(t *testing.T) {
 // failure" for exactly the same typo, with nothing in front of it to explain
 // why the same command answered differently against two agents.
 func TestSocks_AnUnresolvableNameIsUnreachableWhicheverPathReportsIt(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled: true,
 		// The destination below is deliberately *not* on this list, so the
@@ -291,6 +299,7 @@ func TestSocks_AnUnresolvableNameIsUnreachableWhicheverPathReportsIt(t *testing.
 // A destination outside the agent's allow list is refused by the agent, told to
 // the client in the protocol's own terms, and recorded.
 func TestSocks_DestinationOutsideTheAllowListIsRefusedAndAudited(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
 		forwardAllowedHosts: []string{"10.0.4.0/24"},
@@ -321,6 +330,7 @@ func TestSocks_DestinationOutsideTheAllowListIsRefusedAndAudited(t *testing.T) {
 
 // One connection, one audit record, with the destination and the volume in it.
 func TestSocks_EveryConnectionProducesExactlyOneAuditRecord(t *testing.T) {
+	t.Parallel()
 	destination := startLineServer(t)
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
@@ -356,6 +366,7 @@ func TestSocks_EveryConnectionProducesExactlyOneAuditRecord(t *testing.T) {
 // ------------------------------------------------ concurrency and volume
 
 func TestSocks_CarriesManyConcurrentConnections(t *testing.T) {
+	t.Parallel()
 	destination := startLineServer(t)
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
@@ -386,6 +397,7 @@ func TestSocks_CarriesManyConcurrentConnections(t *testing.T) {
 // proxy that buffered the whole body could not do. Written as a deadlock rather
 // than a timing comparison so it cannot pass slowly.
 func TestSocks_LargeTransferStreamsRatherThanBuffering(t *testing.T) {
+	t.Parallel()
 	const (
 		chunk  = 64 * 1024
 		chunks = 128 // 8 MiB, comfortably past every buffer in the path
@@ -432,6 +444,7 @@ func TestSocks_LargeTransferStreamsRatherThanBuffering(t *testing.T) {
 // A client that has finished sending is still waiting to receive. Shutting the
 // whole connection at a half-close is the bug that makes `curl` hang.
 func TestSocks_HalfCloseLetsTheResponseComeBack(t *testing.T) {
+	t.Parallel()
 	const reply = "answered only once the request had ended"
 	destination := startDestination(t, func(conn net.Conn) {
 		defer func() { _ = conn.Close() }()
@@ -465,6 +478,13 @@ func TestSocks_HalfCloseLetsTheResponseComeBack(t *testing.T) {
 // server, and the user would see "address already in use" from a process that
 // no longer exists.
 func TestSocks_ServerCloseReleasesEveryListener(t *testing.T) {
+	// Sequential, for the reason
+	// TestForward_StopClosesTheListenerAndDropsConnections gives: both
+	// assertions below are about one particular loopback port at one particular
+	// instant, and a saturated machine answers both of them wrongly often
+	// enough to matter — about one run in four at `-parallel 24`, in the
+	// direction that reports a leak this server did not have.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
 		forwardAllowedHosts: []string{"localhost"},
@@ -491,6 +511,12 @@ func TestSocks_ServerCloseReleasesEveryListener(t *testing.T) {
 // fails it — and a client pointed at a proxy cannot tell that from every
 // destination being down.
 func TestSocks_RemovingTheSandboxClosesItsProxy(t *testing.T) {
+	// Sequential, for the reason
+	// TestForward_StopClosesTheListenerAndDropsConnections gives: what is
+	// asserted is the state of one loopback port, and the four tests around it
+	// that were tried in parallel all failed on that and not on anything this
+	// server did.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
 		forwardAllowedHosts: []string{"localhost"},
@@ -537,6 +563,9 @@ func TestSocks_RemovingTheSandboxClosesItsProxy(t *testing.T) {
 // speaks again and fail deterministically rather than statistically. Both were
 // checked by reverting the cancel they name.
 func TestSocks_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
+	// For the reason TestForward_NoGoroutineLeakAcrossManyConnections gives:
+	// goleak and the descriptor snapshot both count the whole process.
+	requireSequential(t)
 	line := startLineServer(t)
 	// A destination that reads a request and then resets instead of answering,
 	// which is what a server crashing mid-request does to its socket.

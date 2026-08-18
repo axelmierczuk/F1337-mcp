@@ -84,6 +84,7 @@ type removeResult struct {
 // enrollment hint reads as "there is nothing here yet, and this is how you
 // change that".
 func TestList_EmptyRegistryIsNotAnError(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 
 	res := f.ok("fleet_list", map[string]any{}, "")
@@ -99,6 +100,7 @@ func TestList_EmptyRegistryIsNotAnError(t *testing.T) {
 // than elapsed time: "fast" is a property of the machine running the test,
 // but "issued no RPC" is a property of the code.
 func TestList_RefreshProbesAndCacheDoesNot(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -138,6 +140,7 @@ func TestList_RefreshProbesAndCacheDoesNot(t *testing.T) {
 // "rpc error: code = Unavailable desc = connection refused" from cache — the
 // exact envelope issue #19 says must never reach a model's context.
 func TestList_UnreachableDetailNeverLeaksTheGRPCEnvelope(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{probeTimeout: 200 * time.Millisecond})
 	f.add("cached", "cached.internal:8722", nil)
 	f.add("probed", "probed.internal:8722", nil)
@@ -183,6 +186,7 @@ func TestList_UnreachableDetailNeverLeaksTheGRPCEnvelope(t *testing.T) {
 // with a stack trace turned a fleet listing into a wall of text — paid for on
 // every fleet check, in the same result issue #21 requires to stay compact.
 func TestList_AgentSuppliedDetailIsBounded(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("cached", "cached.internal:8722", nil)
 	f.add("probed", "probed.internal:8722", nil)
@@ -240,6 +244,7 @@ func TestList_AgentSuppliedDetailIsBounded(t *testing.T) {
 // One of them must not hold up the listing, and a per-sandbox deadline is
 // what makes that true regardless of how many are off.
 func TestList_UnreachableSandboxDoesNotHangTheCall(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{probeTimeout: 200 * time.Millisecond})
 	f.add("up", "up.internal:8722", nil)
 	f.add("down-1", "down-1.internal:8722", nil)
@@ -263,14 +268,23 @@ func TestList_UnreachableSandboxDoesNotHangTheCall(t *testing.T) {
 		assert.NotEmptyf(t, sb.Detail, "%s should say why it is unreachable", sb.Name)
 	}
 
-	// Serialised, two dead hosts would cost two deadlines. Probing in
-	// parallel means one, plus slack for a loaded CI machine.
-	assert.Less(t, elapsed, 3*time.Second, "probes must run in parallel")
+	// Probing in parallel, asserted where it happens rather than on the clock.
+	// The two dead hosts sit on their deadline together or one after the other,
+	// and a wall-clock bound loose enough not to flake on a CI runner — three
+	// seconds, against two 200ms deadlines — cannot tell those apart: with the
+	// fan-out taken out of the product this test stayed green.
+	assert.GreaterOrEqual(t, f.clients.overlap.highest(), 2,
+		"two probes must have been in flight at once; serialised, every dead host in a fleet adds its own deadline to the listing")
+
+	// And the deadline is applied at all, which is what stops the hour-long
+	// probe above from becoming an hour-long tool call.
+	assert.Less(t, elapsed, 3*time.Second, "a probe that outlives its deadline must not hold up the listing")
 }
 
 // TestList_FiltersByLabel covers the label filter, and the case where it
 // matches nothing — which must not read the same as an empty fleet.
 func TestList_FiltersByLabel(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", map[string]string{"arch": "amd64"})
 	f.add("gpu-01", "gpu-01.internal:8722", map[string]string{"arch": "arm64", "gpu": "a100"})
@@ -301,6 +315,7 @@ func TestList_FiltersByLabel(t *testing.T) {
 // does not appear in the very list being returned reads as a bug in the tool;
 // saying the selection is gone is what the model can act on.
 func TestList_ReportsAStaleSelectionRatherThanEchoingIt(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", map[string]string{"arch": "amd64"})
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -325,6 +340,7 @@ func TestList_ReportsAStaleSelectionRatherThanEchoingIt(t *testing.T) {
 // TestList_TwentySandboxesStayCompact guards the size of a result that lands
 // in model context on every fleet check.
 func TestList_TwentySandboxesStayCompact(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	for i := range 20 {
 		f.add(fmt.Sprintf("sandbox-%02d", i), fmt.Sprintf("sandbox-%02d.internal:8722", i),
@@ -346,6 +362,7 @@ func TestList_TwentySandboxesStayCompact(t *testing.T) {
 // more than an acknowledgement: without the roots, the model's next call is
 // always fleet_info.
 func TestSelect_ReturnsHandlePlatformAndRoots(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 
@@ -369,6 +386,7 @@ func TestSelect_ReturnsHandlePlatformAndRoots(t *testing.T) {
 // "nowhere is writable", which is the opposite of the truth and would stop a
 // model even trying.
 func TestUnconfinedHost_ReadsAsEveryPathWritableNotNone(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("open-box", "open-box.internal:8722", nil)
 
@@ -405,6 +423,7 @@ func TestUnconfinedHost_ReadsAsEveryPathWritableNotNone(t *testing.T) {
 // TestSelect_UnknownNameListsValidNames: a model that mistypes a name needs
 // the right ones, not a restatement that it was wrong.
 func TestSelect_UnknownNameListsValidNames(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -419,6 +438,7 @@ func TestSelect_UnknownNameListsValidNames(t *testing.T) {
 // Refusing to select it would leave the model unable to address it at all
 // once it came up.
 func TestSelect_UnreachableSandboxStillSelects(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.clients.host("build-box").setErr(unavailable("build-box"))
@@ -440,6 +460,7 @@ func TestSelect_UnreachableSandboxStillSelects(t *testing.T) {
 // TestAdd_ValidatesAddressBeforeTouchingTheRegistry: a rejected call must
 // leave no trace, or the fleet accumulates entries nothing can dial.
 func TestAdd_ValidatesAddressBeforeTouchingTheRegistry(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 
 	for _, address := range []string{"build-box", "build-box:", ":8722", "build-box:0", "build-box:99999", "https://build-box:8722", "build-box:http"} {
@@ -457,6 +478,7 @@ func TestAdd_ValidatesAddressBeforeTouchingTheRegistry(t *testing.T) {
 // TestAdd_RefusesToOverwriteAnExistingName: silently repointing a name at a
 // new address is how a later call reaches the wrong host.
 func TestAdd_RefusesToOverwriteAnExistingName(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 
 	res := f.ok("fleet_add", map[string]any{"name": "build-box", "address": "build-box.internal:8722"}, "")
@@ -476,6 +498,7 @@ func TestAdd_RefusesToOverwriteAnExistingName(t *testing.T) {
 // TestAdd_RejectsUnusableNames guards the identifier that becomes a registry
 // key, a certificate subject, and a line in a table.
 func TestAdd_RejectsUnusableNames(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	for _, name := range []string{"", "build box", "build\tbox", "build\nbox", "sbx_deadbeef", strings.Repeat("a", 129)} {
 		text := f.fails("fleet_add", map[string]any{"name": name, "address": "host:8722"}, "")
@@ -489,6 +512,7 @@ func TestAdd_RejectsUnusableNames(t *testing.T) {
 // whole, and in every fleet_list result — so an unbounded one is a fleet
 // listing nobody can read and a registry file that only grows.
 func TestAdd_BoundsTheLabelsItWritesToTheRegistry(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 
 	huge := strings.Repeat("y", 50_000)
@@ -531,6 +555,7 @@ func TestAdd_BoundsTheLabelsItWritesToTheRegistry(t *testing.T) {
 // that a dangling selection is worse than none, and the one that stops a
 // reader assuming the host was cleaned up.
 func TestRemove_ClearsTheSelectionAndSaysWhatItDidNotDo(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.ok("fleet_select", map[string]any{"name": "build-box"}, "")
@@ -561,6 +586,7 @@ func TestRemove_ClearsTheSelectionAndSaysWhatItDidNotDo(t *testing.T) {
 // TestRemove_UnknownNameListsValidNames keeps removal consistent with
 // selection: an unknown name is answered with the ones that exist.
 func TestRemove_UnknownNameListsValidNames(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 
@@ -572,13 +598,12 @@ func TestRemove_UnknownNameListsValidNames(t *testing.T) {
 // TestInfo_ReportsPlatformResourcesAndRoots, and gates toolchain detection
 // behind the flag that pays for it.
 func TestInfo_ReportsPlatformResourcesAndRoots(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.clients.host("build-box").toolchainDelay = 250 * time.Millisecond
 
-	started := time.Now()
 	out := structured[infoResult](t, f.ok("fleet_info", map[string]any{"sandbox": "build-box"}, ""))
-	withoutToolchains := time.Since(started)
 
 	assert.Equal(t, "build-box", out.Sandbox)
 	assert.Equal(t, "linux/amd64", out.Platform)
@@ -592,7 +617,7 @@ func TestInfo_ReportsPlatformResourcesAndRoots(t *testing.T) {
 	assert.Empty(t, out.Toolchains, "toolchains must not be probed unless asked for")
 	assert.Contains(t, out.Note, "include_toolchains")
 
-	started = time.Now()
+	started := time.Now()
 	out = structured[infoResult](t, f.ok("fleet_info",
 		map[string]any{"sandbox": "build-box", "include_toolchains": true}, ""))
 	withToolchains := time.Since(started)
@@ -600,16 +625,23 @@ func TestInfo_ReportsPlatformResourcesAndRoots(t *testing.T) {
 	require.Len(t, out.Toolchains, 1)
 	assert.Equal(t, "go", out.Toolchains[0].Name)
 
+	// That the flag is what costs the time is a count, not a race between two
+	// clocks: exactly one of the two calls reached the host's toolchain path,
+	// and that call waited on the delay this test injected there. The elapsed
+	// bound is a floor, so a loaded machine can only make it more true —
+	// comparing it against the call with no delay in it is a comparison of two
+	// numbers the scheduler writes, and it does invert (seen at -parallel 48:
+	// 558ms for the slow path against 634ms for the fast one).
 	_, _, toolchainCalls := f.clients.host("build-box").counts()
 	assert.Equal(t, 1, toolchainCalls, "exactly one call asked the host to probe toolchains")
-	assert.Greater(t, withToolchains, withoutToolchains,
+	assert.GreaterOrEqual(t, withToolchains, 200*time.Millisecond,
 		"include_toolchains is the slower path, which is why it is opt-in")
-	assert.GreaterOrEqual(t, withToolchains, 200*time.Millisecond)
 }
 
 // TestInfo_CachesPlatformIntoTheRegistry: a listing should not have to dial
 // every host to say what it is.
 func TestInfo_CachesPlatformIntoTheRegistry(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 
@@ -643,6 +675,7 @@ func TestInfo_CachesPlatformIntoTheRegistry(t *testing.T) {
 // The fix for this shipped in audit round 1 with no test, so reverting it broke
 // nothing.
 func TestInfo_HealthIsNotDowngradedByACacheWithNoOpinion(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 
@@ -673,6 +706,7 @@ func TestInfo_HealthIsNotDowngradedByACacheWithNoOpinion(t *testing.T) {
 // mapping seen from the outside: a gRPC status the model cannot read becomes
 // a sentence naming the host, the address, and what to check.
 func TestInfo_UnavailableSurfacesAsAReadableToolError(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.clients.host("build-box").setErr(unavailable("build-box"))
@@ -689,6 +723,7 @@ func TestInfo_UnavailableSurfacesAsAReadableToolError(t *testing.T) {
 // TestInfo_PermissionDeniedNamesTheReason: the fix for a policy denial is
 // never a certificate, so the message must carry the agent's reason.
 func TestInfo_PermissionDeniedNamesTheReason(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.clients.host("build-box").setErr(
@@ -703,6 +738,7 @@ func TestInfo_PermissionDeniedNamesTheReason(t *testing.T) {
 // TestInfo_DeadlineNamesTheLimit: a model told only "deadline exceeded"
 // cannot tell which knob to turn.
 func TestInfo_DeadlineNamesTheLimit(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{callTimeout: 150 * time.Millisecond})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.clients.host("build-box").delay = time.Hour
@@ -718,6 +754,7 @@ func TestInfo_DeadlineNamesTheLimit(t *testing.T) {
 // validates output against the schema, so a mismatch is a protocol error
 // rather than a wrong answer.
 func TestFleetResults_AreValidAgainstTheirSchemas(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 

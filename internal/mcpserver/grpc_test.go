@@ -55,6 +55,7 @@ func (agentServer) GetHostInfo(context.Context, *sandboxdv1.GetHostInfoRequest) 
 // TestEndToEnd_OverRealMTLS runs the fleet tools against a gRPC agent behind
 // the actual client pool.
 func TestEndToEnd_OverRealMTLS(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
@@ -122,6 +123,7 @@ func TestEndToEnd_OverRealMTLS(t *testing.T) {
 // them. A missing certificate is covered by TestServer_StartsWithoutCredentials;
 // this is the case where they are present.
 func TestLazyPool_BuildsFromCredentialsOnDisk(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
@@ -156,6 +158,7 @@ func TestLazyPool_BuildsFromCredentialsOnDisk(t *testing.T) {
 // fixes it, and comes back. A session that has to be restarted to notice is a
 // session the user will conclude is broken.
 func TestLazyPool_NoticesCredentialsAppearingMidSession(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	server, err := mcpserver.New(mcpserver.Options{
 		ConfigDir:   dir,
@@ -194,6 +197,7 @@ func TestLazyPool_NoticesCredentialsAppearingMidSession(t *testing.T) {
 // closers. On a stdio server the process is exiting anyway; on the Connect
 // path, which exists for embedding, it is a leak with no owner.
 func TestLazyPool_DoesNotRebuildAfterClose(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	authority, err := ca.Init(filepath.Join(dir, "ca"), false)
 	require.NoError(t, err)
