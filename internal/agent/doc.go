@@ -1,5 +1,6 @@
-// Package agent hosts the fleet-agent daemon: configuration, the mandatory
-// mTLS gRPC server, and the lifecycle every M1 service plugs into.
+// Package agent hosts the fleet-agent daemon: configuration, the gRPC server —
+// mutually authenticated unless the operator has deliberately said otherwise,
+// see [TLSConfig.Enabled] — and the lifecycle every M1 service plugs into.
 //
 // # Registering a service
 //
@@ -27,9 +28,10 @@
 // # What a service gets
 //
 // [Deps] carries the config, the path jail, a logger, the shared [Status], and
-// build metadata. [PrincipalFromContext] returns the authenticated client
-// certificate's common name for any RPC the daemon served, which is what an
-// audit record is keyed on.
+// build metadata. [PrincipalFromContext] returns the [Principal] the daemon
+// resolved for any RPC it served — the client certificate's common name, or,
+// on an agent serving without mTLS, the peer address named as unauthenticated —
+// which is what an audit record is keyed on, together with what established it.
 //
 // # Shutdown
 //

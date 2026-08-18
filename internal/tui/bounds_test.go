@@ -140,11 +140,11 @@ type fakePool struct {
 	asked []string
 }
 
-func (p *fakePool) Host(string, string) (sandboxdv1.HostServiceClient, error) {
+func (p *fakePool) Host(client.Target) (sandboxdv1.HostServiceClient, error) {
 	return p.agent, p.err
 }
 
-func (p *fakePool) Process(string, string) (sandboxdv1.ProcessServiceClient, error) {
+func (p *fakePool) Process(client.Target) (sandboxdv1.ProcessServiceClient, error) {
 	return p.agent, p.err
 }
 

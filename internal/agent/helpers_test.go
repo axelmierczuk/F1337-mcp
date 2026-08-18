@@ -136,7 +136,7 @@ type countingService struct {
 	sandboxdv1.UnimplementedHostServiceServer
 
 	served    atomic.Int64
-	principal atomic.Pointer[string]
+	principal atomic.Pointer[agent.Principal]
 
 	// block, when set, holds Health until the channel is closed, so a test can
 	// have an RPC in flight across a shutdown.
@@ -170,8 +170,8 @@ func (s *countingService) Register(r grpc.ServiceRegistrar) {
 
 func (s *countingService) Health(ctx context.Context, _ *sandboxdv1.HealthRequest) (*sandboxdv1.HealthResponse, error) {
 	s.served.Add(1)
-	if name, ok := agent.PrincipalFromContext(ctx); ok {
-		s.principal.Store(&name)
+	if p, ok := agent.PrincipalFromContext(ctx); ok {
+		s.principal.Store(&p)
 	}
 	if s.block != nil && marked(ctx) {
 		s.once.Do(func() { close(s.entered) })
@@ -242,9 +242,19 @@ func (s *countingService) servedCount() int64 { return s.served.Load() }
 
 func (s *countingService) seenPrincipal() string {
 	if p := s.principal.Load(); p != nil {
-		return *p
+		return p.Name
 	}
 	return ""
+}
+
+// seenPrincipalAuthenticated reports whether the last principal this service
+// saw came from a verified certificate. It is the half of the principal that a
+// name alone cannot show.
+func (s *countingService) seenPrincipalAuthenticated() bool {
+	if p := s.principal.Load(); p != nil {
+		return p.Authenticated
+	}
+	return false
 }
 
 // discardLogger is the logger every test uses: the daemon's output is not what
@@ -451,7 +461,7 @@ func (h *harness) hostClient(t *testing.T, caPEM, certPEM, keyPEM []byte) sandbo
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
-	hostClient, err := pool.Host("test-agent", "test-agent:8722")
+	hostClient, err := pool.Host(client.Target{Name: "test-agent", Address: "test-agent:8722"})
 	require.NoError(t, err)
 	return hostClient
 }

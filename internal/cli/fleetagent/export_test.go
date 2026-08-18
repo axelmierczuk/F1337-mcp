@@ -27,7 +27,18 @@ func EnrollRequestForTest(token string, csrDER []byte, requestedName string, add
 
 // ServerOptionsForTest is what `serve` builds the daemon from.
 func ServerOptionsForTest(cfg *agent.Config, log *slog.Logger, drain time.Duration) agent.Options {
-	return serverOptions(cfg, log, drain)
+	return serverOptions(cfg, log, serveOptions{drain: drain})
+}
+
+// ServeAllowsUnauthenticatedPublicForTest reports whether the options `serve`
+// hands the daemon carry the operator's --allow-unauthenticated-public.
+//
+// It exists because that flag reaching agent.New is the whole of the second
+// half of #85's first guard: the command checks the posture itself, and a flag
+// that stopped being passed on would leave the daemon's own check refusing a
+// start the operator had explicitly authorised.
+func ServeAllowsUnauthenticatedPublicForTest(cfg *agent.Config, log *slog.Logger, allow bool) bool {
+	return serverOptions(cfg, log, serveOptions{allowPublic: allow}).AllowUnauthenticatedPublic
 }
 
 // EnrollmentMaterialForTest is the set of files `service install` has to hand

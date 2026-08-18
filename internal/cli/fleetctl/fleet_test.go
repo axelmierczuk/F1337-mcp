@@ -353,3 +353,137 @@ func TestVersion_JSONParses(t *testing.T) {
 	assert.NotEmpty(t, doc.Version)
 	assert.Contains(t, doc.Platform, "/")
 }
+
+// ---------------------------------------------------------------- #85
+
+// `fleetctl list` shows what authenticates each sandbox, per sandbox, and says
+// what "none" costs.
+//
+// The column alone is not enough: "none" in a table reads as an absence — of a
+// value, of a probe — rather than as the whole of a sandbox's authentication,
+// and the operator this is for is the one who inherited a fleet and has never
+// seen the setting.
+func TestList_ShowsWhichSandboxesAreAuthenticated(t *testing.T) {
+	dir := t.TempDir()
+	addSandbox(t, dir, registry.Sandbox{Name: "build-box", Address: "127.0.0.1:1"})
+	addSandbox(t, dir, registry.Sandbox{Name: "tailnet-box", Address: "127.0.0.1:2", Insecure: true})
+
+	out, code := run(t, dir, "list", "--no-probe")
+	require.Equal(t, 0, code, out)
+
+	assert.Contains(t, out, "AUTH")
+	assert.Regexp(t, `build-box\s+127\.0\.0\.1:1\s+mtls`, out)
+	assert.Regexp(t, `tailnet-box\s+127\.0\.0\.1:2\s+none`, out)
+	assert.Contains(t, out, "auth none (tailnet-box)")
+	assert.Contains(t, out, "nothing in this fleet authenticates either end")
+	assert.NotContains(t, out, "auth none (build-box")
+}
+
+// A fleet that is entirely mTLS says nothing about it, so the note above means
+// something when it appears.
+func TestList_SaysNothingAboutUnauthenticatedSandboxesWhenThereAreNone(t *testing.T) {
+	dir := t.TempDir()
+	addSandbox(t, dir, registry.Sandbox{Name: "build-box", Address: "127.0.0.1:1"})
+
+	out, code := run(t, dir, "list", "--no-probe")
+	require.Equal(t, 0, code, out)
+	assert.NotContains(t, out, "auth none")
+}
+
+// The JSON view carries it too — `--json` is the supported interface for
+// scripts, and a fleet audit is exactly the script somebody writes.
+func TestList_JSONCarriesTheAuthPosture(t *testing.T) {
+	dir := t.TempDir()
+	addSandbox(t, dir, registry.Sandbox{Name: "build-box", Address: "127.0.0.1:1"})
+	addSandbox(t, dir, registry.Sandbox{Name: "tailnet-box", Address: "127.0.0.1:2", Insecure: true})
+
+	out, code := run(t, dir, "list", "--no-probe", "--json")
+	require.Equal(t, 0, code, out)
+
+	var doc struct {
+		Sandboxes []struct {
+			Name string `json:"name"`
+			Auth string `json:"auth"`
+		} `json:"sandboxes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &doc), "output was not JSON:\n%s", out)
+	got := map[string]string{}
+	for _, sb := range doc.Sandboxes {
+		got[sb.Name] = sb.Auth
+	}
+	assert.Equal(t, map[string]string{"build-box": "mtls", "tailnet-box": "none"}, got)
+}
+
+// A fleet whose members all run without mTLS is fully usable from a
+// workstation that has never run `ca init` — that is the whole point of the
+// option — and `list` does not lecture it about a certificate it will never
+// need.
+func TestList_DoesNotDemandACertificateForAFleetThatUsesNone(t *testing.T) {
+	dir := t.TempDir()
+	addSandbox(t, dir, registry.Sandbox{Name: "tailnet-box", Address: blackHole(t), Insecure: true})
+
+	out, code := run(t, dir, "list", "--timeout", "300ms")
+	require.Equal(t, 0, code, out)
+	assert.NotContains(t, out, "fleetctl ca init")
+	assert.NotContains(t, out, "fleetctl ca sign")
+	// Probed and found nothing, rather than never looked: the dial happened.
+	assert.Contains(t, out, "unreachable")
+}
+
+// `fleetctl info` reports the posture for one host, including one that does not
+// answer — the reading an operator gets when they are deciding whether a host
+// is safe where it is.
+func TestInfo_ReportsTheAuthPostureOfAnUnreachableSandbox(t *testing.T) {
+	dir := t.TempDir()
+	addSandbox(t, dir, registry.Sandbox{
+		Name:       "tailnet-box",
+		Address:    blackHole(t),
+		Insecure:   true,
+		EnrolledAt: time.Now().UTC(),
+	})
+
+	out, code := run(t, dir, "info", "tailnet-box", "--timeout", "300ms")
+	require.Equal(t, 0, code, out)
+	assert.Contains(t, out, "auth:")
+	assert.Contains(t, out, "none")
+	assert.Contains(t, out, "No client certificate is presented")
+
+	out, code = run(t, dir, "info", "tailnet-box", "--json", "--timeout", "300ms")
+	require.Equal(t, 0, code, out)
+	var doc struct {
+		Auth string `json:"auth"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &doc), "info --json did not parse:\n%s", out)
+	assert.Equal(t, "none", doc.Auth)
+}
+
+// The command announces an unauthenticated connection where an operator will
+// see it, and keeps it out of the document a script parses.
+//
+// Both halves matter. A control plane that took an unauthenticated connection
+// without saying so would be the one participant in this posture that never
+// mentions it — and a warning written onto stdout would break every `--json`
+// consumer, which is the supported interface for scripts.
+func TestList_AnnouncesAnUnauthenticatedDialOnStderrOnly(t *testing.T) {
+	dir := t.TempDir()
+	addSandbox(t, dir, registry.Sandbox{Name: "tailnet-box", Address: blackHole(t), Insecure: true})
+
+	both, code := runCapturingErrors(t, dir, "list", "--timeout", "300ms")
+	require.Equal(t, 0, code, both)
+	assert.Contains(t, both, "CONNECTING TO A SANDBOX THIS FLEET DOES NOT AUTHENTICATE")
+	assert.Contains(t, both, "tailnet-box")
+
+	// The same command with --json: the result is a parseable document, and the
+	// warning is not in it.
+	out, code := run(t, dir, "list", "--json", "--timeout", "300ms")
+	require.Equal(t, 0, code, out)
+	var doc struct {
+		Sandboxes []struct {
+			Auth string `json:"auth"`
+		} `json:"sandboxes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &doc), "the result was not JSON:\n%s", out)
+	require.Len(t, doc.Sandboxes, 1)
+	assert.Equal(t, "none", doc.Sandboxes[0].Auth)
+	assert.NotContains(t, out, "DOES NOT AUTHENTICATE")
+}

@@ -19,6 +19,16 @@ var (
 	// ErrDeadlineExceeded means the call's context expired before the
 	// sandbox responded.
 	ErrDeadlineExceeded = errors.New("client: deadline exceeded")
+	// ErrNoCredentials means this workstation holds no client certificate and
+	// the sandbox it was asked to reach is not one of the ones registered as
+	// insecure.
+	//
+	// It is separate from ErrCertificateRejected because nothing was rejected
+	// and nothing was dialled: the call never left this machine. The fix is to
+	// issue a control leaf, or — if the sandbox really does run without mTLS —
+	// to register it as insecure, and a caller that could not tell this from a
+	// refused handshake would send an operator looking at the wrong end.
+	ErrNoCredentials = errors.New("client: this workstation holds no mTLS client certificate")
 	// ErrCertificateRejected means mTLS authentication failed: wrong CA,
 	// wrong certificate profile, or expired leaf. It is about *who the
 	// caller is*, and the fix is always a certificate.

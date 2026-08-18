@@ -499,23 +499,23 @@ type liveClients struct {
 	onRemove func(string)
 }
 
-func (c *liveClients) Host(string, string) (sandboxdv1.HostServiceClient, error) {
+func (c *liveClients) Host(client.Target) (sandboxdv1.HostServiceClient, error) {
 	return sandboxdv1.NewHostServiceClient(c.conn), nil
 }
 
-func (c *liveClients) Exec(string, string) (sandboxdv1.ExecServiceClient, error) {
+func (c *liveClients) Exec(client.Target) (sandboxdv1.ExecServiceClient, error) {
 	return nil, status.Error(codes.Unimplemented, "ExecService is not part of these tests")
 }
 
-func (c *liveClients) Files(string, string) (sandboxdv1.FileServiceClient, error) {
+func (c *liveClients) Files(client.Target) (sandboxdv1.FileServiceClient, error) {
 	return nil, status.Error(codes.Unimplemented, "FileService is not part of these tests")
 }
 
-func (c *liveClients) Process(string, string) (sandboxdv1.ProcessServiceClient, error) {
+func (c *liveClients) Process(client.Target) (sandboxdv1.ProcessServiceClient, error) {
 	return sandboxdv1.NewProcessServiceClient(c.conn), nil
 }
 
-func (c *liveClients) Forward(string, string) (sandboxdv1.ForwardServiceClient, error) {
+func (c *liveClients) Forward(client.Target) (sandboxdv1.ForwardServiceClient, error) {
 	return sandboxdv1.NewForwardServiceClient(c.conn), nil
 }
 

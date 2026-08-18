@@ -13,11 +13,19 @@ import (
 // authorizePeer runs; this exists so the check is total on its own terms.
 var ErrNoClientCertificate = errors.New("agent: client presented no certificate")
 
-// ServerTLSConfig builds the TLS configuration the agent's gRPC listener uses.
+// ServerTLSConfig builds the TLS configuration the agent's gRPC listener uses,
+// or nil when this agent is configured to serve without mTLS.
 //
-// Every parameter of it is mandatory. There is no plaintext mode and no
-// --insecure flag: the agent is a remote code execution service, and the only
-// thing standing between it and the network is this handshake.
+// A nil configuration means plaintext gRPC: nothing is authenticated and
+// nothing is encrypted by this process. That is a posture, not a fallback —
+// it is reached only from `tls.enabled: false`, it is refused outright on an
+// address that is neither loopback nor private without an explicit flag, and
+// the daemon says what it is at every start. See [TLSConfig.Enabled] and
+// [CheckListenPosture].
+//
+// With mTLS on, every parameter of it is mandatory: the agent is a remote code
+// execution service, and the only thing standing between it and the network is
+// this handshake.
 //
 //   - The agent presents its enrollment leaf, which the fleet CA issued under
 //     ca.ProfileAgent — a server-auth certificate. internal/client verifies it
@@ -29,6 +37,9 @@ var ErrNoClientCertificate = errors.New("agent: client presented no certificate"
 //     the chain alone does not distinguish them; the OU is what says "issued
 //     to drive agents" rather than "issued to be an agent".
 func ServerTLSConfig(cfg *Config) (*tls.Config, error) {
+	if !cfg.TLS.IsEnabled() {
+		return nil, nil
+	}
 	if cfg.TLS.RequireClientOU == "" {
 		return nil, errors.New("agent: tls.require_client_ou is empty; refusing to accept any leaf the fleet CA signed")
 	}

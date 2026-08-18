@@ -24,6 +24,7 @@ type listResult struct {
 	Sandboxes []struct {
 		Name     string            `json:"name"`
 		Address  string            `json:"address"`
+		Auth     string            `json:"auth"`
 		Platform string            `json:"platform"`
 		Health   string            `json:"health"`
 		Detail   string            `json:"detail"`
@@ -38,6 +39,7 @@ type selectResult struct {
 	Sandbox       string   `json:"sandbox"`
 	Handle        string   `json:"handle"`
 	Address       string   `json:"address"`
+	Auth          string   `json:"auth"`
 	Platform      string   `json:"platform"`
 	PathSeparator string   `json:"path_separator"`
 	AllowedRoots  []string `json:"allowed_roots"`
@@ -49,6 +51,7 @@ type selectResult struct {
 type infoResult struct {
 	Sandbox   string `json:"sandbox"`
 	Address   string `json:"address"`
+	Auth      string `json:"auth"`
 	Handle    string `json:"handle"`
 	Platform  string `json:"platform"`
 	Kernel    string `json:"kernel"`
@@ -774,4 +777,126 @@ func TestFleetResults_AreValidAgainstTheirSchemas(t *testing.T) {
 		require.NoError(t, err)
 		assert.Truef(t, strings.HasPrefix(string(raw), "{"), "%s must return a JSON object", call.tool)
 	}
+}
+
+// ---------------------------------------------------------------- #85
+
+// fleet_add registers a sandbox the control plane will reach without mTLS, and
+// says what that means rather than reusing the sentence about enrollment.
+//
+// It has to be an argument because it cannot be discovered: an agent serving
+// plaintext and one refusing a handshake are indistinguishable to a dialer that
+// has not been told which it is talking to.
+func TestAdd_RegistersASandboxThisFleetWillNotAuthenticate(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, fixtureOptions{})
+
+	res := f.ok("fleet_add", map[string]any{
+		"name": "tailnet-box", "address": "100.83.4.17:8722", "insecure": true,
+	}, "")
+	added := structured[map[string]any](t, res)
+	assert.Equal(t, "none", added["auth"])
+	assert.Contains(t, added["note"], "without mTLS")
+	assert.Contains(t, added["note"], "network")
+
+	sb, err := f.fleet.Get("tailnet-box")
+	require.NoError(t, err)
+	assert.True(t, sb.Insecure, "the posture has to be persisted, or the next dial forgets it")
+
+	// And the default is unchanged: a call that says nothing gets mTLS.
+	res = f.ok("fleet_add", map[string]any{"name": "build-box", "address": "build-box.internal:8722"}, "")
+	assert.Equal(t, "mtls", structured[map[string]any](t, res)["auth"])
+	secure, err := f.fleet.Get("build-box")
+	require.NoError(t, err)
+	assert.False(t, secure.Insecure)
+}
+
+// fleet_list shows the posture per sandbox, so a model — and the person reading
+// over its shoulder — can see which fleet members are authenticated without
+// opening a config on each host.
+func TestList_ReportsWhichSandboxesAreAuthenticated(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, fixtureOptions{})
+	f.add("build-box", "build-box.internal:8722", nil)
+	require.NoError(t, f.fleet.Add(registry.Sandbox{
+		Name: "tailnet-box", Address: "100.83.4.17:8722", Insecure: true,
+	}))
+
+	res := f.ok("fleet_list", map[string]any{}, "")
+	out := structured[listResult](t, res)
+
+	got := map[string]string{}
+	for _, sb := range out.Sandboxes {
+		got[sb.Name] = sb.Auth
+	}
+	assert.Equal(t, map[string]string{"build-box": "mtls", "tailnet-box": "none"}, got)
+}
+
+// fleet_info reports the posture for one sandbox, and says in prose what the
+// field means — a model reads prose and passes it on to whoever needs it.
+//
+// It comes from the registry rather than from the agent's answer: it is this
+// workstation's own account of how it reached the host, and an agent's claim
+// about its own authentication is worth nothing on a connection nothing
+// authenticated.
+func TestInfo_ReportsThatNothingAuthenticatedTheConnection(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, fixtureOptions{})
+	require.NoError(t, f.fleet.Add(registry.Sandbox{
+		Name: "tailnet-box", Address: "100.83.4.17:8722", Insecure: true,
+	}))
+	f.add("build-box", "build-box.internal:8722", nil)
+
+	open := structured[infoResult](t, f.ok("fleet_info", map[string]any{"sandbox": "tailnet-box"}, ""))
+	assert.Equal(t, "none", open.Auth)
+	assert.Contains(t, open.Note, "registered as insecure")
+	assert.Contains(t, open.Note, "recorded by the agent against the address")
+
+	secure := structured[infoResult](t, f.ok("fleet_info", map[string]any{"sandbox": "build-box"}, ""))
+	assert.Equal(t, "mtls", secure.Auth)
+	assert.NotContains(t, secure.Note, "registered as insecure")
+}
+
+// fleet_select reports the posture too — it is the call that decides where
+// every later one lands, so a model should learn what stands between that host
+// and the network at the moment it points itself at one.
+func TestSelect_ReportsTheAuthPosture(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, fixtureOptions{})
+	require.NoError(t, f.fleet.Add(registry.Sandbox{
+		Name: "tailnet-box", Address: "100.83.4.17:8722", Insecure: true,
+	}))
+	f.add("build-box", "build-box.internal:8722", nil)
+
+	open := structured[selectResult](t, f.ok("fleet_select", map[string]any{"name": "tailnet-box"}, ""))
+	assert.Equal(t, "none", open.Auth)
+	assert.Contains(t, open.Note, "registered as insecure")
+
+	secure := structured[selectResult](t, f.ok("fleet_select", map[string]any{"name": "build-box"}, ""))
+	assert.Equal(t, "mtls", secure.Auth)
+	assert.NotContains(t, secure.Note, "registered as insecure")
+}
+
+// The posture recorded in the registry is the posture dialled with.
+//
+// The two views above could both be right while every call still went out over
+// mTLS — the display and the transport are separate paths, and this is the one
+// that decides whether the sandbox is reachable at all.
+func TestTools_DialTheSandboxWithThePostureTheRegistryRecorded(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, fixtureOptions{})
+	require.NoError(t, f.fleet.Add(registry.Sandbox{
+		Name: "tailnet-box", Address: "100.83.4.17:8722", Insecure: true,
+	}))
+	f.add("build-box", "build-box.internal:8722", nil)
+
+	f.ok("fleet_info", map[string]any{"sandbox": "tailnet-box"}, "")
+	f.ok("fleet_info", map[string]any{"sandbox": "build-box"}, "")
+
+	got := map[string]bool{}
+	for _, target := range f.clients.dialTargets() {
+		got[target.Name] = target.Insecure
+	}
+	assert.Equal(t, map[string]bool{"tailnet-box": true, "build-box": false}, got,
+		"each sandbox must be dialled the way its registry entry says")
 }

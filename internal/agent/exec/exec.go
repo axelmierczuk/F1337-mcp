@@ -200,11 +200,15 @@ func (s *Service) Exec(req *sandboxdv1.ExecRequest, stream sandboxdv1.ExecServic
 	principal, _ := agent.PrincipalFromContext(ctx)
 
 	rec := policy.Record{
-		Time:      time.Now().UTC(),
-		Principal: principal,
-		RPC:       execMethod,
-		Argv:      req.GetArgv(),
-		Shell:     req.GetShell(),
+		Time: time.Now().UTC(),
+		// Both, always together: the name and what established it. A record
+		// carrying one without the other is one an operator cannot read — see
+		// policy.Record.PrincipalSource.
+		Principal:       principal.String(),
+		PrincipalSource: principal.Source(),
+		RPC:             execMethod,
+		Argv:            req.GetArgv(),
+		Shell:           req.GetShell(),
 	}
 
 	if !s.enabled {

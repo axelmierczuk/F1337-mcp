@@ -146,7 +146,7 @@ func (r *Registrar) sandboxExec(ctx context.Context, _ *mcp.CallToolRequest, tar
 		return ExecResult{}, fmt.Errorf("max_output_bytes is %d; it must not be negative", in.MaxOutputBytes)
 	}
 
-	execClient, err := r.deps.Clients.Exec(target.Name(), target.Address())
+	execClient, err := r.deps.Clients.Exec(target.Client())
 	if err != nil {
 		return ExecResult{}, target.Call().Map(err)
 	}

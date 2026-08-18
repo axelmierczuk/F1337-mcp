@@ -80,7 +80,7 @@ func TestTUIRunsOnAPoolThatKeepsProbing(t *testing.T) {
 
 	var control controlFlags
 
-	live, err := control.pool(4 * time.Second)
+	live, err := control.pool(4*time.Second, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = live.Close() })
 	require.Equal(t, 4*time.Second, live.HealthInterval(),
@@ -89,7 +89,7 @@ func TestTUIRunsOnAPoolThatKeepsProbing(t *testing.T) {
 	// The one-shot listing every other command runs is the opposite case, and
 	// asking for nothing is what gets it: a background probe against a
 	// black-holed host would keep the process alive past the listing.
-	once, err := control.pool(0)
+	once, err := control.pool(0, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = once.Close() })
 	require.Equal(t, oneShotHealthInterval, once.HealthInterval())

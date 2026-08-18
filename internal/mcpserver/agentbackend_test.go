@@ -143,18 +143,18 @@ type backendClients struct {
 	onFiles func()
 }
 
-func (c *backendClients) Host(string, string) (sandboxdv1.HostServiceClient, error) {
+func (c *backendClients) Host(client.Target) (sandboxdv1.HostServiceClient, error) {
 	return c.host, nil
 }
 
-func (c *backendClients) Exec(string, string) (sandboxdv1.ExecServiceClient, error) {
+func (c *backendClients) Exec(client.Target) (sandboxdv1.ExecServiceClient, error) {
 	if c.execOverride != nil {
 		return c.execOverride, nil
 	}
 	return c.backend.exec, nil
 }
 
-func (c *backendClients) Files(string, string) (sandboxdv1.FileServiceClient, error) {
+func (c *backendClients) Files(client.Target) (sandboxdv1.FileServiceClient, error) {
 	if c.onFiles != nil {
 		c.onFiles()
 	}
@@ -164,11 +164,11 @@ func (c *backendClients) Files(string, string) (sandboxdv1.FileServiceClient, er
 	return c.backend.files, nil
 }
 
-func (c *backendClients) Process(string, string) (sandboxdv1.ProcessServiceClient, error) {
+func (c *backendClients) Process(client.Target) (sandboxdv1.ProcessServiceClient, error) {
 	return nil, status.Error(codes.Unimplemented, "not part of these tools")
 }
 
-func (c *backendClients) Forward(string, string) (sandboxdv1.ForwardServiceClient, error) {
+func (c *backendClients) Forward(client.Target) (sandboxdv1.ForwardServiceClient, error) {
 	return nil, status.Error(codes.Unimplemented, "not part of these tools")
 }
 

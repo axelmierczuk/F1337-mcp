@@ -84,6 +84,11 @@ func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRe
 	// identity it is actually using — a control plane holding two leaves and
 	// reaching for the wrong one otherwise finds out at the first denied
 	// operation.
+	//
+	// On an agent serving without mTLS there is no certificate and the echo
+	// says so in as many words: `unauthenticated:<peer address>`. That is the
+	// honest answer to "which identity am I using", and it is what `fleetctl
+	// info` and the TUI print.
 	principal, _ := agent.PrincipalFromContext(ctx)
 
 	resp := &sandboxdv1.GetHostInfoResponse{
@@ -111,7 +116,7 @@ func (s *Service) GetHostInfo(ctx context.Context, req *sandboxdv1.GetHostInfoRe
 		// stop telling the operator.
 		AllowedRoots:           s.deps.Jail.Roots(),
 		StartedAt:              timestamppb.New(s.deps.StartedAt),
-		AuthenticatedPrincipal: principal,
+		AuthenticatedPrincipal: principal.String(),
 		// The configured policy, reported for the same reason allowed_roots is:
 		// a caller has to be able to find out what a host permits before it
 		// depends on it. `fleetctl socks` and fleet_socks both read this to

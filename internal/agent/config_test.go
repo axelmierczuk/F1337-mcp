@@ -3,7 +3,9 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,8 +156,19 @@ func TestConfig_SaveRoundTrip(t *testing.T) {
 	loaded, err := agent.Load(path)
 	require.NoError(t, err)
 	assert.Equal(t, cfg.Name, loaded.Name)
-	assert.Equal(t, cfg.TLS, loaded.TLS)
+	assert.Equal(t, cfg.TLS.Certificate, loaded.TLS.Certificate)
+	assert.Equal(t, cfg.TLS.PrivateKey, loaded.TLS.PrivateKey)
+	assert.Equal(t, cfg.TLS.CABundle, loaded.TLS.CABundle)
+	assert.Equal(t, cfg.TLS.RequireClientOU, loaded.TLS.RequireClientOU)
 	assert.Equal(t, cfg.AllowedRoots, loaded.AllowedRoots)
+
+	// The posture survives the round trip and is written down rather than
+	// inferred a second time. A config naming a leaf, a key and a CA is an
+	// enrolled agent's, and an upgrade that quietly turned mTLS off for one of
+	// those would be the worst outcome this option could have.
+	assert.True(t, loaded.TLS.IsEnabled(), "a config naming TLS material must reload with mTLS on")
+	assert.Contains(t, tlsBlock(t, string(raw)), "enabled: true",
+		"the saved file must state its transport posture, not leave the next reader to re-derive it")
 
 	// Windows does not carry Unix permission bits, so there is nothing to
 	// assert there. (This read runtime.GOOS as an environment variable before,
@@ -163,6 +176,22 @@ func TestConfig_SaveRoundTrip(t *testing.T) {
 	if info, err := os.Stat(path); err == nil && runtime.GOOS != "windows" {
 		assert.NotZero(t, info.Mode().Perm()&0o600)
 	}
+}
+
+// tlsBlock returns the `tls:` block of a saved config, so an assertion about
+// `enabled:` cannot accidentally match exec's, shell's or forward's.
+func tlsBlock(t *testing.T, raw string) string {
+	t.Helper()
+	start := strings.Index(raw, "\ntls:")
+	require.GreaterOrEqual(t, start, 0, "saved config has no tls block:\n%s", raw)
+	rest := raw[start+len("\ntls:"):]
+	// The block ends at the next key at column zero.
+	if end := strings.Index(rest, "\n"); end >= 0 {
+		if next := regexp.MustCompile(`(?m)^[a-z_]+:`).FindStringIndex(rest); next != nil {
+			return rest[:next[0]]
+		}
+	}
+	return rest
 }
 
 // Paths written relative to the config file resolve against its directory, so

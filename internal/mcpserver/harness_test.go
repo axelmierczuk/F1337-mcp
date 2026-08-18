@@ -216,6 +216,8 @@ type fakeClients struct {
 	// dialErr, when set for a name, is what Host returns instead of a client.
 	dialErr map[string]error
 	removed []string
+	// dialed records every target Host was asked for. See dialTargets.
+	dialed []client.Target
 }
 
 func newFakeClients() *fakeClients {
@@ -245,25 +247,36 @@ func (c *fakeClients) setCached(name string, h client.HealthStatus) {
 	c.cached[name] = h
 }
 
-func (c *fakeClients) Host(name, _ string) (sandboxdv1.HostServiceClient, error) {
+func (c *fakeClients) Host(t client.Target) (sandboxdv1.HostServiceClient, error) {
 	c.mu.Lock()
-	err := c.dialErr[name]
+	c.dialed = append(c.dialed, t)
+	err := c.dialErr[t.Name]
 	c.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return c.host(name), nil
+	return c.host(t.Name), nil
+}
+
+// dialTargets is every target Host was asked for, in order. It is what an
+// assertion that a tool dialled a sandbox with the posture the registry
+// recorded is made of: the fake answers whatever it is asked, so the target is
+// the only evidence that the right one was asked for.
+func (c *fakeClients) dialTargets() []client.Target {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]client.Target(nil), c.dialed...)
 }
 
 // Exec and Files answer with the canned clients in execfiles_fakes_test.go, so
 // the fleet-wide echo walks can call the exec, file and transfer tools. What
 // those tools actually do is tested against the real agent services over
 // bufconn; see agentbackend_test.go.
-func (c *fakeClients) Exec(string, string) (sandboxdv1.ExecServiceClient, error) {
+func (c *fakeClients) Exec(client.Target) (sandboxdv1.ExecServiceClient, error) {
 	return fakeExec{}, nil
 }
 
-func (c *fakeClients) Files(string, string) (sandboxdv1.FileServiceClient, error) {
+func (c *fakeClients) Files(client.Target) (sandboxdv1.FileServiceClient, error) {
 	return fakeFiles{}, nil
 }
 
@@ -271,11 +284,11 @@ func (c *fakeClients) Files(string, string) (sandboxdv1.FileServiceClient, error
 // so the fleet-wide echo walks can call the process and forward tools. What
 // those tools actually do is tested against the real agent services over
 // bufconn; see procfwd_harness_test.go.
-func (c *fakeClients) Process(string, string) (sandboxdv1.ProcessServiceClient, error) {
+func (c *fakeClients) Process(client.Target) (sandboxdv1.ProcessServiceClient, error) {
 	return fakeProcess{}, nil
 }
 
-func (c *fakeClients) Forward(string, string) (sandboxdv1.ForwardServiceClient, error) {
+func (c *fakeClients) Forward(client.Target) (sandboxdv1.ForwardServiceClient, error) {
 	return fakeForward{}, nil
 }
 

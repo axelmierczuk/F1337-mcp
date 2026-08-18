@@ -15,6 +15,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/cli"
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 	"github.com/axelmierczuk/fleet-mcp/internal/socks"
 )
@@ -104,7 +105,7 @@ func newSocksCommand(out io.Writer) *cobra.Command {
 			// what the health cache thinks, so the background loop is traffic
 			// nobody reads; see oneShotHealthInterval. `fleetctl tui` is the
 			// one command on the other side of that.
-			pool, err := control.pool(oneShotHealthInterval)
+			pool, err := control.pool(oneShotHealthInterval, warnTo(cmd.ErrOrStderr()))
 			if err != nil {
 				return err
 			}
@@ -118,7 +119,7 @@ func newSocksCommand(out io.Writer) *cobra.Command {
 				return err
 			}
 
-			forward, err := pool.Forward(sb.Name, sb.Address)
+			forward, err := pool.Forward(client.TargetFor(sb))
 			if err != nil {
 				return err
 			}
@@ -237,9 +238,9 @@ func serveSocks(parent context.Context, server *socks.Server, o *output, result 
 // failing every `curl` through it with an error the client renders as a reply
 // code.
 func socksPolicy(ctx context.Context, pool interface {
-	Host(name, address string) (sandboxdv1.HostServiceClient, error)
+	Host(t client.Target) (sandboxdv1.HostServiceClient, error)
 }, sb registry.Sandbox, timeout time.Duration) (*sandboxdv1.ForwardPolicy, error) {
-	host, err := pool.Host(sb.Name, sb.Address)
+	host, err := pool.Host(client.TargetFor(sb))
 	if err != nil {
 		return nil, fmt.Errorf("reach sandbox %s at %s: %w", sb.Name, sb.Address, err)
 	}

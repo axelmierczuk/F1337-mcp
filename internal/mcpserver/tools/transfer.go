@@ -200,7 +200,7 @@ func (r *Registrar) sandboxTransfer(ctx context.Context, _ *mcp.CallToolRequest,
 		return TransferResult{}, errors.New("source and destination are both required")
 	}
 
-	files, err := r.deps.Clients.Files(target.Name(), target.Address())
+	files, err := r.deps.Clients.Files(target.Client())
 	if err != nil {
 		return TransferResult{}, target.Call().Map(err)
 	}

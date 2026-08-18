@@ -417,6 +417,22 @@ func runServiceInstall(out io.Writer, in io.Reader, opts installOptions) error {
 		p.Println("           agent will refuse to start unless serve is given --no-jail.")
 	}
 
+	if !cfg.TLS.IsEnabled() {
+		// The unit runs `serve --config <path>` and nothing else, so a config
+		// the daemon will refuse produces an installed service that never comes
+		// up — and the operator reads that as a broken install rather than as
+		// the posture it is. Said here, where they are looking, and in the same
+		// two shapes the refusal itself has.
+		p.Println("  WARNING: tls.enabled is false, so this agent will authenticate nobody.")
+		p.Println("           Anyone who can reach its port can run commands on this host.")
+		if err := agent.CheckListenPosture(cfg, false); err != nil {
+			p.Printf("           It will refuse to start on %s: that address is neither loopback\n", cfg.Listen)
+			p.Println("           nor private. Set listen to an address on the network that")
+			p.Println("           authenticates it, or add --allow-unauthenticated-public to the")
+			p.Println("           unit's serve arguments by hand.")
+		}
+	}
+
 	if wasRunning {
 		// Restart only what is still running, and Start what is not.
 		//
@@ -1212,7 +1228,7 @@ func minimalServiceConfig() *service.Config {
 	return &service.Config{
 		Name:        ServiceName,
 		DisplayName: "fleet agent",
-		Description: "Runs commands and serves files for a fleet over mTLS gRPC.",
+		Description: "Runs commands and serves files for a fleet over gRPC.",
 	}
 }
 

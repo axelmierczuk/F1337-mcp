@@ -129,7 +129,11 @@ type tuiFlags struct {
 // that. What the scenario covers is that the view gets a probing pool at all,
 // which is the other half.
 func (f *tuiFlags) pool() (*client.Pool, error) {
-	return f.control.pool(healthIntervalFor(f.refresh))
+	// No warning logger: this command owns the whole terminal, and a line
+	// written into it would garble the view rather than inform anybody. See
+	// warnTo — the posture reaches this operator through the sandbox's
+	// principal, which reads `unauthenticated:<address>` in the detail pane.
+	return f.control.pool(healthIntervalFor(f.refresh), nil)
 }
 
 func newTUICommand(out io.Writer, view View) *cobra.Command {

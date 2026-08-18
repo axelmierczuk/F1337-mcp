@@ -145,7 +145,7 @@ func waitServing(t *testing.T, ea *enrolledAgent) sandboxdv1.HostServiceClient {
 	// it would in production.
 	_, port, err := net.SplitHostPort(ea.address)
 	require.NoError(t, err)
-	hostClient, err := pool.Host("test-agent", net.JoinHostPort("localhost", port))
+	hostClient, err := pool.Host(client.Target{Name: "test-agent", Address: net.JoinHostPort("localhost", port)})
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {

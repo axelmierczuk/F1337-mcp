@@ -326,8 +326,10 @@ func (s *Service) Forward(stream grpc.BidiStreamingServer[sandboxdv1.ForwardRequ
 // can end, without each of them assembling a Record by hand and one of them
 // forgetting a field.
 type call struct {
-	started   time.Time
-	principal string
+	started time.Time
+	// principal is who the daemon resolved this connection's caller to be, and
+	// how it knows. See agent.Principal.
+	principal agent.Principal
 
 	// requested is the host as the caller spelled it, empty for the loopback
 	// default. resolved is the address actually dialed, empty when nothing was.
@@ -416,12 +418,15 @@ func (s *Service) record(c *call, outcome policy.Outcome, rpcErr error) error {
 	}
 
 	writeErr := s.audit.Write(policy.Record{
-		Time:      c.started.UTC(),
-		Principal: c.principal,
-		RPC:       forwardMethod,
-		Outcome:   outcome,
-		Rule:      c.rule,
-		Error:     c.err,
+		Time: c.started.UTC(),
+		// The name and what established it, always together. See
+		// policy.Record.PrincipalSource.
+		Principal:       c.principal.String(),
+		PrincipalSource: c.principal.Source(),
+		RPC:             forwardMethod,
+		Outcome:         outcome,
+		Rule:            c.rule,
+		Error:           c.err,
 
 		RemoteHost:      c.requested,
 		RemotePort:      c.port,
@@ -440,7 +445,7 @@ func (s *Service) record(c *call, outcome policy.Outcome, rpcErr error) error {
 		"required", s.audit.Required(),
 		"rpc", forwardMethod,
 		"outcome", outcome,
-		"principal", c.principal,
+		"principal", c.principal.String(),
 		"remote_host", c.requested,
 		"remote_port", c.port,
 		"error", writeErr)

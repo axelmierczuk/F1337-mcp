@@ -59,6 +59,24 @@ type Sandbox struct {
 	// Platform is cached from the last successful GetHostInfo call. Zero
 	// value until the first probe succeeds.
 	Platform Platform `json:"platform,omitempty" yaml:"platform,omitempty"`
+	// Insecure records that this workstation reaches the sandbox without mTLS:
+	// no client certificate, no server verification, no encryption from this
+	// product's own stack. Whatever authenticates the connection is the
+	// network — a tailnet, a WireGuard mesh, a VPC with tight security groups
+	// — and nothing else.
+	//
+	// It is a decision an operator makes per sandbox, and it is recorded here
+	// rather than derived at dial time because there is nothing to derive it
+	// from: an agent serving plaintext looks, to a dialer that has not been
+	// told, exactly like one that is refusing the handshake. Absent — which is
+	// every entry written before #85 — means mTLS, so a fleet that upgrades
+	// keeps the posture it enrolled with.
+	//
+	// A wrong answer here fails loudly rather than quietly: an mTLS dial to a
+	// plaintext agent and a plaintext dial to an mTLS agent are both connection
+	// failures, not downgrades. What it must never do is go unsaid, which is
+	// why `fleetctl list`, `fleet_list` and `fleet_info` all show it.
+	Insecure bool `json:"insecure,omitempty" yaml:"insecure,omitempty"`
 	// EnrolledAt is when this sandbox joined the fleet.
 	EnrolledAt time.Time `json:"enrolled_at" yaml:"enrolled_at"`
 	// LastSeenAt is when the sandbox last answered a health probe.

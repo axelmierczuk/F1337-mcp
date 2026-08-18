@@ -138,8 +138,8 @@ Restart the CLI. Confirm the fleet is visible:
 
 ```sh
 fleetctl list
-# NAME       ADDRESS                   PLATFORM     AGENT  HEALTH   LAST SEEN  DETAIL
-# build-box  build-box.internal:8722   linux/amd64  v0.3.0 serving  2s ago
+# NAME       ADDRESS                   AUTH  PLATFORM     AGENT  HEALTH   LAST SEEN  DETAIL
+# build-box  build-box.internal:8722   mtls  linux/amd64  v0.3.0 serving  2s ago
 ```
 
 `list` probes every sandbox concurrently under a per-host deadline, so a
@@ -253,6 +253,34 @@ than hostname:
 fleetctl enroll mint --name gpu-01 --address gpu-01.internal:8722 \
   --label gpu=a100 --label arch=amd64
 ```
+
+## On a network that already authenticates its peers
+
+Steps 2–6 exist to give both ends of every connection an identity. On a
+Tailscale tailnet, a WireGuard mesh, or a VPC whose security groups admit only
+the control plane, that identity check has already been made by something that
+also encrypts the traffic, and you can skip the CA entirely:
+
+```sh
+# On the host: an agent.yaml with no certificates in it.
+cat > /etc/fleet/agent.yaml <<'YAML'
+name: "tailnet-box"
+listen: "100.83.4.17:8722"   # this host's tailnet address, not 0.0.0.0
+tls:
+  enabled: false
+YAML
+fleet-agent serve --config /etc/fleet/agent.yaml
+```
+
+Then register it from the workstation — `fleet_add(name="tailnet-box",
+address="100.83.4.17:8722", insecure=true)` — and it appears in `fleetctl list`
+as `auth none`.
+
+**Read [docs/security.md → Running without mTLS](security.md#running-without-mtls)
+before you do this.** With mTLS off the agent authenticates nobody: anyone who
+can reach the port can run commands on that host. The agent refuses to serve on
+an address that is neither loopback nor private for exactly that reason, so
+`listen: 0.0.0.0:8722` will not start — name the interface you mean.
 
 ## Upgrading from sandboxd
 

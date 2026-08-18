@@ -32,6 +32,23 @@ const (
 	OutcomeError Outcome = "error"
 )
 
+// PrincipalSource says what established a record's principal, so that a
+// principal nothing verified can never be read as one that was.
+//
+// It is written by the agent from its own transport configuration, never from
+// anything a caller sends.
+type PrincipalSource string
+
+const (
+	// PrincipalCertificate means the principal is the common name of a client
+	// certificate the agent verified against the fleet CA.
+	PrincipalCertificate PrincipalSource = "certificate"
+	// PrincipalNetwork means the agent is serving without mTLS and
+	// authenticated nobody: the principal names the address the connection came
+	// from, and whatever decided it was allowed to arrive is the network.
+	PrincipalNetwork PrincipalSource = "network"
+)
+
 // Record is one line of the audit log.
 //
 // # What is deliberately absent
@@ -70,6 +87,15 @@ const (
 type Record struct {
 	Time      time.Time `json:"time"`
 	Principal string    `json:"principal"`
+	// PrincipalSource is how Principal was established.
+	//
+	// Absent means "certificate", and that reading is stable in both
+	// directions: every record written before #85 was made by an agent for
+	// which mTLS was mandatory, and every record written since carries the
+	// field. So adding it made no historical record ambiguous — which was the
+	// requirement, because a log that quietly changes what its oldest lines
+	// mean is worse than one that never had the field.
+	PrincipalSource PrincipalSource `json:"principal_source,omitempty"`
 	// Sandbox is the agent's own fleet name, stamped by [Audit.Write] from
 	// [AuditConfig.Sandbox] rather than filled in per record.
 	//

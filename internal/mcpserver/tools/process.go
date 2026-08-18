@@ -331,7 +331,7 @@ func (r *Registrar) processClient(target *selection.Target) (sandboxdv1.ProcessS
 	if r.deps.Clients == nil {
 		return nil, fmt.Errorf("sandbox %s cannot be reached: no gRPC client is configured", target.Name())
 	}
-	client, err := r.deps.Clients.Process(target.Name(), target.Address())
+	client, err := r.deps.Clients.Process(target.Client())
 	if err != nil {
 		return nil, target.Call().Map(err)
 	}
