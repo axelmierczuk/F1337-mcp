@@ -431,10 +431,24 @@ echo $? > "$FLEET_HANDOFF_DIR/status"
 // the argument a re-serialiser drops without leaving a gap. A repeated flag is
 // the one a rebuild from parsed values collapses to the winner, which is
 // invisible unless both crossings are recorded.
+//
+// The last three are about what could quietly re-encode on the way rather than
+// about what could be dropped. A value that contains the brackets and the
+// newline the helper records with is the one case where the rendering alone is
+// ambiguous — `[]\n[]` is one argument holding "]\n[" and it is equally two
+// arguments holding "" and "" — so the count is recorded beside it and the
+// ambiguity is closed rather than stepped around. A value that begins with two
+// dashes is the one a re-serialiser turns into a flag of its own. And a byte
+// that is not valid UTF-8 sits in the registry path because an argv is bytes: a
+// hand-off that ever put the command line through a text encoding — quoting it,
+// JSON, anything that replaces what it cannot represent — would keep every word
+// and change that one byte, which is a path to a file that no longer exists.
 var handOffArgs = []string{
 	"--refresh", "3s", "--refresh", "7s",
 	"--timeout", "11s",
-	"--registry", "/nowhere/fleet registry.yaml",
+	"--registry", "/nowhere/fleet registry\xff.yaml",
+	"--cert", "]\n[",
+	"--key", "--not-a-flag",
 	"--ca-dir", "",
 }
 
@@ -497,6 +511,13 @@ func TestTheHandOffKeepsTheCommandLineAndTheProcess(t *testing.T) {
 	// both identically, and flattening the command line that way passed here
 	// while the view came up unable to parse its own flags. Bracketed so that an
 	// empty argument and a trailing space are visible in the failure too.
+	// How many, before what: the rendering below is ambiguous for exactly one
+	// shape — an argument holding "]\n[" reads as two holding "]" and "[" —
+	// and this scenario types that shape on purpose. One number closes it.
+	if got, want := recorded(t, record, "argc"), strconv.Itoa(len(handOffArgs)+1); got != want {
+		t.Errorf("the helper was handed %s arguments; `fleetctl tui` was typed with %s", got, want)
+	}
+
 	want := bracketed(append([]string{"tui"}, handOffArgs...))
 	if got := recorded(t, record, "argv"); got != want {
 		t.Errorf("the helper was handed\n%s\nbut the operator typed `fleetctl tui` with\n%s\n"+
@@ -547,6 +568,19 @@ func installFleetctlAs(t *testing.T, dir, name string) string {
 	if err := os.Link(bins.fleetctl, path); err == nil {
 		return path
 	}
+	return copyFleetctlAs(t, dir, name)
+}
+
+// copyFleetctlAs is installFleetctlAs with the link ruled out — a second file,
+// with its own inode, holding the same bytes.
+//
+// The distinction is the whole of the scenario below. A link is one file under
+// two names and os.SameFile says so; a copy is two files, and no amount of
+// looking at them tells fleetctl that the one it is about to exec is itself.
+func copyFleetctlAs(t *testing.T, dir, name string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, exeName(name))
 	source, err := os.ReadFile(bins.fleetctl)
 	if err != nil {
 		t.Fatalf("read fleetctl: %v", err)
@@ -566,11 +600,19 @@ func installFleetctlAs(t *testing.T, dir, name string) string {
 // space, so an argv taken apart and put back together as a single argument —
 // or one that lost an empty value — reads back exactly like the list that was
 // forwarded. See [bracketed].
+//
+// And "$#" beside it, because the bracketing is not quite injective on its own:
+// one argument holding "]\n[" renders exactly as two arguments holding "]" and
+// "[". Nothing a re-serialiser does produces that by accident, but the argv
+// this scenario types now contains those very characters — deliberately, since
+// a recording that cannot be misread is worth more than one that is only never
+// asked to be — and the count settles it in one number.
 func installStubHelper(t *testing.T, dir string) {
 	t.Helper()
 
 	script := "#!/bin/sh\n" +
 		`printf '%s' "$$" > "$FLEET_HANDOFF_DIR/helper-pid"` + "\n" +
+		`printf '%s' "$#" > "$FLEET_HANDOFF_DIR/argc"` + "\n" +
 		`: > "$FLEET_HANDOFF_DIR/argv"` + "\n" +
 		`for a in "$@"; do printf '[%s]\n' "$a" >> "$FLEET_HANDOFF_DIR/argv"; done` + "\n" +
 		"exit " + stubHelperStatus + "\n"
@@ -816,6 +858,49 @@ func TestAFleetctlInstalledAsItsOwnHelperRefusesInsteadOfLooping(t *testing.T) {
 	for _, want := range []string{"this same binary", "go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest", "STATUS[1]"} {
 		if !strings.Contains(screen, want) {
 			t.Errorf("a fleetctl installed as its own helper does not say %q; the terminal holds:\n%s", want, screen)
+		}
+	}
+}
+
+// TestAFleetctlCopiedToItsHelpersNameRefusesInsteadOfLooping is the same
+// mistake spelled the way the refusal itself puts first, and the only one no
+// amount of looking can answer in a single process.
+//
+// `cp fleetctl fleet-tui` leaves two files. They are not the same path and they
+// are not the same inode, so a fleetctl standing beside that copy has nothing
+// to see: it hands over, correctly as far as it can tell. What stops the loop
+// is one step later — [execHelper] passes the resolved path as argv[0], so the
+// copy's own view of what is running names the very file it is about to choose
+// again, and the second attempt refuses. One hand-off, then the sentence.
+//
+// Which is why this is driven and not reasoned about. The mechanism is a
+// property of two processes and lives in neither: the unit tests of findHelper
+// cannot see it, and every existing scenario arranges a link or a rename, which
+// is caught in the first process and would stay green with the second-hop
+// answer gone. What that regression looks like is not a wrong value — it is
+// `fleetctl tui` never coming back, so the assertion is that it does.
+func TestAFleetctlCopiedToItsHelpersNameRefusesInsteadOfLooping(t *testing.T) {
+	requireSupportedHost(t)
+
+	record := t.TempDir()
+	install := t.TempDir()
+	installFleetctl(t, install)
+	copyFleetctlAs(t, install, "fleet-tui")
+
+	run := runOnATerminal(t, selfHelperScript, nil, envWith(
+		envEntry("FLEET_CTL", filepath.Join(install, exeName("fleetctl"))),
+		envEntry("FLEET_CONFIG_DIR", record),
+		envEntry("PATH", install),
+		envEntry("HOME", record),
+		envEntry("TMPDIR", os.TempDir()),
+		envEntry("TERM", operatorTerm),
+	))
+	run.awaitScreen(t, "the command to come back at all, rather than exec a copy of itself for ever", "DONE")
+
+	screen := run.screen()
+	for _, want := range []string{"this same binary", "go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest", "STATUS[1]"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("a fleetctl copied to its helper's name does not say %q; the terminal holds:\n%s", want, screen)
 		}
 	}
 }

@@ -97,6 +97,7 @@ Everything except one scenario.
 | `TestShellResizeReflowsTheRemoteProgram` | Resizing the local terminal changes the size a program *inside* the session reads. |
 | `TestShellClosingTheClientKillsTheRemoteTree` | Killing the client leaves no member of the session's process group alive, and does not touch a bystander. |
 | `TestShellRefusesWhenStdinIsNotATerminal` | An interactive command run from a script is refused, with the tool that does the job named. |
+| `TestShellCarriesTheOperatorsTerminalType` | The `TERM` the operator's shell has is the one a full-screen program inside the session reads. |
 | `TestLargeFileTransferRoundTrips` | 24 MiB pushed and pulled back with matching digests, and a repeat push that moves nothing. |
 | `TestTransferTreeRoundTrips` | A directory transfer with the default exclusions applied. |
 | `TestTUIDrawsTheFleetAndGivesTheTerminalBack` | `fleetctl tui` on a real pseudo-terminal: both sandboxes and a supervised process drawn, one machine going away re-probed and drawn unreachable without blanking the view, and the terminal put back on quit. |
@@ -104,6 +105,8 @@ Everything except one scenario.
 | `TestTUIWithoutATerminalSaysWhatToUseInstead` | A full-screen command whose stdout is a pipe is refused, naming the scriptable view. |
 | `TestTheHandOffKeepsTheCommandLineAndTheProcess` | `fleetctl tui` reaches its helper as an exec — same pid the shell was given, the helper's own exit status — carrying the operator's flags verbatim, argument by argument. |
 | `TestWithoutTheHelperTuiSaysWhatToInstallAndTheRestIsUnaffected` | An install with `fleetctl` alone: `tui` refuses naming the binary, where it looked and the line that installs it, `list` still works, and redirected output is still answered with the terminal refusal. |
+| `TestAFleetctlInstalledAsItsOwnHelperRefusesInsteadOfLooping` | A fleetctl installed under its helper's name refuses, naming the mistake, instead of exec'ing itself for ever. |
+| `TestAFleetctlCopiedToItsHelpersNameRefusesInsteadOfLooping` | The same mistake made with `cp` rather than a link — two files, nothing to compare in one process — refused after one hand-off rather than looping. |
 | `TestNoCommandInterrogatesTheTerminalAtStartup` | On a pseudo-terminal that answers nothing, `fleetctl version` and `fleetctl list` write no background-colour query and no cursor-position request, and a line typed while they start is still in the input queue afterwards (#73). |
 
 ## What needs a container

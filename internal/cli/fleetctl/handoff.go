@@ -77,19 +77,51 @@ func handOff(args []string) error {
 //
 // One thing it does detect, because the failure is otherwise silent: a helper
 // that is this same binary. See [isSameBinary].
-func findHelper() (string, error) { return findHelperVia(os.Executable, exec.LookPath) }
+func findHelper() (string, error) { return findHelperVia(runningBinary, exec.LookPath) }
+
+// runningBinary is where this process's own binary is.
+func runningBinary() (string, error) { return binaryFrom(os.Executable, os.Args) }
+
+// binaryFrom is [runningBinary] with its two views of the outside world passed
+// in, because neither can be arranged around a test.
+//
+// os.Executable is the answer, and argv[0] is the fallback for the hosts where
+// it has none: on Linux it reads /proc/self/exe, which a chroot or a container
+// image without /proc does not have. That fallback is not a convenience. Not
+// knowing what this binary is disables [isSameBinary] entirely — every
+// candidate compares as "not me" — and with it the guard against a fleetctl
+// installed under the helper's name exec'ing itself for ever, which is the one
+// failure this command exists to prevent and the one that leaves nothing on
+// screen to read. [execHelper] passes the resolved helper path as argv[0], so
+// on the far side of a hand-off argv[0] names exactly the file that was run,
+// and the second attempt refuses instead of making a third.
+//
+// Only when it is absolute: a bare `fleetctl` off PATH, or a relative path from
+// a working directory this process may since have left, names a file that may
+// not be the one running. Answering "I do not know" is what the empty return
+// means, and the lookup still consults PATH for a real helper.
+func binaryFrom(executable func() (string, error), args []string) (string, error) {
+	if path, err := executable(); err == nil && path != "" {
+		return path, nil
+	}
+	if len(args) > 0 && filepath.IsAbs(args[0]) {
+		return args[0], nil
+	}
+	return "", errors.New("this host cannot say what binary is running")
+}
 
 // findHelperVia is [findHelper] with its two views of the outside world passed
-// in, because neither can be arranged around a test: os.Executable answers with
-// the test binary, and PATH is the machine's.
+// in, because neither can be arranged around a test: [runningBinary] answers
+// with the test binary, and PATH is the machine's.
 func findHelperVia(executable func() (string, error), lookPath func(string) (string, error)) (string, error) {
 	self, err := executable()
 	if err != nil {
 		self = ""
 	}
-	// Set by a candidate that was rejected only for being this binary, so the
-	// refusal can say that rather than "there is nothing there".
-	itself := false
+	// Set to a candidate that was rejected only for being this binary, so the
+	// refusal can name the file to delete rather than say "there is nothing
+	// there" about a fleet-tui the operator can see.
+	itself := ""
 	if self != "" {
 		// The resolved path too, and in this order: the directory the
 		// operator's own invocation named answers first, and the target's is
@@ -107,8 +139,14 @@ func findHelperVia(executable func() (string, error), lookPath func(string) (str
 			if !isExecutableFile(beside) {
 				continue
 			}
+			// continue, not a refusal: a real helper on PATH is still found
+			// and used. The mistake this catches is one file being wrong, not
+			// the install being unusable, and refusing here would turn a
+			// packager's `cp` into "you have no fleet-tui" on a machine that
+			// has one. Pinned, because reversing it is invisible otherwise:
+			// see TestARealHelperOnPathIsUsedWhenTheOneBesideFleetctlIsThisBinary.
 			if isSameBinary(self, beside) {
-				itself = true
+				itself = beside
 				continue
 			}
 			return beside, nil
@@ -118,15 +156,26 @@ func findHelperVia(executable func() (string, error), lookPath func(string) (str
 	// *and* an error for a match found through a relative PATH entry, "."
 	// among them. A CLI that holds the operator's control key does not exec
 	// whatever the working directory happens to contain.
-	if path, err := lookPath(helperName); err == nil && !isSameBinary(self, path) {
-		return path, nil
+	if path, err := lookPath(helperName); err == nil {
+		if !isSameBinary(self, path) {
+			return path, nil
+		}
+		// The same mistake one directory further out, and it has to be
+		// recorded here too: a fleetctl whose only fleet-tui is on PATH and is
+		// itself would otherwise be told there is nothing there, about a file
+		// it can see. Recorded rather than returned, because the beside
+		// candidate names the install the operator is likelier to have made.
+		if itself == "" {
+			itself = path
+		}
 	}
-	if itself {
+	if itself != "" {
 		return "", fmt.Errorf(
-			"%w, and the %s next to fleetctl is this same binary. A copy, a rename or a symlink of "+
+			"%w, and the %s at %s is this same binary. A copy, a rename or a symlink of "+
 				"fleetctl does not draw the view — the view is linked into a different program. "+
-				"Install it: `go install github.com/axelmierczuk/fleet-mcp/cmd/%s@latest`",
-			errNoHelper, helperName, helperName)
+				"Install it: `go install github.com/axelmierczuk/fleet-mcp/cmd/%s@latest`. "+
+				"`fleetctl list` and `fleetctl info` need nothing extra",
+			errNoHelper, helperName, itself, helperName)
 	}
 	return "", fmt.Errorf(
 		"%w, which draws the view, and it is not next to fleetctl or on PATH. "+
@@ -151,6 +200,17 @@ func findHelperVia(executable func() (string, error), lookPath func(string) (str
 // dir/fleet-tui is the same string. os.SameFile after it, for the hard link
 // and the symlink into another directory, which are the same file under two
 // names.
+//
+// A plain `cp` is the one shape this cannot see from here — a copy is a
+// different file at a different path, and telling it from a real helper would
+// mean running it, which is the decision being made. It is caught one exec
+// later instead, and that is not luck: [execHelper] hands the resolved path
+// over as argv[0], so the copy's own [runningBinary] names the very file the
+// lookup is about to choose again, and the name comparison above answers. One
+// hand-off happens, the second is refused, and the operator gets the sentence
+// rather than a process that never comes back —
+// TestAFleetctlCopiedToItsHelpersNameRefusesInsteadOfLooping drives exactly
+// that, from a shell.
 func isSameBinary(self, path string) bool {
 	if self == "" || path == "" {
 		return false

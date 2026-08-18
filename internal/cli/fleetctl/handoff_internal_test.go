@@ -275,6 +275,13 @@ func TestALinkToFleetctlIsNotTheHelper(t *testing.T) {
 // TestAHelperOnPathThatIsThisBinaryIsNotTheHelper is the same guard on the
 // other place the lookup asks. A bin directory on PATH holding a fleet-tui that
 // is a link to the fleetctl being run is the loop again, one step further out.
+//
+// And it is answered with the same sentence, which it was not: "an error came
+// back" was the whole of what this asserted, and the error it came back with
+// said the helper "is not next to fleetctl or on PATH" — to an operator looking
+// at a fleet-tui that is on their PATH. Being told there is nothing there, about
+// a file they can see, sends them to install what they have already installed.
+// Which mistake was made is the entire value of this refusal.
 func TestAHelperOnPathThatIsThisBinaryIsNotTheHelper(t *testing.T) {
 	t.Parallel()
 
@@ -290,6 +297,106 @@ func TestAHelperOnPathThatIsThisBinaryIsNotTheHelper(t *testing.T) {
 		func() (string, error) { return self, nil },
 		func(string) (string, error) { return onPath, nil })
 	require.ErrorIs(t, err, errNoHelper)
+	require.Contains(t, err.Error(), "this same binary",
+		"a fleet-tui on PATH that is this binary was reported as a fleet-tui that is not there")
+	require.Contains(t, err.Error(), onPath, "the refusal does not name the file that is wrong")
+}
+
+// TestARealHelperOnPathIsUsedWhenTheOneBesideFleetctlIsThisBinary pins the
+// order the guard decides, which nothing did.
+//
+// Rejecting a candidate for being this binary is a `continue`, not a refusal:
+// the lookup goes on to PATH, and a real helper there is found and used. Every
+// other test of this guard arranges for PATH to hold nothing, so all of them
+// stay green with the `continue` turned into a refusal — the same shape as the
+// two "beside fleetctl" directories, and as PATH before either. Verified: with
+// the fall-through removed this package and the end-to-end suite were both
+// still green.
+//
+// The order is the part that matters. What the guard catches is one file being
+// wrong — a packager's `cp`, `mv` or `ln -s` — not an install with no view in
+// it. Answering that with "you have no fleet-tui" on a machine that has a
+// perfectly good one, and printing the line that installs what is already
+// installed, would replace a silent hang with a refusal that is simply untrue.
+func TestARealHelperOnPathIsUsedWhenTheOneBesideFleetctlIsThisBinary(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	self := filepath.Join(dir, exeName("fleetctl"))
+	require.NoError(t, os.WriteFile(self, []byte("#!/bin/sh\n"), 0o755)) //nolint:gosec // as above
+	if err := os.Symlink(self, filepath.Join(dir, exeName(helperName))); err != nil {
+		t.Skipf("this host does not allow symlinks: %v", err)
+	}
+	want := writeHelper(t, t.TempDir())
+
+	got, err := findHelperVia(
+		func() (string, error) { return self, nil },
+		func(string) (string, error) { return want, nil })
+	require.NoError(t, err,
+		"a fleetctl beside a fleet-tui that is a link to itself refused, with a real helper on PATH the whole time")
+	require.Equal(t, want, got)
+}
+
+// TestAHostThatCannotSayWhatIsRunningStillRefusesToExecItself.
+//
+// os.Executable reads /proc/self/exe on Linux and has no answer where /proc is
+// not mounted — a chroot, a container image built without it. That case is
+// deliberately supported: [findHelperVia] carries on and consults PATH, so
+// `fleetctl tui` works there rather than not at all.
+//
+// What it silently also did was switch the guard off. With no idea what this
+// binary is, [isSameBinary] answers "not me" about everything, so a fleetctl
+// installed under its helper's name on PATH exec'd itself, and the process that
+// replaced it had no idea either, and did it again — the round-2 defect in full,
+// on the one class of host where nothing on screen would ever say why.
+//
+// argv[0] closes it, and only because [execHelper] chose it: the hand-off passes
+// the resolved helper path, so on the far side argv[0] names exactly the file
+// the lookup is about to choose again.
+func TestAHostThatCannotSayWhatIsRunningStillRefusesToExecItself(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	self := writeHelper(t, dir) // this binary, installed under the helper's name
+
+	cannotSay := func() (string, error) { return "", errors.New("no /proc on this host") }
+	// What the process on the far side of one hand-off is: it cannot say what
+	// it is, and argv[0] is the path it was exec'd as.
+	_, err := findHelperVia(
+		func() (string, error) { return binaryFrom(cannotSay, []string{self}) },
+		func(string) (string, error) { return self, nil })
+	require.ErrorIs(t, err, errNoHelper,
+		"a host that cannot name its own binary exec'd itself, which is the loop with nothing to stop it")
+	require.Contains(t, err.Error(), "this same binary")
+}
+
+// TestWhatIsRunningFallsBackToArgvZeroOnlyWhenItIsAbsolute.
+//
+// A bare `fleetctl` off PATH, or a relative path from a working directory this
+// process may since have left, names a file that need not be the one running —
+// and an identity that is wrong is worse than none, because it is compared
+// against candidates and could reject the real helper. Not knowing is an
+// answer, and [findHelperVia] still consults PATH after it.
+func TestWhatIsRunningFallsBackToArgvZeroOnlyWhenItIsAbsolute(t *testing.T) {
+	t.Parallel()
+
+	cannotSay := func() (string, error) { return "", errors.New("no /proc on this host") }
+	absolute := filepath.Join(t.TempDir(), exeName("fleetctl"))
+
+	got, err := binaryFrom(cannotSay, []string{absolute})
+	require.NoError(t, err)
+	require.Equal(t, absolute, got)
+
+	for _, argv := range [][]string{{"fleetctl"}, {filepath.Join(".", "fleetctl")}, {}, nil} {
+		_, err := binaryFrom(cannotSay, argv)
+		require.Errorf(t, err, "argv %q was taken for this binary's own path", argv)
+	}
+
+	// os.Executable wins whenever it has an answer; argv[0] is a fallback and
+	// not a second opinion.
+	got, err = binaryFrom(func() (string, error) { return "/from/executable", nil }, []string{absolute})
+	require.NoError(t, err)
+	require.Equal(t, "/from/executable", got)
 }
 
 // TestAHelperFoundThroughARelativePathEntryIsNotRun.
