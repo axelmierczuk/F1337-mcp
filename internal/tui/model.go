@@ -376,7 +376,9 @@ func (m Model) confirmKey(k string) (Model, []Effect) {
 	if k != "y" && k != "Y" {
 		return m.note("cancelled")
 	}
-	m.status, m.statusAt = c.Effect.describe()+"…", m.now
+	// No ellipsis: the status line is drawn as-is, and a "…" here would be the
+	// one multi-byte character reaching a terminal that asked for ASCII.
+	m.status, m.statusAt = c.Effect.describe(), m.now
 	return m, []Effect{c.Effect}
 }
 

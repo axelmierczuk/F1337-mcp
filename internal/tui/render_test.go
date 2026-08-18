@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -411,6 +412,11 @@ func TestAsciiFramesCarryNoUnicode(t *testing.T) {
 		confirmModel(),
 		emptyModel(),
 		loadingModel(),
+		// The status line, which is prose the model writes rather than the
+		// renderer, and which carried the last hard-coded ellipsis in the
+		// package.
+		actedModel(),
+		erroredModel(),
 	}
 	for i, m := range models {
 		m.toolchains = true
@@ -419,6 +425,25 @@ func TestAsciiFramesCarryNoUnicode(t *testing.T) {
 			require.Lessf(t, r, rune(0x80), "model %d: %q is not ASCII\n%s", i, r, frame)
 		}
 	}
+}
+
+// actedModel is the frame just after a confirmed action, whose status line is
+// written by the model rather than the renderer.
+func actedModel() Model {
+	m, _ := press(demoModel(80, 24), "x", "y")
+	return m
+}
+
+// erroredModel has a failure in every pane, so the wrapped error sentences are
+// covered too.
+func erroredModel() Model {
+	m := demoModel(80, 24)
+	boom := errors.New("no answer within the timeout")
+	m, _ = m.Step(processesMsg{sandbox: "alpha", err: boom})
+	m, _ = m.Step(detailMsg{sandbox: "alpha", err: boom})
+	m, _ = m.Step(sandboxesMsg{err: boom, at: fixedNow})
+	m.detail.AllowedRoots, m.detail.Unconfined = nil, true
+	return m
 }
 
 // loadingModel is the state between starting up and the first answer, where
