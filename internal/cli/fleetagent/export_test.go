@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/kardianos/service"
@@ -887,4 +888,149 @@ func (f fakeRegistration) Status() (service.Status, error) {
 		return service.StatusRunning, nil
 	}
 	return service.StatusStopped, nil
+}
+
+// ServiceManagerForTest is what a service manager did with the daemon it
+// started, in the order it did it.
+//
+// Those three strings are the whole of #98's first half. The refusal that
+// produced it arrived *before* the daemon reached the manager at all, so the SCM
+// was never told anything: no handshake, no exit code, and a 30-second timeout
+// reported as "the service did not respond to the start or control request in a
+// timely fashion". Asserting on the sequence is asserting that the startup is
+// inside the manager's own callback, which is where a failure becomes something
+// the manager reports rather than something it infers from a process that
+// vanished.
+const (
+	// ManagerRunForTest: the manager was handed the daemon to host.
+	ManagerRunForTest = "run"
+	// ManagerStartFailedForTest: the daemon's Start returned an error, which is
+	// what kardianos turns into a stopped service with a service-specific exit
+	// code.
+	ManagerStartFailedForTest = "start-failed"
+	// ManagerStartedForTest: Start returned, so the manager reports running.
+	ManagerStartedForTest = "started"
+	// ManagerStoppedForTest: Stop returned, after the drain.
+	ManagerStoppedForTest = "stopped"
+)
+
+// PinServiceManagerForTest makes `serve` believe the platform's service manager
+// started this process, and records what that manager was handed.
+//
+// No runner here is a service manager: kardianos decides that from
+// svc.IsWindowsService on Windows and from the parent pid elsewhere, and its
+// Logger on Windows is an event-log handle opened against a source only a real
+// install registers. So the seam is at the boundary where this program stops
+// deciding and starts talking to the manager — the same place
+// controlRegistration and newRegistration are — and everything above it is the
+// real `serve`, entered from the real argv.
+//
+// stop is the manager asking the daemon to stop, which is the only way the
+// managed path ever returns on a daemon that started. Calling it twice is
+// harmless; a run that never started ignores it.
+func PinServiceManagerForTest() (events func() []string, logged func() []string, stop func(), restore func()) {
+	previous := serviceManagerHost
+	var mu sync.Mutex
+	var seen, messages []string
+	record := func(s *[]string, v string) {
+		mu.Lock()
+		defer mu.Unlock()
+		*s = append(*s, v)
+	}
+	stopped := make(chan struct{})
+	var once sync.Once
+
+	serviceManagerHost = func(prg *program) (*managedHost, bool) {
+		return &managedHost{
+			run: func() error {
+				record(&seen, ManagerRunForTest)
+				// The shape of kardianos' Windows Execute: report start
+				// pending, call Start, and hand back its error rather than
+				// waiting on anything.
+				if err := prg.Start(nil); err != nil {
+					record(&seen, ManagerStartFailedForTest)
+					return err
+				}
+				record(&seen, ManagerStartedForTest)
+				<-stopped
+				err := prg.Stop(nil)
+				record(&seen, ManagerStoppedForTest)
+				return err
+			},
+			log: func(msg string) { record(&messages, msg) },
+		}, true
+	}
+
+	snapshot := func(s *[]string) func() []string {
+		return func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]string(nil), *s...)
+		}
+	}
+	return snapshot(&seen), snapshot(&messages),
+		func() { once.Do(func() { close(stopped) }) },
+		func() { serviceManagerHost = previous }
+}
+
+// StartFailureForTest is a daemon's record of why it could not start, in the
+// shape a test needs to plant or read one.
+type StartFailureForTest struct {
+	At      time.Time
+	Config  string
+	Version string
+	PID     int
+	Error   string
+}
+
+// WriteStartFailureForTest plants that record where `service status` reads one,
+// through the same writer the daemon uses.
+func WriteStartFailureForTest(stateDir string, rec StartFailureForTest) error {
+	return writeStartFailure(stateDir, &startFailure{
+		At:      rec.At,
+		Config:  rec.Config,
+		Version: rec.Version,
+		PID:     rec.PID,
+		Error:   rec.Error,
+	})
+}
+
+// ReadStartFailureForTest reads back what a failed start recorded, which is the
+// only evidence anywhere that the daemon wrote one.
+func ReadStartFailureForTest(stateDir string) (*StartFailureForTest, error) {
+	rec, err := readStartFailure(stateDir)
+	if err != nil || rec == nil {
+		return nil, err
+	}
+	return &StartFailureForTest{
+		At:      rec.At,
+		Config:  rec.Config,
+		Version: rec.Version,
+		PID:     rec.PID,
+		Error:   rec.Error,
+	}, nil
+}
+
+// StartFailurePathForTest is the file that record lives in.
+func StartFailurePathForTest(stateDir string) string { return startFailurePath(stateDir) }
+
+// ManagedFailureMessageForTest is the message a managed daemon hands the
+// platform's service manager's own log.
+func ManagedFailureMessageForTest(started bool, err error) string {
+	return managedFailureMessage(started, err)
+}
+
+// StartFailureNotesForTest is what `service status` prints about a start that
+// failed, composed from a supplied record.
+func StartFailureNotesForTest(rec *StartFailureForTest) []string {
+	if rec == nil {
+		return startFailureNotes(nil)
+	}
+	return startFailureNotes(&startFailure{
+		At:      rec.At,
+		Config:  rec.Config,
+		Version: rec.Version,
+		PID:     rec.PID,
+		Error:   rec.Error,
+	})
 }

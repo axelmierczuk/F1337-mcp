@@ -142,7 +142,7 @@ func executableAccessAdvice(problem, exe, account, goos string) string {
 	b.WriteString(".\n\n")
 	b.WriteString("`service install` registers the binary where it is; it does not copy it. The\n")
 	b.WriteString("service manager will accept this definition and then fail every start, as\n")
-	b.WriteString(startFailure(goos))
+	b.WriteString(unreadableBinaryError(goos))
 	b.WriteString(", before any of this program runs.\n\n")
 	b.WriteString("Install the binary somewhere " + account + " can read, and register it from there:\n")
 	for _, command := range executableAccessRemedy(exe, goos) {
@@ -151,9 +151,13 @@ func executableAccessAdvice(problem, exe, account, goos string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// startFailure is what the platform's service manager reports when it cannot
-// read the binary — the string an operator will search for.
-func startFailure(goos string) string {
+// unreadableBinaryError is what the platform's service manager reports when it
+// cannot read the binary — the string an operator will search for.
+//
+// Named for the condition rather than for the outcome, because "a start that
+// failed" is now a thing this package records and reports on for every cause
+// there is; see startFailure.
+func unreadableBinaryError(goos string) string {
 	if goos == "windows" {
 		return "error 5, access denied"
 	}

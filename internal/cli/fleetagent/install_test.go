@@ -1246,3 +1246,91 @@ func TestServiceInstall_DryRunAsksNothingAndSaysWhatInstallWouldAsk(t *testing.T
 	assert.Contains(t, text, "the default it would offer",
 		"and that the account in the plan above is only what pressing return would accept")
 }
+
+// requireWindowsInvokingAccount is the account `install` resolves when nothing
+// says otherwise, plus the two host answers a scenario that lets it register
+// under one depends on.
+//
+// It must resolve, because `install` looks the account up before it acts, and
+// this runner has to let icacls grant it access to a directory the test owns:
+// install gives the state and log directories to the account it resolved, and a
+// host that refuses that is refusing something this scenario is not about.
+func requireWindowsInvokingAccount(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("`auto` resolves to a Scheduled Task only on Windows; the rule itself is asserted from every runner in TestResolveMechanism_Windows")
+	}
+	current, err := user.Current()
+	require.NoError(t, err)
+	if _, err := user.Lookup(current.Username); err != nil {
+		t.Skipf("this host cannot look up its own account %q: %v", current.Username, err)
+	}
+	probe := t.TempDir()
+	if err := exec.Command("icacls.exe", probe, "/grant", current.Username+":(OI)(CI)M", "/T").Run(); err != nil { //nolint:gosec // the same argv install is about to use, against a directory this test owns
+		t.Skipf("icacls cannot grant %s access to a directory on this host: %v", current.Username, err)
+	}
+	return current.Username
+}
+
+// What is already registered on this host does not decide what `install`
+// registers now.
+//
+// This is #99's hypothesis with teeth. The host it was reported from had a
+// Windows service registered earlier the same day, from a binary on the Desktop
+// that failed with error 5 and was uninstalled — and `service install`, elevated,
+// with no --user and no --mechanism, produced a Windows service under the
+// invoking operator rather than the logon-triggered Scheduled Task #79 made the
+// Windows default. If `install` preferred the mechanism it found already
+// registered over the one resolveMechanism returns, then *no existing Windows
+// user is ever migrated to the task* — which is #74 arriving again after the
+// fix, for exactly the population it was filed for, silently.
+//
+// Driven from the argv the operator typed, on the one runner where `auto` can
+// resolve to a task at all. What the seam keeps out is the registration itself;
+// resolveMechanism, the removal, the write and the restart are the real ones.
+func TestServiceInstall_AnExistingRegistrationDoesNotSteerTheMechanism(t *testing.T) {
+	account := requireWindowsInvokingAccount(t)
+
+	t.Run("a service already registered is replaced by a task", func(t *testing.T) {
+		configPath, _, _ := installConfig(t, "")
+		calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+			Installed: []fleetagent.Mechanism{fleetagent.MechanismService},
+			Running:   map[fleetagent.Mechanism]bool{fleetagent.MechanismService: true},
+		})
+		defer restore()
+
+		out := &bytes.Buffer{}
+		// The operator's command: no --user, no --mechanism.
+		code := fleetagent.Main([]string{"service", "install", "--config", configPath}, out)
+		text := out.String()
+		require.Equal(t, 0, code, "%s", text)
+
+		assert.Contains(t, text, "mechanism: "+fleetagent.MechanismTask.Describe(),
+			"auto under an interactive account is a task whatever this host already carries; a service here is #74 again")
+		assert.Contains(t, text, "runs as:   "+account,
+			"and it runs as the operator, which is the whole point of the task")
+		assert.Equal(t, []string{"service:stop", "service:uninstall", "new:install", "new:start"}, calls(),
+			"the service it found is the registration it replaces, not the mechanism it copies")
+		assert.Contains(t, text, "removed the existing "+fleetagent.MechanismService.Describe())
+	})
+
+	t.Run("a task already registered is replaced by a task", func(t *testing.T) {
+		configPath, _, _ := installConfig(t, "")
+		calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+			Installed: []fleetagent.Mechanism{fleetagent.MechanismTask},
+			Running:   map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+		})
+		defer restore()
+
+		out := &bytes.Buffer{}
+		code := fleetagent.Main([]string{"service", "install", "--config", configPath}, out)
+		text := out.String()
+		require.Equal(t, 0, code, "%s", text)
+
+		// The other direction, which is what stops the claim above from being
+		// satisfied by "always pick whatever is not registered".
+		assert.Contains(t, text, "mechanism: "+fleetagent.MechanismTask.Describe())
+		assert.Equal(t, []string{"new:stop", "new:uninstall", "new:install", "new:start"}, calls(),
+			"its own mechanism is replaced in place, and nothing about the other one is touched")
+	})
+}

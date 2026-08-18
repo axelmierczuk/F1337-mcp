@@ -141,6 +141,57 @@ func TestRunsInSessionZero_TheSpellingThePlatformReports(t *testing.T) {
 	}
 }
 
+// The same identities, spelled the way this program itself produces and asks
+// for them.
+//
+// `.\name` is how CreateService is told "this machine, not the domain":
+// serviceAccountName exists to add it, and the account prompt offers
+// `DOMAIN\name, .\name, or name@domain` as the three shapes to type. So the
+// prefixed form is one an operator reaches by following this program's own
+// instructions — and unfolded, every rule built on the session-zero key read it
+// as an ordinary named account. #99 named account spelling as one of its two
+// hypotheses, after `NT AUTHORITY\NETWORK SERVICE` had already been a
+// showstopper for the same reason.
+func TestRunsInSessionZero_TheSpellingThisProgramProduces(t *testing.T) {
+	for _, account := range []string{
+		`.\LocalSystem`,
+		`.\SYSTEM`,
+		`.\NetworkService`,
+		`.\LOCAL SERVICE`,
+		`.\localservice`,
+	} {
+		assert.True(t, fleetagent.RunsInSessionZeroForTest(account),
+			"%q is a built-in service identity spelled the way this program spells accounts for the SCM", account)
+	}
+	// And it cannot promote an ordinary account: the prefix is a location, not
+	// a privilege. `.\admin` is what the host in #99 was registered under.
+	for _, account := range []string{`.\admin`, `.\build`, `.\systemsadmin`, `.\`} {
+		assert.False(t, fleetagent.RunsInSessionZeroForTest(account),
+			"%q is a machine-local *named* account and must stay one", account)
+	}
+
+	// Every rule drawn from that answer, driven with the prefixed form. Each of
+	// these was silently wrong: a logon-triggered task for the machine account,
+	// no warning that every command would run as SYSTEM, a prompt for the
+	// password of an account that has none, and — in ensureServiceUser — an
+	// account-database lookup a built-in identity has no entry to satisfy.
+	mechanism, err := fleetagent.ResolveMechanismForTest(fleetagent.MechanismAuto, "windows", `.\LocalSystem`)
+	require.NoError(t, err)
+	assert.Equal(t, fleetagent.MechanismService, mechanism,
+		"the machine account can only be hosted by a service, however it is spelled")
+
+	_, err = fleetagent.ResolveMechanismForTest(fleetagent.MechanismTask, "windows", `.\NetworkService`)
+	require.Error(t, err, "a logon trigger for an account that never logs on is the one combination this rule refuses")
+
+	assert.True(t, fleetagent.IsSuperuserForTest(`.\LocalSystem`),
+		"install has to say that every command the agent runs will run as the machine")
+	assert.False(t, fleetagent.ServiceNeedsPasswordForTest(fleetagent.MechanismService, "windows", `.\NetworkService`),
+		"a built-in service identity has no password, so install must not stop to ask for one")
+	assert.Contains(t, strings.Join(fleetagent.MechanismNotesForTest(fleetagent.MechanismService, "windows", `.\LocalService`, false), "\n"),
+		"no operator profile",
+		"and the confined-agent warning is the one this account gets, not the credential note")
+}
+
 // The two rules that ask about the same accounts have to agree about them.
 //
 // runsInSessionZero folds spaces and knows the well-known SIDs; isSuperuser
@@ -406,6 +457,18 @@ func TestMechanismNotes(t *testing.T) {
 	assert.Contains(t, named, "1069", "the number an operator will search for")
 	assert.Contains(t, named, "secedit", "and a command that grants it")
 
+	// And it is still session 0, which is the whole of #99: the mechanism that
+	// arrived on that host was a service under the invoking operator, and the
+	// only thing `install` said about it was a privilege note. An operator who
+	// asked for their own account and got session-0 isolation has to be told
+	// which command answers whether the agent can reach their toolchain, and
+	// which mechanism does not have the question.
+	assert.Contains(t, named, "session 0",
+		"a Windows service runs in session 0 whoever it runs as, and that is the #74 outcome when the profile is not loaded")
+	assert.Contains(t, named, "service status",
+		"install cannot know whether the profile was loaded; the command that checks has to be named")
+	assert.Contains(t, named, "--mechanism task", "and so does the mechanism that has no session 0 at all")
+
 	// And nothing is said where nothing is true: systemd and launchd log an
 	// account on with neither a password nor a privilege.
 	for _, goos := range []string{"linux", "darwin"} {
@@ -426,9 +489,17 @@ func TestMechanismNotes_ARightThatWasCheckedIsNotAlsoWarnedAbout(t *testing.T) {
 	require.Contains(t, unverified, "Log on as a service",
 		"a host where nothing could check still has to be told")
 
-	verified := fleetagent.MechanismNotesForTest(fleetagent.MechanismService, "windows", account, true)
-	assert.Empty(t, verified,
-		"install logged this account on as a service moments ago; telling the operator it may not be able to is wrong, not cautious")
+	verified := strings.Join(fleetagent.MechanismNotesForTest(fleetagent.MechanismService, "windows", account, true), "\n")
+	for _, gone := range []string{"Log on as a service", "1069", "secedit"} {
+		assert.NotContains(t, verified, gone,
+			"install logged this account on as a service moments ago; telling the operator it may not be able to is wrong, not cautious")
+	}
+
+	// What the check settled is the privilege, and nothing else. A service that
+	// logs on perfectly is still a service in session 0, so the note #99 is
+	// about does not depend on a credential either.
+	assert.Contains(t, verified, "session 0",
+		"a successful logon says nothing about which session the daemon lands in")
 
 	// And the parameter must not reach the notes that have nothing to do with a
 	// credential: a task still stops at logout, and a built-in identity still
