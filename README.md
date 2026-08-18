@@ -52,27 +52,35 @@ go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
 go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest   # for `fleetctl tui`
 ```
 
-**2. Put the agent on the sandbox host, and give it a config:**
+**2. Put the agent on the sandbox host:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh | sudo sh
 ```
 
-That downloads the release binary for the platform, checks it against the
-published checksum, and installs it. Nothing else — no CA, no certificate, no
-service. Windows uses `install.ps1` the same way.
+It asks what it has not been told: how callers are authenticated, which of this
+host's own addresses to serve on — enumerated and labelled, with a tailnet
+address offered first — and whether to register a service. Then it downloads the
+release binary, checks it against the published checksum, installs it where the
+service account can read it, writes `agent.yaml` at the platform's path,
+registers the service, starts it, waits until the agent is actually up, and
+prints the command to run on your workstation.
+
+Windows uses `install.ps1` the same way, from an elevated PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.ps1 | iex
+```
+
+Nothing is asked that an argument already answered, so the scripted form is
+unchanged and is what CI and provisioning scripts use:
 
 ```sh
-sudo tee /etc/fleet/agent.yaml >/dev/null <<'YAML'
-name: "build-box"
-listen: "100.83.4.17:8722"    # this host's own address on your private network
-tls:
-  enabled: false
-YAML
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
+  | sudo sh -s -- --no-mtls --listen 100.83.4.17:8722
 ```
 
-That path is Linux's. macOS reads `/Library/Application Support/fleet/agent.yaml`
-and Windows `%ProgramData%\fleet\agent.yaml`; everything else is the same.
+Add `--dry-run` to see what it would do and change nothing.
 
 **Name the interface you mean.** With `tls.enabled: false` the agent refuses to
 serve on an address that is neither loopback nor private, because on any other
@@ -80,14 +88,31 @@ address there would be nothing between the port and a shell on the host.
 Loopback, RFC 1918, unique-local, link-local and CGNAT space — `100.64.0.0/10`,
 where every Tailscale node lives — are permitted. A wildcard bind, a public
 address, and a hostname it would have to resolve are refused. `serve
---allow-unauthenticated-public` is the only way past that, and the default
-`listen` is `0.0.0.0:8722`, so a config that omits the line does not start.
+--allow-unauthenticated-public` is the only way past that. The installer refuses
+the same addresses at the question, before it writes anything, and offers none
+of them as a default.
+
+The config it writes is the one documented in
+[examples/agent.yaml](examples/agent.yaml):
+
+```yaml
+name: "build-box"
+listen: "100.83.4.17:8722"    # this host's own address on your private network
+tls:
+  enabled: false
+```
+
+That path is `/etc/fleet/agent.yaml` on Linux. macOS reads
+`/Library/Application Support/fleet/agent.yaml` and Windows
+`%ProgramData%\fleet\agent.yaml`; everything else is the same.
 
 Leaving `tls.enabled` out is not the same as writing `false`. Unset means "on if
 this config names a certificate", so a host that enrolled keeps authenticating
 across an upgrade, and one written like the above never starts asking for a CA.
 
-**3. Start it:**
+**3. Nothing, if the installer registered it.** Run as root it registers the
+service and starts it. Installing by hand, or without elevation, leaves that to
+you:
 
 ```sh
 sudo fleet-agent service install
@@ -121,6 +146,10 @@ is issued and nothing is proved. What is left is giving the host a name:
 ```sh
 fleetctl add build-box --address 100.83.4.17:8722 --insecure
 ```
+
+The installer prints that line, with this host's name and address already in
+it, as the last thing it does — it runs here, on the workstation, and nothing
+on the agent's side can run it.
 
 `--insecure` has to be said because it cannot be discovered — an agent serving
 plaintext and one refusing a handshake look identical to a dialer that has not

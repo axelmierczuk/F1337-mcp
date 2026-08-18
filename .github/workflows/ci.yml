@@ -255,9 +255,46 @@ jobs:
       - uses: actions/checkout@v5
       - name: Shellcheck the shell scripts
         run: shellcheck --severity=warning install.sh scripts/tools-selftest.sh
-      - name: Lint install.ps1
+      # A non-ASCII character in a PowerShell file with no BOM is read as the
+      # host's ANSI code page, which mangles it and fails the analyzer below
+      # with a parse error several lines away from the character that caused it.
+      # An em dash has done that twice. Checked as itself, so the failure names
+      # the line and the character rather than the syntax it happened to break.
+      #
+      # Through perl rather than `grep -P`: BSD grep has no -P, exits 2, and an
+      # `if` reads that as "found nothing" — so the same command that guards
+      # this on a Linux runner is silently vacuous on the macOS laptop it gets
+      # pasted onto. The probe is here for the same reason one exists for the
+      # tooling cache: a check that has quietly stopped finding anything looks
+      # exactly like a clean file.
+      - name: install.ps1 must stay ASCII
+        run: |
+          probe() { perl -ne 'print "$ARGV:$.: $_" if /[^\x00-\x7F]/' "$@"; }
+          printf 'an em dash \xe2\x80\x94 here\n' > "$RUNNER_TEMP/ascii-probe.txt"
+          if [ -z "$(probe "$RUNNER_TEMP/ascii-probe.txt")" ]; then
+            echo "::error title=The ASCII check is broken::It did not find the em dash in its own probe file, so it would not have found one in install.ps1 either."
+            exit 1
+          fi
+          found="$(probe install.ps1 install.tests.ps1)"
+          if [ -n "$found" ]; then
+            printf '%s\n' "$found"
+            echo "::error title=Non-ASCII in a PowerShell file::These files carry no BOM, so a non-ASCII character is decoded as the host's ANSI code page. Replace it with ASCII: -- for an em dash, a straight quote for a curly one."
+            exit 1
+          fi
+      - name: Lint the PowerShell
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
           $issues = Invoke-ScriptAnalyzer -Path install.ps1 -Severity Error,Warning
+          $issues += Invoke-ScriptAnalyzer -Path install.tests.ps1 -Severity Error,Warning
           if ($issues) { $issues | Format-Table -AutoSize; exit 1 }
+      # No runner can register a Windows service, so what install.ps1 decides
+      # before it acts is asserted here instead — the address it offers first,
+      # the listen addresses it refuses, the registration failure it treats as
+      # transient, the command it prints for the workstation. Dot-sourcing the
+      # installer defines those functions without running it; see
+      # install.tests.ps1, and docs/service.md for the half that needs a real
+      # Windows host.
+      - name: Test what install.ps1 decides
+        shell: pwsh
+        run: ./install.tests.ps1

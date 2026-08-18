@@ -694,6 +694,102 @@ no launchd session or Windows SCM to register against. Everything that decides
 unit, the launchd plist, and the Windows SCM options), but the install itself
 has to be checked by hand.
 
+### The installers
+
+`install.sh` and `install.ps1` no longer stop at the binary: they ask what is
+missing, write the config, register the service, start it, and check that it
+came up before saying so.
+
+**What CI covers.** `test/e2e/install_test.go` drives `install.sh` end to end on
+a pseudo-terminal, against a release served from loopback — the questions and
+what each answer does, the addresses it enumerates and the order it offers them
+in, the listen address it refuses *before* downloading anything, a terminal that
+answers nothing, the config it writes and a real daemon serving with it, an
+enrollment against a real control plane, and the `fleetctl add` line it prints.
+`install.tests.ps1` asserts the same decisions for `install.ps1` on the Linux
+runner: dot-sourcing that file defines its functions without running the
+installer.
+
+**What CI cannot.** Both suites run as an ordinary user, so neither reaches the
+branch that registers a service — the wait for the daemon to come up, the probe
+of its listener, and the retry when a Windows definition is still being deleted
+have no automated coverage anywhere. And no runner is Windows, so nothing in
+`install.ps1` below its decisions has ever executed. That is what the steps
+below are.
+
+#### install.sh, as root, on Linux or macOS
+
+```sh
+sudo sh install.sh
+#   MUST ask the posture, then offer this host's own addresses, labelled, with a
+#   tailnet address first where there is one.
+#   MUST NOT offer 0.0.0.0 when the answer to the first question was "none", and
+#   MUST NOT default to a public address in either posture.
+#   MUST print the plan and ask to proceed before it downloads anything.
+#   MUST end with "the service manager reports it running", "<addr> is accepting
+#   connections", "Installed, configured, running.", and the `fleetctl add` line.
+
+fleet-agent service status          # running, with a pid; the installer waited for this
+systemctl show -p ExecStart --value fleet-agent
+#   MUST name /usr/local/bin/fleet-agent and the config path the installer chose,
+#   not wherever the script was run from.
+
+# The failure it must not paper over. Occupy the port first, so the daemon
+# starts and then cannot bind:
+python3 -m http.server 8722 &
+sudo sh install.sh --non-interactive --no-mtls --listen 127.0.0.1:8722 --service yes
+#   MUST exit non-zero, MUST print what `service status` says about it —
+#   including the LAST START FAILED block with the daemon's own reason — and
+#   MUST NOT print "Installed, configured, running." or a `fleetctl add` line.
+
+# And re-running it is how the install is finished, which is what the failure
+# above tells the operator to do.
+kill %1
+sudo fleet-agent service start
+```
+
+#### install.ps1, from an elevated PowerShell on Windows
+
+```powershell
+$s = irm https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.ps1
+& ([scriptblock]::Create($s))
+#   MUST ask, and the address menu MUST put the Tailscale adapter first where
+#   this host has one -- it is matched on the adapter name and description, and
+#   nothing but a real Windows host has either.
+#   MUST install under %ProgramFiles%\fleet, not where the download landed:
+#   `service install` registers the path and never copies the binary, which is
+#   item 3 in #100.
+#   MUST end by waiting for the agent, probing its listener, and printing the
+#   `fleetctl add` line.
+
+Get-ScheduledTask fleet-agent | Format-List TaskName, State
+Get-Content C:\ProgramData\fleet\agent.yaml     # the answers, at the platform path
+
+# Item 4 in #100: a definition still being deleted is transient, not an error to
+# print raw. DeleteService only marks a running service; the entry survives
+# until the process exits.
+fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
+fleet-agent service start
+fleet-agent service uninstall
+& ([scriptblock]::Create($s)) -NoMtls -Listen "<this-host-address>:8722" -Service yes
+#   MUST print "the previous service definition is still being removed; waiting,
+#   then trying again" and then succeed, rather than printing the SCM's string
+#   and stopping. If the window has already closed, provoke it again: the entry
+#   only survives while a handle to it does.
+
+# The refusal, before anything is downloaded.
+& ([scriptblock]::Create($s)) -NoMtls -Listen "0.0.0.0:8722"
+#   MUST refuse naming the wildcard, MUST print the three ways out, and MUST NOT
+#   have downloaded or written anything.
+
+# And the scripted path, which is what CI and provisioning run.
+& ([scriptblock]::Create($s)) -Token <token> -Control <host:9443> `
+    -CaFingerprint <hex> -Listen 0.0.0.0:8722
+#   MUST NOT ask anything, and MUST NOT refuse the wildcard: with mTLS on the
+#   handshake is the boundary, and this is the command `fleetctl enroll mint`
+#   prints.
+```
+
 ### Linux, systemd
 
 ```sh
