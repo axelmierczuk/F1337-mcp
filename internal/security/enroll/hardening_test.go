@@ -218,13 +218,22 @@ func TestEnroll_RateLimited(t *testing.T) {
 	assert.True(t, limited, "repeated enrollment attempts must eventually be throttled")
 }
 
-// Sequential, deliberately. The last three lines below turn on a 20ms window:
-// two adjacent Allow calls have to land inside one, and a third has to land
-// after it. Nothing here is shared with another test — it is the *scheduler*
-// that is shared, and running this alongside a dozen other suites is what puts
-// a 20ms gap between two consecutive statements. Parallelism cannot make this
-// test faster (it is 40ms) and can only make it lie.
+// This used to be the one test in this package left sequential, on the grounds
+// that a 20ms window had two adjacent Allow calls landing inside it and
+// parallelism could only make that less true. The window was the problem, not
+// the parallelism: a 20ms gap between two consecutive statements is something a
+// loaded machine can produce whatever else is running, and `go test ./...` runs
+// the other packages' binaries alongside this one either way — so sequential
+// narrowed the failure without removing it, and cost the package's only
+// serialisation point to do it.
+//
+// So the two properties are measured apart. Refusal inside the window is
+// asserted under a window nothing can stall past, and expiry is asserted by
+// waiting longer than a short one — and waiting longer only ever makes an
+// expiry more true, which is the direction every timing assertion in this
+// package is written in.
 func TestRateLimiter_GlobalAndPerPeer(t *testing.T) {
+	t.Parallel()
 	perPeer := enroll.NewRateLimiter(time.Minute, 2, 0)
 	require.NoError(t, perPeer.Allow("10.0.0.1"))
 	require.NoError(t, perPeer.Allow("10.0.0.1"))
@@ -239,12 +248,13 @@ func TestRateLimiter_GlobalAndPerPeer(t *testing.T) {
 	require.NoError(t, global.Allow("10.0.0.2"))
 	require.ErrorIs(t, global.Allow("10.0.0.3"), enroll.ErrRateLimited)
 
-	// A window that has elapsed frees the budget again.
-	short := enroll.NewRateLimiter(20*time.Millisecond, 1, 0)
-	require.NoError(t, short.Allow("10.0.0.1"))
-	require.ErrorIs(t, short.Allow("10.0.0.1"), enroll.ErrRateLimited)
+	// A window that has elapsed frees the budget again: with a budget of one, a
+	// second call can only succeed because the first has aged out. The wait is
+	// twice the window, so no amount of stalling turns this into a failure.
+	expiring := enroll.NewRateLimiter(20*time.Millisecond, 1, 0)
+	require.NoError(t, expiring.Allow("10.0.0.1"))
 	time.Sleep(40 * time.Millisecond)
-	require.NoError(t, short.Allow("10.0.0.1"))
+	require.NoError(t, expiring.Allow("10.0.0.1"))
 }
 
 // `fleetctl enroll mint` and `fleetctl serve` are separate processes, so a

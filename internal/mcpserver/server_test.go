@@ -481,12 +481,15 @@ func scanLines(r *os.File) <-chan string {
 //
 // Which now has teeth. A parallel test would have its own output redirected
 // into this one's pipe, and the assignment itself would race every other read
-// of the same three variables. Nothing enforces it — unlike t.Chdir and
-// t.Setenv, which panic — so the four tests that call it say so at the line where
-// t.Parallel would otherwise be. Sequential tests all finish before the first
-// parallel one is released, so the swap is never live alongside one.
+// of the same three variables. requireSequential is what holds the four tests
+// that call it to that, and it is not decoration: tried without it, one of the
+// four passed all three runs while its stdout was somebody else's, and the
+// three that did fail took a different dozen unrelated tests down with them
+// each time. Sequential tests all finish before the first parallel one is
+// released, so the swap is never live alongside one.
 func swapStdio(t *testing.T, stdin, stdout, stderr *os.File) func() {
 	t.Helper()
+	requireSequential(t)
 	origIn, origOut, origErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdin, os.Stdout, os.Stderr = stdin, stdout, stderr
 	return func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr }

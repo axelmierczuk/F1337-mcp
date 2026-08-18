@@ -268,9 +268,17 @@ func TestList_UnreachableSandboxDoesNotHangTheCall(t *testing.T) {
 		assert.NotEmptyf(t, sb.Detail, "%s should say why it is unreachable", sb.Name)
 	}
 
-	// Serialised, two dead hosts would cost two deadlines. Probing in
-	// parallel means one, plus slack for a loaded CI machine.
-	assert.Less(t, elapsed, 3*time.Second, "probes must run in parallel")
+	// Probing in parallel, asserted where it happens rather than on the clock.
+	// The two dead hosts sit on their deadline together or one after the other,
+	// and a wall-clock bound loose enough not to flake on a CI runner — three
+	// seconds, against two 200ms deadlines — cannot tell those apart: with the
+	// fan-out taken out of the product this test stayed green.
+	assert.GreaterOrEqual(t, f.clients.overlap.highest(), 2,
+		"two probes must have been in flight at once; serialised, every dead host in a fleet adds its own deadline to the listing")
+
+	// And the deadline is applied at all, which is what stops the hour-long
+	// probe above from becoming an hour-long tool call.
+	assert.Less(t, elapsed, 3*time.Second, "a probe that outlives its deadline must not hold up the listing")
 }
 
 // TestList_FiltersByLabel covers the label filter, and the case where it
@@ -595,9 +603,7 @@ func TestInfo_ReportsPlatformResourcesAndRoots(t *testing.T) {
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.clients.host("build-box").toolchainDelay = 250 * time.Millisecond
 
-	started := time.Now()
 	out := structured[infoResult](t, f.ok("fleet_info", map[string]any{"sandbox": "build-box"}, ""))
-	withoutToolchains := time.Since(started)
 
 	assert.Equal(t, "build-box", out.Sandbox)
 	assert.Equal(t, "linux/amd64", out.Platform)
@@ -611,7 +617,7 @@ func TestInfo_ReportsPlatformResourcesAndRoots(t *testing.T) {
 	assert.Empty(t, out.Toolchains, "toolchains must not be probed unless asked for")
 	assert.Contains(t, out.Note, "include_toolchains")
 
-	started = time.Now()
+	started := time.Now()
 	out = structured[infoResult](t, f.ok("fleet_info",
 		map[string]any{"sandbox": "build-box", "include_toolchains": true}, ""))
 	withToolchains := time.Since(started)
@@ -619,11 +625,17 @@ func TestInfo_ReportsPlatformResourcesAndRoots(t *testing.T) {
 	require.Len(t, out.Toolchains, 1)
 	assert.Equal(t, "go", out.Toolchains[0].Name)
 
+	// That the flag is what costs the time is a count, not a race between two
+	// clocks: exactly one of the two calls reached the host's toolchain path,
+	// and that call waited on the delay this test injected there. The elapsed
+	// bound is a floor, so a loaded machine can only make it more true —
+	// comparing it against the call with no delay in it is a comparison of two
+	// numbers the scheduler writes, and it does invert (seen at -parallel 48:
+	// 558ms for the slow path against 634ms for the fast one).
 	_, _, toolchainCalls := f.clients.host("build-box").counts()
 	assert.Equal(t, 1, toolchainCalls, "exactly one call asked the host to probe toolchains")
-	assert.Greater(t, withToolchains, withoutToolchains,
+	assert.GreaterOrEqual(t, withToolchains, 200*time.Millisecond,
 		"include_toolchains is the slower path, which is why it is opt-in")
-	assert.GreaterOrEqual(t, withToolchains, 200*time.Millisecond)
 }
 
 // TestInfo_CachesPlatformIntoTheRegistry: a listing should not have to dial

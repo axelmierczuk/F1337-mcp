@@ -327,7 +327,14 @@ func startLiveAgent(t *testing.T, opts liveAgentOptions) *liveAgent {
 	require.NoError(t, err)
 
 	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
+	// WaitForHandlers, so Stop below does not return while a handler is still
+	// unwinding. Without it the teardown order is a lie: Stop returns, the audit
+	// log is closed, t.TempDir starts deleting the state directory — and a
+	// straggler handler writing its record reopens audit.jsonl underneath the
+	// delete, which lands as "TempDir RemoveAll cleanup: directory not empty"
+	// against a test that had already passed. Twice in twelve runs of the
+	// forward and socks tests at -parallel 24, always a different test.
+	srv := grpc.NewServer(grpc.WaitForHandlers(true))
 	procSvc.Register(srv)
 	fwdSvc.Register(srv)
 	hostSvc.Register(srv)
@@ -525,9 +532,8 @@ func toAnySlice(in []string) []any {
 	return out
 }
 
-// freePort hands out a loopback port that nothing else in this process will
-// take, for the tests that have to name a port before the thing that binds it
-// exists.
+// freePort hands out a loopback port that nothing else will take, for the
+// tests that have to name a port before the thing that binds it exists.
 //
 // The obvious implementation — bind :0, read the port, close the listener — is
 // what this used to be, and it is a reserve-and-release with a window in it.
@@ -541,41 +547,88 @@ func toAnySlice(in []string) []any {
 // platform this suite runs on allocates :0 from a range starting at 32768
 // (Linux) or 49152 (macOS, Windows), so a port under 30000 is one the kernel
 // will not hand to anyone asking for "any port" — which is the whole of the
-// second failure. The counter under the mutex is the whole of the first.
+// second failure. The cursor under the mutex is the whole of the first.
 //
 // A port can still be held by something else on the machine, which is why each
 // candidate is proved bindable before it is returned rather than assumed to be.
-var freePortState struct {
-	mu   sync.Mutex
-	next int
+func freePort(t *testing.T) int {
+	t.Helper()
+	return freePorts.next(t)
 }
 
-// freePortBase and freePortLimit bracket the range freePort draws from: above
-// the registered ports in common use and below every platform's ephemeral
-// range. The offset by pid keeps two copies of this binary — `go test ./...`
-// runs packages concurrently — from marching over the same ports in step.
+// freePorts is the allocator freePort draws from, one per test binary.
+var freePorts portAllocator
+
+// freePortBase and freePortLimit bracket the range these allocators draw from:
+// above the registered ports in common use and below every platform's ephemeral
+// range. freePortSlice is how much of it one process takes.
+//
+// The slice has to be comfortably wider than the longest run of calls any one
+// test makes, because the cursor wraps: a wrapped cursor re-offers ports this
+// process has already finished with, which is fine for a caller and not fine
+// for the test that asserts the numbers are distinct.
 const (
 	freePortBase  = 20000
 	freePortLimit = 30000
+	freePortSlice = 200
 )
 
-func freePort(t *testing.T) int {
+// portAllocator hands out ports from a slice of [freePortBase, freePortLimit)
+// that it owns outright.
+//
+// Owning it is the point, and it is what the sentinel is for. The cursor keeps
+// two goroutines in this process off one port; nothing in it keeps two
+// *processes* off one, and two do run at once — `go test` in two terminals, two
+// worktrees on one machine, two jobs on one self-hosted runner. Handing those
+// overlapping ranges is worse than the reserve-and-release this replaced,
+// because the kernel arbitrates its ephemeral range across processes and a
+// private cursor arbitrates nothing. That was measured rather than imagined:
+// two copies of this binary drawing from one shared range failed in three of
+// six rounds — `freePort returned 22440, which is not bindable`, an explicit
+// local_port already taken, and a readiness probe that passed in 355ms against
+// the *other* process's listener on a port whose own child binds after 600ms.
+// The last of those is the shape that matters: had it been 50ms slower it would
+// have passed, having proved nothing about this process at all.
+//
+// So a process claims its slice the way everything here proves a port: by
+// binding one, and then by not letting go. The sentinel sits on the slice's
+// first port for the life of the process, so a second copy of this binary finds
+// that slice taken and moves to the next one — and the claim is released by the
+// kernel when the process exits, with nothing to leave behind or clean up.
+type portAllocator struct {
+	mu       sync.Mutex
+	sentinel net.Listener
+	base     int // first port after the sentinel
+	limit    int
+	cursor   int
+}
+
+// next returns a port in this allocator's slice that is bindable right now and
+// that it has not just handed out.
+//
+// It claims the slice on the first call rather than at init, so a `go test`
+// that never asks for a port never takes one — the supervised children in this
+// file are copies of this same binary and reach m.Run, and a slice each would
+// be a slice each for an hour. Every caller of freePort is a parallel test, so
+// the claim also lands after the sequential descriptor-count tests have taken
+// their snapshots.
+func (a *portAllocator) next(t *testing.T) int {
 	t.Helper()
 
-	freePortState.mu.Lock()
-	defer freePortState.mu.Unlock()
-	if freePortState.next == 0 {
-		freePortState.next = freePortBase + os.Getpid()%(freePortLimit-freePortBase)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.sentinel == nil {
+		require.NoError(t, a.claim())
 	}
 
-	for range freePortLimit - freePortBase {
-		port := freePortState.next
-		freePortState.next++
-		if freePortState.next >= freePortLimit {
-			freePortState.next = freePortBase
+	for range a.limit - a.base {
+		port := a.cursor
+		a.cursor++
+		if a.cursor >= a.limit {
+			a.cursor = a.base
 		}
-		// Proved free, not assumed: the range is unlikely to be busy but it is
-		// not this process's to own.
+		// Proved free, not assumed: the slice is this process's, but a port in
+		// it can still be held by a program that knows nothing about any of this.
 		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err != nil {
 			continue
@@ -583,8 +636,56 @@ func freePort(t *testing.T) int {
 		require.NoError(t, lis.Close())
 		return port
 	}
-	t.Fatalf("no free port between %d and %d", freePortBase, freePortLimit)
+	t.Fatalf("no free port between %d and %d", a.base, a.limit)
 	return 0
+}
+
+// claim takes the first slice whose sentinel port can be bound, starting from
+// one chosen by process id so that two copies starting together do not both
+// walk the range from the bottom.
+//
+// It must be called with a.mu held.
+func (a *portAllocator) claim() error {
+	const slices = (freePortLimit - freePortBase) / freePortSlice
+	// 2^32 divided by the golden ratio: odd, so the mapping is a bijection and
+	// adjacent pids — which is what two runs started seconds apart by the same
+	// shell have — do not land on adjacent slices.
+	const knuth = 2654435761
+	first := int(uint64(os.Getpid()) * knuth % slices)
+
+	for i := range slices {
+		start := freePortBase + ((first+i)%slices)*freePortSlice
+		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(start)))
+		if err != nil {
+			continue // another copy of this binary is sitting on that slice
+		}
+		a.sentinel = lis
+		a.base, a.limit = start+1, start+freePortSlice
+		a.cursor = a.base
+		return nil
+	}
+	return fmt.Errorf("no free port slice between %d and %d: no more than %d copies of this test binary can run at "+
+		"once, and something else may be listening in that range", freePortBase, freePortLimit, slices)
+}
+
+// release gives the slice back. Only the allocators tests build for themselves
+// need it; the package-level one is released when the process exits.
+func (a *portAllocator) release() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.sentinel != nil {
+		_ = a.sentinel.Close()
+		a.sentinel = nil
+	}
+}
+
+// rewind puts the next candidate back to port, for the test that has to know
+// what the allocator will try next. Safe only on an allocator no other
+// goroutine is using.
+func (a *portAllocator) rewind(port int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cursor = port
 }
 
 // TestFreePort_IsDistinctAndOutsideTheEphemeralRange pins the two properties
@@ -600,7 +701,10 @@ func TestFreePort_IsDistinctAndOutsideTheEphemeralRange(t *testing.T) {
 
 	const lowestEphemeralFloor = 32768
 	seen := map[int]bool{}
-	for range 200 {
+	// Well short of freePortSlice, so the cursor cannot wrap inside one run and
+	// re-offer a port this loop has already released — which would read as a
+	// duplicate and would be the test's own doing.
+	for range 50 {
 		port := freePort(t)
 
 		assert.Falsef(t, seen[port], "freePort handed out %d twice", port)
@@ -615,6 +719,61 @@ func TestFreePort_IsDistinctAndOutsideTheEphemeralRange(t *testing.T) {
 		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		require.NoErrorf(t, err, "freePort returned %d, which is not bindable", port)
 		require.NoError(t, lis.Close())
+	}
+}
+
+// TestFreePort_SkipsAPortSomethingElseIsUsing is the third property, and the
+// one the walk above cannot reach: the slice is this process's, but a port
+// inside it can still be held by a program that knows nothing about any of
+// this. Deleting the bindability check leaves the walk above green, because
+// nothing on a CI runner happens to be listening between 20000 and 30000 —
+// which is why this occupies a port itself rather than waiting to be unlucky.
+//
+// It drives an allocator of its own, which claims a slice of its own, so
+// rewinding the cursor onto a chosen port cannot disturb the one every other
+// parallel test in this package is drawing from.
+func TestFreePort_SkipsAPortSomethingElseIsUsing(t *testing.T) {
+	t.Parallel()
+
+	own := &portAllocator{}
+	t.Cleanup(own.release)
+
+	occupied := own.next(t)
+	held, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(occupied)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = held.Close() })
+
+	own.rewind(occupied)
+	got := own.next(t)
+	require.NotEqualf(t, occupied, got,
+		"the allocator handed out %d while this test was listening on it", occupied)
+
+	// And it moved on to one that works, rather than merely moving on.
+	lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(got)))
+	require.NoErrorf(t, err, "the port it moved on to, %d, is not bindable", got)
+	require.NoError(t, lis.Close())
+}
+
+// TestFreePort_TwoAllocatorsNeverShareAPort is the cross-process half of that,
+// standing in for a second copy of this binary with a second allocator: the
+// sentinel is what makes the two slices disjoint, and without it two copies
+// draw from one range and collide. That is not hypothetical — it is what a
+// second `go test` in a second terminal does, and it broke five of this
+// package's port assertions in six rounds before the sentinel existed.
+func TestFreePort_TwoAllocatorsNeverShareAPort(t *testing.T) {
+	t.Parallel()
+
+	first, second := &portAllocator{}, &portAllocator{}
+	t.Cleanup(first.release)
+	t.Cleanup(second.release)
+
+	seen := map[int]bool{}
+	for range 50 {
+		for _, a := range []*portAllocator{first, second} {
+			port := a.next(t)
+			assert.Falsef(t, seen[port], "two allocators both handed out %d", port)
+			seen[port] = true
+		}
 	}
 }
 

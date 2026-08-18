@@ -125,10 +125,19 @@ func TestOpen_ParsesUnderTheCrossProcessLock(t *testing.T) {
 	require.NoError(t, err)
 
 	opened := make(chan error, 1)
+	// running is closed on the way into Open, so the window below starts when
+	// the goroutine is actually running rather than when it was created. Without
+	// it, a goroutine the scheduler has not reached yet — every other parallel
+	// test in this package is competing for the same processors — reads exactly
+	// like an Open that is blocked on the lock, and the assertion below passes
+	// having watched nothing.
+	running := make(chan struct{})
 	go func() {
+		close(running)
 		_, err := registry.Open(path)
 		opened <- err
 	}()
+	<-running
 
 	select {
 	case err := <-opened:

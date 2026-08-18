@@ -148,6 +148,10 @@ const heapPayload = 64 << 20
 // assertHeapBounded is the assertion all three tools share.
 func assertHeapBounded(t *testing.T, s *heapSampler, payload int, what string) {
 	t.Helper()
+	// Here rather than in each caller: what makes the number below mean
+	// anything is that no other test was allocating while it was taken, and a
+	// caller is free to forget that. See requireSequential.
+	requireSequential(t)
 	assert.Lessf(t, s.growth(), int64(heapBound),
 		"live heap peaked %d bytes above baseline while %d bytes moved through %s: it is being held whole, not streamed",
 		s.growth(), payload, what)

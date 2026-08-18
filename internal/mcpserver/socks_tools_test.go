@@ -478,9 +478,13 @@ func TestSocks_HalfCloseLetsTheResponseComeBack(t *testing.T) {
 // server, and the user would see "address already in use" from a process that
 // no longer exists.
 func TestSocks_ServerCloseReleasesEveryListener(t *testing.T) {
-	// No t.Parallel, for the reason
-	// TestForward_StopClosesTheListenerAndDropsConnections gives: the assertion
-	// is on one particular ephemeral port, which nothing reserves.
+	// Sequential, for the reason
+	// TestForward_StopClosesTheListenerAndDropsConnections gives: both
+	// assertions below are about one particular loopback port at one particular
+	// instant, and a saturated machine answers both of them wrongly often
+	// enough to matter — about one run in four at `-parallel 24`, in the
+	// direction that reports a leak this server did not have.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
 		forwardAllowedHosts: []string{"localhost"},
@@ -507,9 +511,12 @@ func TestSocks_ServerCloseReleasesEveryListener(t *testing.T) {
 // fails it — and a client pointed at a proxy cannot tell that from every
 // destination being down.
 func TestSocks_RemovingTheSandboxClosesItsProxy(t *testing.T) {
-	// No t.Parallel, for the reason
-	// TestForward_StopClosesTheListenerAndDropsConnections gives: the assertion
-	// is on one particular ephemeral port, which nothing reserves.
+	// Sequential, for the reason
+	// TestForward_StopClosesTheListenerAndDropsConnections gives: what is
+	// asserted is the state of one loopback port, and the four tests around it
+	// that were tried in parallel all failed on that and not on anything this
+	// server did.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{
 		socksEnabled:        true,
 		forwardAllowedHosts: []string{"localhost"},
@@ -556,9 +563,9 @@ func TestSocks_RemovingTheSandboxClosesItsProxy(t *testing.T) {
 // speaks again and fail deterministically rather than statistically. Both were
 // checked by reverting the cancel they name.
 func TestSocks_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
-	// No t.Parallel, for the reason
-	// TestForward_NoGoroutineLeakAcrossManyConnections gives: goleak and the
-	// descriptor snapshot both count the whole process.
+	// For the reason TestForward_NoGoroutineLeakAcrossManyConnections gives:
+	// goleak and the descriptor snapshot both count the whole process.
+	requireSequential(t)
 	line := startLineServer(t)
 	// A destination that reads a request and then resets instead of answering,
 	// which is what a server crashing mid-request does to its socket.

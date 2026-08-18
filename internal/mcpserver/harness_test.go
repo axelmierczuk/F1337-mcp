@@ -32,6 +32,11 @@ import (
 type fakeHost struct {
 	mu sync.Mutex
 
+	// overlap records, across every host in one fixture, how many RPCs were in
+	// flight at once. It is what makes "the probes fan out" assertable on a
+	// count; see concurrencyGauge.
+	overlap *concurrencyGauge
+
 	// healthCalls and infoCalls count what reached this sandbox.
 	healthCalls int
 	infoCalls   int
@@ -78,6 +83,8 @@ func newFakeHost() *fakeHost {
 }
 
 func (f *fakeHost) Health(ctx context.Context, _ *sandboxdv1.HealthRequest, _ ...grpc.CallOption) (*sandboxdv1.HealthResponse, error) {
+	defer f.overlap.enter().leave()
+
 	f.mu.Lock()
 	f.healthCalls++
 	err, delay, st, msg := f.err, f.delay, f.status, f.message
@@ -95,6 +102,8 @@ func (f *fakeHost) Health(ctx context.Context, _ *sandboxdv1.HealthRequest, _ ..
 }
 
 func (f *fakeHost) GetHostInfo(ctx context.Context, in *sandboxdv1.GetHostInfoRequest, _ ...grpc.CallOption) (*sandboxdv1.GetHostInfoResponse, error) {
+	defer f.overlap.enter().leave()
+
 	f.mu.Lock()
 	f.infoCalls++
 	if in.GetIncludeToolchains() {
@@ -145,9 +154,62 @@ func (f *fakeHost) setErr(err error) {
 	f.err = err
 }
 
+// concurrencyGauge counts how many fake RPCs are in flight at once and
+// remembers the highest that number reached.
+//
+// It exists because "the probes run in parallel" was asserted on the clock —
+// elapsed under a bound loose enough for a CI runner — and a bound like that
+// cannot tell a fan-out from a loop: two 200ms deadlines in a row is 400ms, and
+// anything under three seconds passed. Removing the fan-out from the product
+// left the suite green. A peak of two is the same claim measured where it
+// happens, and no amount of load moves it.
+type concurrencyGauge struct {
+	mu   sync.Mutex
+	now  int
+	peak int
+}
+
+// enter records an RPC starting and returns the gauge, so a caller can write
+// `defer g.enter().leave()`. A nil gauge counts nothing, which is what the
+// fixtures that do not care get.
+func (g *concurrencyGauge) enter() *concurrencyGauge {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.now++
+	g.peak = max(g.peak, g.now)
+	return g
+}
+
+func (g *concurrencyGauge) leave() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.now--
+}
+
+// highest reports the most RPCs that were ever in flight together.
+func (g *concurrencyGauge) highest() int {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.peak
+}
+
 // fakeClients is a tools.Clients backed by per-sandbox fakeHosts.
 type fakeClients struct {
 	mu sync.Mutex
+
+	// overlap is shared by every host this pool hands out, because the property
+	// worth measuring — probes running together — is one across sandboxes, and
+	// a per-host count would read one however wide the fan-out was.
+	overlap *concurrencyGauge
 
 	hosts  map[string]*fakeHost
 	cached map[string]client.HealthStatus
@@ -158,6 +220,7 @@ type fakeClients struct {
 
 func newFakeClients() *fakeClients {
 	return &fakeClients{
+		overlap: &concurrencyGauge{},
 		hosts:   map[string]*fakeHost{},
 		cached:  map[string]client.HealthStatus{},
 		dialErr: map[string]error{},
@@ -170,6 +233,7 @@ func (c *fakeClients) host(name string) *fakeHost {
 	h, ok := c.hosts[name]
 	if !ok {
 		h = newFakeHost()
+		h.overlap = c.overlap
 		c.hosts[name] = h
 	}
 	return h
@@ -310,6 +374,39 @@ func newFixture(t *testing.T, opts fixtureOptions) *fixture {
 		server: server, session: session,
 		identity: "client:" + clientName,
 	}
+}
+
+// requireSequential fails a test that has called t.Parallel.
+//
+// Some tests in this package measure the *process* rather than their own
+// fixture: the live heap, the goroutine count, the open descriptors, the three
+// standard streams. A second test running alongside is then counted as part of
+// what they are measuring, and the answer they give is about the binary rather
+// than about the code under test.
+//
+// t.Chdir and t.Setenv make that mistake impossible by panicking, which is what
+// keeps the transfer tests and registry.TestConfigDir honest. Nothing did for
+// these, and a comment reading "no t.Parallel" is a note, not a check. Adding
+// t.Parallel to each of them and running the package three times:
+// TestWrite_LargeContentIsNotCopiedWhole passed all three, measuring a heap
+// every other test was allocating into and saying so to nobody, and
+// TestStdio_ExitsWhenStdinCloses did the same — while the three stdio tests
+// that did fail took a different dozen unrelated tests down with them each run,
+// because they had captured the process's stdout. Neither half of that is a
+// check. This is.
+//
+// t.Setenv is the check because it is the runtime's own: it panics with "test
+// using t.Setenv or t.Chdir can not use t.Parallel", and t.Parallel panics in
+// turn if it is reached afterwards, so neither order gets through. The recover
+// is only so the failure names the property instead of the mechanism.
+func requireSequential(t *testing.T) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("this test measures process-wide state, so it must not call t.Parallel(): %v", r)
+		}
+	}()
+	t.Setenv("FLEET_MCP_TEST_SEQUENTIAL", "1")
 }
 
 // testWriter routes server logs into the test log, so a failing test shows

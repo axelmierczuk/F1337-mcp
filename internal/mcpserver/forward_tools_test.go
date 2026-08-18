@@ -304,12 +304,25 @@ func TestForward_SurvivesUnrelatedToolCalls(t *testing.T) {
 	assert.Equal(t, "still here", httpGet(t, url), "the forward must outlive the call that opened it")
 }
 
+// TestForward_StopClosesTheListenerAndDropsConnections is sequential, and the
+// reason is not the one that reads first. The obvious worry is that the local port is ephemeral and another test could bind
+// it; giving the forward a port out of freePort's range removes that, and the
+// test still fails about one run in three at `-parallel 24`. What it fails on
+// is the two assertions below, and both of them are loopback TCP on a saturated
+// machine rather than anything this server did:
+//
+//   - `Dial` to a loopback port with no listener can return **success** on
+//     macOS under load. Caught in the act: lsof showed no LISTEN socket on the
+//     port at all, and the connection the dial returned was already CLOSED.
+//   - `Listen` on that same port can fail with "address already in use" while a
+//     connection to it is still half-closed, which on Darwin SO_REUSEADDR does
+//     not cover.
+//
+// Neither shows up when this test has the machine to itself, which is what
+// sequential buys. A parallel version does not fail here either — it fails on a
+// loaded runner, once, saying the listener was leaked when it was not.
 func TestForward_StopClosesTheListenerAndDropsConnections(t *testing.T) {
-	// No t.Parallel. What is asserted is the state of one particular loopback
-	// port, and that port came from the kernel's ephemeral range — freePort's
-	// range is reserved against this, but a port the *product* allocated is not.
-	// A concurrent test binding it would answer this test's question wrongly, in
-	// whichever direction the assertion runs.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
 
@@ -382,9 +395,14 @@ func TestForward_TheStopCallItSuggestsActuallyStopsIt(t *testing.T) {
 // accepts a connection and drops it — the one outcome a caller cannot diagnose,
 // and the reason opening a forward preflights at all.
 func TestForward_RemovingTheSandboxClosesItsForwards(t *testing.T) {
-	// No t.Parallel, for the reason
-	// TestForward_StopClosesTheListenerAndDropsConnections gives: the assertion
-	// is on one particular ephemeral port, which nothing reserves.
+	// Sequential, for the reason
+	// TestForward_StopClosesTheListenerAndDropsConnections gives. Polling for
+	// the port rather than sampling it once looks like enough and is not: it was
+	// run parallel over a port of its own for forty-two executions at
+	// `-parallel 24` and failed one of them, and the failure was the *forward*
+	// refusing to open — "could not listen on 127.0.0.1:22402 ... address
+	// already in use", on a port this process had just proved free.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "about to go")
 
@@ -416,9 +434,14 @@ func TestForward_RemovingTheSandboxClosesItsForwards(t *testing.T) {
 // fleet_remove is running. The window is small, which is exactly why it would
 // be found by a user and not by a test that only checks the end state.
 func TestForward_RemovingTheSandboxClosesForwardsBeforeTheChannel(t *testing.T) {
-	// No t.Parallel, for the reason
-	// TestForward_StopClosesTheListenerAndDropsConnections gives: the assertion
-	// is on one particular ephemeral port, which nothing reserves.
+	// Sequential, for the reason
+	// TestForward_StopClosesTheListenerAndDropsConnections gives: the question
+	// below is whether one particular port can be bound at one particular
+	// instant, and on a loaded machine that question has a wrong answer
+	// available to it. Measured: about one run in three at `-parallel 24`,
+	// every time with "address already in use" against a port whose listener
+	// had in fact been closed.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "ordering")
 
@@ -427,10 +450,14 @@ func TestForward_RemovingTheSandboxClosesForwardsBeforeTheChannel(t *testing.T) 
 
 	// Asked at the moment the channel is dropped: is the port the forward was
 	// holding already free? It can only be if the listener was closed first.
-	var listenerClosedFirst bool
+	var (
+		listenerClosedFirst bool
+		bindErr             error
+	)
 	f.clients.onRemove = func(string) {
 		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(out.LocalPort)))
 		if err != nil {
+			bindErr = err
 			return
 		}
 		_ = lis.Close()
@@ -438,8 +465,9 @@ func TestForward_RemovingTheSandboxClosesForwardsBeforeTheChannel(t *testing.T) 
 	}
 
 	liveOK[tools.RemoveResult](f, "fleet_remove", map[string]any{"name": liveSandboxName})
-	assert.True(t, listenerClosedFirst,
-		"the forward's listener was still accepting when its channel was dropped, so a connection arriving then would be accepted onto a dead channel")
+	assert.Truef(t, listenerClosedFirst,
+		"the forward's listener was still accepting when its channel was dropped, so a connection arriving then would be accepted onto a dead channel (bind said: %v)",
+		bindErr)
 }
 
 func TestForward_StopWithNoSuchForwardListsWhatIsOpen(t *testing.T) {
@@ -746,11 +774,12 @@ func auditRecords(t *testing.T, path string) []policy.Record {
 // construction — see TestForward_ReleasesEveryConnectionWhileItStaysOpen, which
 // is the assertion that can see one.
 func TestForward_NoGoroutineLeakAcrossManyConnections(t *testing.T) {
-	// No t.Parallel. goleak counts every goroutine in the process and the
-	// descriptor snapshot counts every open file in it, so anything else running
-	// at the same time is counted as this test's leak. Sequential tests all run
-	// before any parallel one starts, which is what keeps this measurement of the
-	// whole process a measurement of one thing.
+	// goleak counts every goroutine in the process and the descriptor snapshot
+	// counts every open file in it, so anything else running at the same time is
+	// counted as this test's leak. Sequential tests all run before any parallel
+	// one starts, which is what keeps this measurement of the whole process a
+	// measurement of one thing.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
 
@@ -804,9 +833,9 @@ func TestForward_NoGoroutineLeakAcrossManyConnections(t *testing.T) {
 // still stops working after a few thousand connections — just with a different
 // error message.
 func TestForward_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
-	// No t.Parallel, for the reason
-	// TestForward_NoGoroutineLeakAcrossManyConnections gives: goleak and the
-	// descriptor snapshot both count the whole process.
+	// For the reason TestForward_NoGoroutineLeakAcrossManyConnections gives:
+	// goleak and the descriptor snapshot both count the whole process.
+	requireSequential(t)
 	f := newLiveFixture(t, liveAgentOptions{})
 	echo := startEchoServer(t)
 	// A server that answers nothing and resets the connection instead, which is
