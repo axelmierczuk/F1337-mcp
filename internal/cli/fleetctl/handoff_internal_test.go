@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -150,4 +151,60 @@ func TestTheHelperIsStillLookedForWhenThisProcessCannotNameItself(t *testing.T) 
 		func(string) (string, error) { return elsewhere, nil })
 	require.NoError(t, err)
 	require.Equal(t, elsewhere, got)
+}
+
+// TestTheHelperBesideFleetctlIsPreferredToOneOnPath pins the order, which
+// neither of the two tests above does.
+//
+// Each of them arranges for exactly one of the two places to answer — one
+// passes a PATH that finds nothing, the other a directory that holds nothing —
+// so both stay green with the order reversed. Only a case with a helper in both
+// places says which is chosen.
+//
+// And the order is the part that matters. "Beside fleetctl" is the only one of
+// the two that came out of the same archive, the same `make build` or the same
+// `go install` as the binary doing the looking; PATH is whatever the machine
+// has. Consulting PATH first would let a fleet-tui left behind by an older
+// install quietly take over from the one this fleetctl shipped with, and the
+// operator would see a view built by a different version of this command tree
+// with nothing on screen to say so.
+func TestTheHelperBesideFleetctlIsPreferredToOneOnPath(t *testing.T) {
+	t.Parallel()
+
+	installed := t.TempDir()
+	want := writeHelper(t, installed)
+	self := filepath.Join(installed, exeName("fleetctl"))
+	stale := writeHelper(t, t.TempDir())
+
+	got, err := findHelperVia(
+		func() (string, error) { return self, nil },
+		func(string) (string, error) { return stale, nil })
+	require.NoError(t, err)
+	require.Equal(t, want, got,
+		"a helper on PATH was chosen over the one beside fleetctl, so an older install on PATH wins over the one this binary shipped with")
+}
+
+// TestAFileWithoutTheExecutableBitIsNotTheHelper.
+//
+// The sibling of the directory case, and the other half of what
+// [isExecutableFile] claims: something that exists where the helper should be
+// is not the helper. A half-extracted archive or an interrupted download leaves
+// exactly this — a file of the right name that cannot be run — and answering
+// "found" for it replaces a refusal naming the binary and the `go install` line
+// that produces it with `permission denied` from the operating system.
+//
+// Not on Windows, which has no such bit: there executability is the extension,
+// which exeName has already applied and the directory case already covers.
+func TestAFileWithoutTheExecutableBitIsNotTheHelper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows decides executability by extension, not by a mode bit; see isExecutableFile")
+	}
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, exeName(helperName)), []byte("#!/bin/sh\n"), 0o644))
+	self := filepath.Join(dir, exeName("fleetctl"))
+
+	_, err := findHelperVia(func() (string, error) { return self, nil }, noPath)
+	require.ErrorIs(t, err, errNoHelper)
 }

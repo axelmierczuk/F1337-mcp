@@ -102,6 +102,7 @@ Everything except one scenario.
 | `TestTUIDrawsTheFleetAndGivesTheTerminalBack` | `fleetctl tui` on a real pseudo-terminal: both sandboxes and a supervised process drawn, one machine going away re-probed and drawn unreachable without blanking the view, and the terminal put back on quit. |
 | `TestTUIGivesTheTerminalBackOnSIGTERM` | The same restoration on the exit path nobody chooses, reaching the view through the pid the operator's shell knows about. |
 | `TestTUIWithoutATerminalSaysWhatToUseInstead` | A full-screen command whose stdout is a pipe is refused, naming the scriptable view. |
+| `TestTheHandOffKeepsTheCommandLineAndTheProcess` | `fleetctl tui` reaches its helper as an exec — same pid the shell was given, the helper's own exit status — carrying the operator's flags verbatim. |
 | `TestNoCommandInterrogatesTheTerminalAtStartup` | On a pseudo-terminal that answers nothing, `fleetctl version` and `fleetctl list` write no background-colour query and no cursor-position request, and a line typed while they start is still in the input queue afterwards (#73). |
 
 ## What needs a container

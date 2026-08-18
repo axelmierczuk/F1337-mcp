@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -386,4 +387,193 @@ func stripEscapes(s string) string {
 		i++
 	}
 	return b.String()
+}
+
+// -------------------------------------------------- the hand-off itself
+
+// handOffScript drives `fleetctl tui` the way the operator's shell does, and
+// records the pid that shell is given.
+//
+// Backgrounded and waited on rather than run in the foreground, because `$!` is
+// the only way to ask a shell what pid it thinks this command has — and that
+// pid against the one the helper reports is the whole exec assertion.
+const handOffScript = `
+"$FLEET_CTL" tui $FLEET_HANDOFF_ARGS &
+echo $! > "$FLEET_HANDOFF_DIR/shell-pid"
+wait $!
+echo $? > "$FLEET_HANDOFF_DIR/status"
+`
+
+// handOffArgs are the flags the operator types after the subcommand, and every
+// one of them is a flag whose value the far side cannot recover on its own.
+//
+// --refresh and --timeout are durations the helper has no way to guess, and
+// --registry names the file the whole view is read from. They are given values
+// nothing else in this suite uses, so a match cannot be a coincidence.
+var handOffArgs = []string{"--refresh", "7s", "--timeout", "11s", "--registry", "/nowhere/registry.yaml"}
+
+// TestTheHandOffKeepsTheCommandLineAndTheProcess is the two promises
+// `fleetctl tui` makes about handing over, neither of which anything else here
+// observes.
+//
+// **The argv reaches the helper unchanged.** This is the answer #44 is owed.
+// `tui` takes --ca-dir, --cert and --key — the operator's credential paths —
+// along with --registry, --timeout and --refresh, and the reason there is no
+// second place to misconfigure a fleet is that these are forwarded verbatim
+// rather than re-serialised from parsed flags. Dropping every one of them on
+// the way across passed the whole suite, unit and end-to-end, before this
+// scenario existed: the view came up on the *default* config directory and
+// registry and drew a plausible screen, which is precisely the silent
+// divergence that argument promises cannot happen.
+//
+// **The hand-off is an exec, not a child.** The pid the shell recorded has to
+// be the process that ends up drawing, or a signal sent to it reaches a wrapper
+// and leaves the view holding a terminal nothing will put back — and the exit
+// status the shell reads has to be the view's own.
+//
+// The helper is a stub rather than the real fleet-tui because the subject is
+// the hand-off. A stub is the only thing that can report what argv it was
+// handed and which pid it was handed it as; the real binary is driven by every
+// other scenario in this file.
+func TestTheHandOffKeepsTheCommandLineAndTheProcess(t *testing.T) {
+	requireSupportedHost(t)
+
+	record := t.TempDir()
+	install := t.TempDir()
+	installFleetctl(t, install)
+	installStubHelper(t, install)
+
+	term, err := pty.New()
+	if err != nil {
+		t.Fatalf("allocate a pseudo-terminal: %v", err)
+	}
+	if err := term.Resize(80, 24); err != nil {
+		t.Fatalf("size the pseudo-terminal: %v", err)
+	}
+	t.Cleanup(func() { _ = term.Close() })
+
+	cmd := term.Command("/bin/sh", "-c", handOffScript)
+	cmd.Env = envWith(
+		envEntry("FLEET_CTL", filepath.Join(install, exeName("fleetctl"))),
+		envEntry("FLEET_HANDOFF_DIR", record),
+		envEntry("FLEET_HANDOFF_ARGS", strings.Join(handOffArgs, " ")),
+		envEntry("FLEET_CONFIG_DIR", record),
+		envEntry("PATH", os.Getenv("PATH")),
+		envEntry("HOME", record),
+		envEntry("TMPDIR", os.TempDir()),
+		envEntry("TERM", operatorTerm),
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start `fleetctl tui` on a pseudo-terminal: %v", err)
+	}
+	// Drained rather than read: nothing is asserted on the screen here, but a
+	// terminal nobody reads fills up and stops the writer.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := term.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+	})
+
+	// On the status file having *content*, not on it existing: `echo $? >`
+	// creates it and then writes it, and a read between the two would compare
+	// against an empty string and call the mismatch a failure of the product.
+	waitFor(t, 30*time.Second, "the hand-off to complete", func() (bool, string) {
+		raw, err := os.ReadFile(filepath.Join(record, "status"))
+		return err == nil && len(bytes.TrimSpace(raw)) > 0,
+			"the shell has not finished waiting on `fleetctl tui`"
+	})
+
+	// Unchanged, and compared as one string because that is what was forwarded:
+	// a scenario that checked the flags were "present" would pass for an argv
+	// that had been taken apart and put back together in a different order.
+	want := strings.Join(append([]string{"tui"}, handOffArgs...), " ")
+	if got := recorded(t, record, "argv"); got != want {
+		t.Errorf("the helper was handed `%s`, but the operator typed `fleetctl %s`;\n"+
+			"the command line is forwarded unchanged so that there is one implementation of every flag "+
+			"— including the credential paths — rather than a second one on the far side (#44)",
+			got, want)
+	}
+
+	// One process, and it is the one the operator's shell will signal.
+	shellPID, helperPID := recorded(t, record, "shell-pid"), recorded(t, record, "helper-pid")
+	if shellPID != helperPID {
+		t.Errorf("the shell was given pid %s and the helper ran as pid %s: the hand-off forked instead of exec'ing.\n"+
+			"A wrapper between the operator's shell and the program holding the terminal is one more place "+
+			"`terminal restored on every exit path` can be broken", shellPID, helperPID)
+	}
+
+	// And the status the shell reads is the helper's own, not a wrapper's
+	// summary of it.
+	if got := recorded(t, record, "status"); got != stubHelperStatus {
+		t.Errorf("the shell read exit status %s; the helper exited %s", got, stubHelperStatus)
+	}
+}
+
+// stubHelperStatus is what the stub helper exits with: an unremarkable number
+// that nothing else in this suite produces, so reading it back means it came
+// from the helper rather than from something failing on the way.
+const stubHelperStatus = "17"
+
+// installFleetctl puts the real fleetctl into dir under its own name, so that
+// "the helper beside fleetctl" resolves to dir and not to the build directory
+// where the real fleet-tui lives.
+//
+// Linked rather than copied where the filesystem allows it: this is a 20 MiB
+// binary and the link is the same file by another name, which is all the lookup
+// looks at.
+func installFleetctl(t *testing.T, dir string) {
+	t.Helper()
+
+	path := filepath.Join(dir, exeName("fleetctl"))
+	if err := os.Link(bins.fleetctl, path); err == nil {
+		return
+	}
+	source, err := os.ReadFile(bins.fleetctl)
+	if err != nil {
+		t.Fatalf("read fleetctl: %v", err)
+	}
+	if err := os.WriteFile(path, source, 0o755); err != nil { //nolint:gosec // a copy of a binary this test just built
+		t.Fatalf("install fleetctl into %s: %v", dir, err)
+	}
+}
+
+// installStubHelper writes a fleet-tui that reports what it was handed.
+//
+// It records its own pid and argv and exits with a known status, which is the
+// whole of what this scenario needs to know about the far side.
+func installStubHelper(t *testing.T, dir string) {
+	t.Helper()
+
+	script := "#!/bin/sh\n" +
+		`printf '%s' "$$" > "$FLEET_HANDOFF_DIR/helper-pid"` + "\n" +
+		`printf '%s' "$*" > "$FLEET_HANDOFF_DIR/argv"` + "\n" +
+		"exit " + stubHelperStatus + "\n"
+	if err := os.WriteFile(filepath.Join(dir, exeName("fleet-tui")), []byte(script), 0o755); err != nil { //nolint:gosec // a stub standing in for an installed binary
+		t.Fatalf("install the stub helper into %s: %v", dir, err)
+	}
+}
+
+// recorded reads one of the files the shell or the helper wrote.
+func recorded(t *testing.T, dir, name string) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("the hand-off recorded no %s: %v", name, err)
+	}
+	return strings.TrimSpace(string(raw))
 }

@@ -86,6 +86,21 @@ fleetctl list          # one listing
 fleetctl tui           # or watch the whole fleet, its processes and their logs
 ```
 
+**4. Point your agent at the MCP server:**
+
+```json
+{
+  "mcpServers": {
+    "fleet": {
+      "command": "fleet-mcp",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Done. `fleet_list` should show `build-box`.
+
 ### Why `fleet-tui` is its own binary
 
 `fleetctl tui` is one command, and it stays one command — this is only about
@@ -104,22 +119,6 @@ So the view lives in `fleet-tui`, and `fleetctl tui` hands it the terminal with
 its command line unchanged. There is nothing extra to configure: `fleet-tui` is
 `fleetctl`'s own command tree with the view linked in, reading the same config
 directory, the same CA and the same registry.
-
-
-**4. Point your agent at the MCP server:**
-
-```json
-{
-  "mcpServers": {
-    "fleet": {
-      "command": "fleet-mcp",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-Done. `fleet_list` should show `build-box`.
 
 ## Tools
 

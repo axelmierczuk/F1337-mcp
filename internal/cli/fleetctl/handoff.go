@@ -64,6 +64,16 @@ func handOff(args []string) error {
 // place to get a fleet's configuration wrong, and a variable that decides which
 // binary a credential-holding CLI execs would be exactly that, with a worse
 // failure than a misconfiguration.
+//
+// The order is the guarantee, and it is asserted: beside fleetctl is the only
+// one of the two places that came out of the same archive, `make build` or
+// `go install` as the binary doing the looking, so it answers first. What is
+// left is a helper of a *different* version found on PATH — or beside a
+// fleetctl that was upgraded on its own — being exec'd without a word. Nothing
+// here detects that, and nothing cheap can: the version a binary reports is
+// only knowable by running it, and running it is what we are deciding whether
+// to do. A handshake through the environment would only ever catch a helper
+// newer than the check, which is not the direction that hurts.
 func findHelper() (string, error) { return findHelperVia(os.Executable, exec.LookPath) }
 
 // findHelperVia is [findHelper] with its two views of the outside world passed

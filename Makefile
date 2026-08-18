@@ -274,7 +274,7 @@ proto-check: proto
 	@git diff --exit-code -- gen/ \
 		|| { echo "gen/ is stale; run 'make proto' and commit the result"; exit 1; }
 
-## build: build all three binaries for the host platform
+## build: build every binary for the host platform
 .PHONY: build
 build:
 	@mkdir -p $(BIN_DIR)

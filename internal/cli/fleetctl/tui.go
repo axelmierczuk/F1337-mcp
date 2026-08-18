@@ -170,6 +170,13 @@ func newTUICommandWith(out io.Writer, view View, f *tuiFlags) *cobra.Command {
 			// Before the registry is opened and before a single agent is
 			// dialled: this binary does not draw, so everything below would be
 			// work done twice. See [handOff] — on Unix it does not return.
+			//
+			// os.Args rather than what cobra parsed, because the whole point is
+			// that the command line is not rebuilt; see [handOff]. That is
+			// exact for the two mains that reach here, which both pass
+			// os.Args[1:], and unreachable for a caller that passes something
+			// else, since every one of those writes to a buffer and is refused
+			// above.
 			if view == nil {
 				err := handOff(os.Args[1:])
 				// Windows has no exec, so there the helper is a child and its

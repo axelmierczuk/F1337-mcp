@@ -3,7 +3,9 @@ package fleetctl_test
 import (
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -54,37 +56,62 @@ var terminalUIPackages = []string{
 // asking the terminal about itself. Asserted rather than skipped, because a
 // change that stopped it linking the view would be a `fleetctl tui` that no
 // longer draws — and every other assertion here would still be green.
+//
+// The commands are enumerated rather than listed. A rule that named the four
+// binaries that exist today would be a rule the fifth is not subject to, and
+// the fifth is exactly where this comes back: nobody adding a command thinks
+// they are adding a terminal query, which is how the first one arrived.
 func TestOnlyTheViewBinaryLinksATerminalUI(t *testing.T) {
 	t.Parallel()
 
 	root := moduleRoot(t)
-	for _, tc := range []struct {
-		command string
-		links   bool
-	}{
-		{"fleetctl", false},
-		{"fleet-mcp", false},
-		{"fleet-agent", false},
-		{"fleet-tui", true},
-	} {
-		t.Run(tc.command, func(t *testing.T) {
+	commands := commandsOf(t, root)
+	require.Contains(t, commands, viewCommand,
+		"the one binary allowed to link a terminal UI is not among the commands, so the exception below asserts nothing")
+
+	for _, command := range commands {
+		t.Run(command, func(t *testing.T) {
 			t.Parallel()
 
-			deps := dependenciesOf(t, root, "./cmd/"+tc.command)
+			deps := dependenciesOf(t, root, "./cmd/"+command)
 			for _, pkg := range terminalUIPackages {
-				if tc.links {
-					require.Containsf(t, deps, pkg,
-						"%s no longer links %s, so `fleetctl tui` has nothing to hand the terminal to", tc.command, pkg)
+				links := slices.Contains(deps, pkg)
+				if command == viewCommand {
+					require.Truef(t, links,
+						"%s no longer links %s, so `fleetctl tui` has nothing to hand the terminal to", command, pkg)
 					continue
 				}
-				require.NotContainsf(t, deps, pkg,
+				// Asserted with the package named rather than with the
+				// dependency list compared, because the list is four hundred
+				// packages long and a failure has to be readable in a CI log.
+				require.Falsef(t, links,
 					"%s links %s. Its package init queries the terminal and reads for five seconds "+
 						"waiting for an answer, in every process, whatever subcommand was typed — which is #73. "+
-						"Whatever needs it belongs behind the seam in internal/cli/fleetctl/tui.go, in cmd/fleet-tui",
-					tc.command, pkg)
+						"Whatever needs it belongs behind the seam in internal/cli/fleetctl/tui.go, in cmd/%s",
+					command, pkg, viewCommand)
 			}
 		})
 	}
+}
+
+// viewCommand is the one command that may link a terminal UI.
+const viewCommand = "fleet-tui"
+
+// commandsOf is every command in this module, by the name its binary has.
+func commandsOf(t *testing.T, moduleDir string) []string {
+	t.Helper()
+
+	cmd := exec.Command("go", "list", "./cmd/...")
+	cmd.Dir = moduleDir
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "go list ./cmd/...: %s", out)
+
+	var commands []string
+	for _, pkg := range strings.Fields(string(out)) {
+		commands = append(commands, path.Base(pkg))
+	}
+	require.NotEmpty(t, commands, "go list ./cmd/... named no commands, so this test checked nothing")
+	return commands
 }
 
 // dependenciesOf is every package the named command links, transitively.

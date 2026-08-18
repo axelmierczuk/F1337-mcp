@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-// bins are the three binaries under test, built once by TestMain.
+// bins are the binaries under test, built once by TestMain.
 var bins binaries
 
 // containerScenarioRan is set by the container scenario when it has actually
@@ -69,6 +69,9 @@ type binaries struct {
 	agent    string
 	mcp      string
 	fleetctl string
+	// tui is what `fleetctl tui` hands the terminal to. No scenario executes
+	// it directly; it is here so that its absence is a build failure.
+	tui string
 	// helpers is the workload the scenarios run on a sandbox: a dev server, a
 	// process that keeps talking, a process tree. See testdata/helpers.
 	helpers string
@@ -133,7 +136,7 @@ func runMain(m *testing.M) (int, error) {
 	return code, nil
 }
 
-// buildBinaries compiles the three commands into dir.
+// buildBinaries compiles every command into dir.
 //
 // The binaries are built rather than run through `go run` so that a test can
 // start, kill and restart a daemon without a compile step in the middle of the
@@ -164,9 +167,14 @@ func buildBinaries(dir string) (binaries, error) {
 		agent:    filepath.Join(dir, exeName("fleet-agent")),
 		mcp:      filepath.Join(dir, exeName("fleet-mcp")),
 		fleetctl: filepath.Join(dir, exeName("fleetctl")),
-		helpers:  filepath.Join(dir, exeName("helpers")),
+		// tui is never run by name: `fleetctl tui` finds it beside fleetctl,
+		// which is what this directory arranges. Named here so that a build
+		// which stopped producing it is reported now, rather than as a `tui`
+		// scenario failing later with a message about a missing helper.
+		tui:     filepath.Join(dir, exeName("fleet-tui")),
+		helpers: filepath.Join(dir, exeName("helpers")),
 	}
-	for _, path := range []string{b.agent, b.mcp, b.fleetctl, b.helpers} {
+	for _, path := range []string{b.agent, b.mcp, b.fleetctl, b.tui, b.helpers} {
 		if _, err := os.Stat(path); err != nil {
 			return binaries{}, fmt.Errorf("built binary missing: %w", err)
 		}
