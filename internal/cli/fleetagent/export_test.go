@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/cli"
 	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
@@ -94,15 +96,178 @@ func ServiceNeedsPasswordForTest(m Mechanism, goos, account string) bool {
 // a built-in identity that cannot see a toolchain, and an account the SCM will
 // refuse to log on. Which of them applies is a rule, and a rule checked only on
 // a Windows runner is one two thirds of CI never sees.
-func MechanismNotesForTest(m Mechanism, goos, account string) []string {
-	return mechanismNotes(m, goos, account)
+func MechanismNotesForTest(m Mechanism, goos, account string, logonVerified bool) []string {
+	return mechanismNotes(m, goos, account, logonVerified)
 }
 
-// DryRunNotesForTest exposes what a dry run says about the step the plan itself
-// cannot show — the password prompt — with the platform supplied rather than
+// DryRunNotesForTest exposes what a dry run says about the steps the plan
+// itself cannot show — the two prompts — with the platform supplied rather than
 // read.
-func DryRunNotesForTest(m Mechanism, goos, account string) []string {
-	return dryRunNotes(m, goos, account)
+func DryRunNotesForTest(m Mechanism, goos, account string, choice AccountChoiceForTest) []string {
+	return dryRunNotes(m, goos, account, accountChoice(choice))
+}
+
+// AccountChoiceForTest is where install gets the account it registers.
+type AccountChoiceForTest int
+
+// The four answers, named so a test compares against the same values the
+// command switches on.
+const (
+	AccountFromFlagForTest    = AccountChoiceForTest(accountFromFlag)
+	AccountFromDefaultForTest = AccountChoiceForTest(accountFromDefault)
+	AccountFromPromptForTest  = AccountChoiceForTest(accountFromPrompt)
+	AccountUnaskableForTest   = AccountChoiceForTest(accountUnaskable)
+)
+
+// ResolveAccountChoiceForTest exposes #84's central rule — whether `install`
+// stops to ask which account it is about to register — with the platform
+// supplied rather than read.
+//
+// It decides whether an operator on a workstation is asked for a credential
+// they do not need, and whether a script's install hangs on a prompt or
+// refuses. Both are answers about the rule, and a rule only the Windows runner
+// can reach is a rule only that runner checks.
+func ResolveAccountChoiceForTest(requested Mechanism, goos, userFlag string, passwordStdin bool) AccountChoiceForTest {
+	return AccountChoiceForTest(resolveAccountChoice(requested, goos, userFlag, passwordStdin))
+}
+
+// PromptServiceAccountForTest drives the account prompt against a supplied
+// stream, which is the only way the prompt itself — as opposed to the rule that
+// fires it — is reachable off Windows.
+func PromptServiceAccountForTest(in io.Reader, out io.Writer, suggestion string) (string, error) {
+	return promptServiceAccount(in, out, suggestion)
+}
+
+// ReadInputLineForTest exposes the one-line read both prompts share.
+//
+// The two properties it has to keep are invisible from either caller: it must
+// consume exactly one line, or the account prompt eats the password typed after
+// it; and end-of-stream must not look like an empty line, or a script that
+// redirected stdin from nowhere gets the silent fallback to the invoking
+// account that #84 exists to remove.
+func ReadInputLineForTest(in io.Reader) (string, error) { return readInputLine(in) }
+
+// Logon verdicts, named so a test compares against the same values the command
+// switches on.
+const (
+	LogonOKForTest            = int(logonOK)
+	LogonBadCredentialForTest = int(logonBadCredential)
+	LogonRightMissingForTest  = int(logonRightMissing)
+	LogonUnverifiableForTest  = int(logonUnverifiable)
+	LogonUnknownForTest       = int(logonUnknown)
+)
+
+// ClassifyServiceLogonForTest exposes what install makes of the answer
+// LogonUser gave.
+//
+// The classification is a rule over Win32 status codes, and the two codes that
+// decide a refusal — 1326 and 1385 — are the difference between an install that
+// stops and one that produces a service failing every start. No runner here can
+// call LogonUser; every runner can check the rule.
+func ClassifyServiceLogonForTest(err error) int { return int(classifyServiceLogon(err)) }
+
+// ErrLogonUnverifiableForTest is what a platform with no SCM answers.
+var ErrLogonUnverifiableForTest = errLogonUnverifiable
+
+// SplitServiceAccountForTest exposes the split LogonUser needs, which has to
+// agree with the spelling CreateService is handed or the check validates a
+// different account from the one being registered.
+func SplitServiceAccountForTest(name string) (account, domain string) {
+	return splitServiceAccount(name)
+}
+
+// ServiceLogonRightNoteForTest and ServiceLogonRightRefusalForTest are the two
+// renderings of #79's SeServiceLogonRight text, exposed so a test can hold them
+// to being the same text.
+func ServiceLogonRightNoteForTest(account string) []string { return serviceLogonRightNote(account) }
+
+func ServiceLogonRightRefusalForTest(account string) string {
+	return serviceLogonRightRefusal(account)
+}
+
+// CredentialLoopForTest drives the read-and-check sequence `install` performs
+// before it touches the host, with both platform halves supplied.
+//
+// Neither half is reachable from any runner here: readPassword needs a Windows
+// console, and the check needs a real LSA, a real account and that account's
+// real password. What sits between them is where every decision is — which
+// verdict refuses and which proceeds, whether a mistyped password is retyped or
+// the command ends, and what the operator is told in between — and without this
+// it is reachable from nothing.
+func CredentialLoopForTest(out io.Writer, account string, attempts int, fromStdin bool, read func() (string, error), verify func(string) error) (password string, verified bool, err error) {
+	p := cli.NewPrinter(out)
+	password, verified, err = credentialLoop(p, account, attempts, fromStdin, read, verify)
+	if err == nil {
+		err = p.Err()
+	}
+	return password, verified, err
+}
+
+// InteractivePasswordAttemptsForTest is how many times an operator typing a
+// password blind gets to type it again, so a test asserts against the same
+// number the command uses.
+const InteractivePasswordAttemptsForTest = interactivePasswordAttempts
+
+// PasswordAttemptsForTest exposes the rule that decides it, which is also the
+// rule that keeps --password-stdin from turning into a prompt.
+func PasswordAttemptsForTest(fromStdin bool) int { return passwordAttempts(fromStdin) }
+
+// SCMConfigFieldsForTest is every string the Windows service definition carries
+// *except* the password field, so a test can assert where the password is not.
+//
+// It includes the Option values, which is where the rendered systemd unit and
+// launchd plist live, so "the password is not in the service definition" is a
+// claim about the whole definition rather than about the fields somebody
+// remembered to look at.
+func SCMConfigFieldsForTest(params UnitParams, goos, password string) []string {
+	cfg := scmServiceConfig(params, goos, password)
+	fields := []string{cfg.Name, cfg.DisplayName, cfg.Description, cfg.Executable, cfg.UserName}
+	fields = append(fields, cfg.Arguments...)
+	for key, value := range cfg.Option {
+		if key == "Password" {
+			continue
+		}
+		fields = append(fields, key, fmt.Sprint(value))
+	}
+	return fields
+}
+
+// PinServiceLogonForTest replaces the Windows logon check with a supplied
+// answer, and records the account and password it was asked about.
+//
+// Nothing on any runner can perform a real service logon: it needs a real LSA,
+// a real account, and that account's real password, none of which CI has or
+// should have. Without this seam every decision built on the answer — refuse a
+// bad credential, refuse a missing right, retry a mistyped password, stop
+// warning about a right just proved present — is reachable by nothing, which is
+// the state three audit rounds found the rest of `install` in.
+func PinServiceLogonForTest(answer error) (asked func() (account, password string, calls int), restore func()) {
+	previous := verifyServiceLogon
+	var gotAccount, gotPassword string
+	count := 0
+	verifyServiceLogon = func(account, password string) error {
+		gotAccount, gotPassword, count = account, password, count+1
+		return answer
+	}
+	return func() (string, string, int) { return gotAccount, gotPassword, count },
+		func() { verifyServiceLogon = previous }
+}
+
+// PinServiceLogonSequenceForTest is the same seam answering differently each
+// time it is called, which is the only way the retry is observable: "a mistyped
+// password is retyped at the prompt" is a claim about the second attempt.
+func PinServiceLogonSequenceForTest(answers []error) (passwords func() []string, restore func()) {
+	previous := verifyServiceLogon
+	seen := &[]string{}
+	verifyServiceLogon = func(_, password string) error {
+		*seen = append(*seen, password)
+		if i := len(*seen) - 1; i < len(answers) {
+			return answers[i]
+		}
+		return nil
+	}
+	return func() []string { return append([]string(nil), *seen...) },
+		func() { verifyServiceLogon = previous }
 }
 
 // SCMAccountForTest is the account `install` hands the service manager, taken

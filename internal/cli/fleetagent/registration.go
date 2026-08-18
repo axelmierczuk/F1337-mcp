@@ -103,12 +103,23 @@ func scmServiceConfig(params UnitParams, goos, password string) *service.Config 
 // registration is another thing no runner has, and `install` warning about one
 // before it changes anything is the difference between an operator stopping and
 // an operator ending up with two daemons against one state directory.
+//
+// verifyServiceLogon is the newest of them and the same shape: it asks Windows
+// whether an account can be logged on as a service with a given password, which
+// needs a real LSA, a real account, and that account's real password. No runner
+// here has any of the three, and CI cannot have them — which would leave the
+// decisions built on the answer (refuse a credential the SCM will reject,
+// refuse an account without SeServiceLogonRight, retry a mistyped password,
+// stop warning about a right that was just proven present) reachable by
+// nothing. Those decisions are the whole of #84's "validate before
+// registering"; the syscall behind them is one line.
 var (
 	controlRegistration    = newControlRegistration
 	installedMechanisms    = hostInstalledMechanisms
 	requireElevated        = requireElevation
 	newRegistration        = hostRegistration
 	legacyServiceInstalled = hostLegacyServiceInstalled
+	verifyServiceLogon     = hostVerifyServiceLogon
 )
 
 // newControlRegistration addresses an already-installed registration by name,
