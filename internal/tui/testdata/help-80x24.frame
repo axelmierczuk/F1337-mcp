@@ -1,0 +1,24 @@
+ fleetctl tui      4 sandboxes  1 serving  1 degraded  1 unreachable  1 unknown 
+┌ keys ─────────────────────────────────────────────────────── any key closes ─┐
+│tab / shift+tab  move between panes                                           │
+│up/down, j/k     move within the focused pane                                 │
+│pgup / pgdn      move a page                                                  │
+│g / G            first / last                                                 │
+│enter            focus the selected sandbox and read its processes            │
+│r                restart the selected process; start it, if it has exited     │
+│x                stop the selected process (SIGTERM, then SIGKILL)            │
+│S                send a specific signal to the selected process               │
+│s                not in this build; see fleetctl shell (#43)                  │
+│f                pause or resume log following                                │
+│t                probe the focused sandbox for toolchains (slower)            │
+│ctrl+r           refresh everything now                                       │
+│? / q            this help / quit                                             │
+│                                                                              │
+│Every action that changes a sandbox asks first, naming both the               │
+│sandbox and the process.                                                      │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ tab pane   r restart   x stop   S signal   ? help   q quit                     

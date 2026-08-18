@@ -1,0 +1,512 @@
+package tui
+
+import (
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
+)
+
+// TestNoKeyMutatesWithoutConfirmation walks every key the program binds and
+// asserts that none of them, on its own, produces an effect that changes a
+// sandbox.
+//
+// It is written as a sweep rather than as three tests about the three mutating
+// keys, because the failure it guards against is a key added later that skips
+// the gate. A test naming the keys it knows about cannot see that; this one
+// fails the moment any keystroke emits a mutating effect directly.
+func TestNoKeyMutatesWithoutConfirmation(t *testing.T) {
+	t.Parallel()
+
+	every := []string{
+		"tab", "shift+tab", "up", "down", "j", "k", "pgup", "pgdown", "g", "G",
+		"home", "end", "enter", "esc", "f", "t", "ctrl+r", "s", "x", "r", "S",
+		"y", "Y", "n", "1", "2", "3", "4", "5", "6", "?", "a", "z", " ",
+	}
+	for _, k := range every {
+		m := demoModel(80, 24)
+		next, effects := m.Step(key(k))
+		require.Emptyf(t, mutating(effects), "key %q emitted a mutating effect with no confirmation", k)
+		// And a key that proposes something must have left a prompt behind,
+		// so that "no effect" cannot be achieved by silently doing nothing.
+		if next.mode == modeConfirm {
+			require.NotEmptyf(t, next.confirm.Prompt, "key %q opened a confirmation with no prompt", k)
+			require.Truef(t, next.confirm.Effect.Kind.Mutating(), "key %q confirmed a non-mutating effect", k)
+		}
+	}
+}
+
+// TestConfirmationNamesTheSandboxAndTheProcess pins the one thing the prompt
+// exists for. A prompt that said "Stop this process?" would be a keystroke's
+// worth of protection and none of the information that makes the answer
+// possible.
+func TestConfirmationNamesTheSandboxAndTheProcess(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		keys   []string
+		verb   string
+		signal string
+	}{
+		{name: "stop", keys: []string{"x"}, verb: "Stop"},
+		{name: "restart", keys: []string{"r"}, verb: "Restart"},
+		{name: "signal", keys: []string{"S", "enter"}, verb: "SIGTERM"},
+		{name: "signal by number", keys: []string{"S", "4"}, verb: "SIGKILL"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := demoModel(80, 24)
+			m, effects := press(m, tc.keys...)
+			require.Empty(t, mutating(effects))
+			require.Equal(t, modeConfirm, m.mode)
+			require.Contains(t, m.confirm.Prompt, `"alpha"`, "prompt must name the sandbox")
+			require.Contains(t, m.confirm.Prompt, `"web-dev-server"`, "prompt must name the process")
+			require.Contains(t, m.confirm.Prompt, tc.verb)
+
+			// And the prompt is on screen, not merely in the model.
+			frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+			require.Contains(t, frame, "[y/N]")
+			require.Contains(t, frame, "alpha")
+		})
+	}
+}
+
+// TestOnlyYesConfirms checks that every other key cancels, including the keys
+// that mean something in normal mode. A prompt that let "j" fall through to the
+// action underneath would be worse than no prompt, because the operator
+// believes they are protected.
+func TestOnlyYesConfirms(t *testing.T) {
+	t.Parallel()
+
+	for _, k := range []string{"y", "Y"} {
+		m, _ := press(demoModel(80, 24), "x")
+		_, effects := m.Step(key(k))
+		require.Len(t, mutating(effects), 1, "%q should confirm", k)
+	}
+	for _, k := range []string{"n", "N", "esc", "enter", "j", "x", "r", "tab", " ", "?"} {
+		m, _ := press(demoModel(80, 24), "x")
+		next, effects := m.Step(key(k))
+		require.Emptyf(t, mutating(effects), "%q should not confirm", k)
+		require.Equalf(t, modeNormal, next.mode, "%q should close the prompt", k)
+		require.Equal(t, "cancelled", next.status)
+	}
+}
+
+// TestConfirmationActsOnWhatItNamed feeds a refreshed process list in while a
+// confirmation is open, reordering the table under it, and checks that "y"
+// still stops the process the prompt named.
+//
+// This is why [Confirmation] holds the whole effect rather than re-deriving it
+// from the model at confirmation time.
+func TestConfirmationActsOnWhatItNamed(t *testing.T) {
+	t.Parallel()
+
+	m, _ := press(demoModel(80, 24), "x")
+	require.Contains(t, m.confirm.Prompt, `"web-dev-server"`)
+
+	reordered := demoProcesses()
+	reordered[0], reordered[3] = reordered[3], reordered[0]
+	m, _ = m.Step(processesMsg{sandbox: "alpha", processes: reordered})
+
+	_, effects := m.Step(key("y"))
+	acts := mutating(effects)
+	require.Len(t, acts, 1)
+	require.Equal(t, "p-web", acts[0].ProcessID)
+	require.Equal(t, "alpha", acts[0].Sandbox)
+	require.True(t, acts[0].Graceful)
+}
+
+// TestQuitIsAnswerableFromAConfirmation covers the operator who has second
+// thoughts at a destructive prompt: leaving must not require answering it.
+func TestQuitIsAnswerableFromAConfirmation(t *testing.T) {
+	t.Parallel()
+
+	m, _ := press(demoModel(80, 24), "x")
+	require.Equal(t, modeConfirm, m.mode)
+	next, effects := m.Step(key("ctrl+c"))
+	require.Empty(t, mutating(effects))
+	require.Len(t, effects, 1)
+	require.Equal(t, EffectQuit, effects[0].Kind)
+	require.True(t, next.quitting)
+}
+
+// TestStopRefusesAProcessThatIsAlreadyGone. Offering to stop a crashed process
+// would be a confirmation prompt for a call that cannot do anything.
+func TestStopRefusesAProcessThatIsAlreadyGone(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.focus, m.procCursor = PaneProcesses, 2 // the crashed one
+	next, effects := m.Step(key("x"))
+	require.Empty(t, effects)
+	require.Equal(t, modeNormal, next.mode)
+	require.Contains(t, next.status, "already crashed")
+}
+
+// TestRestartOfAnExitedProcessReadsAsStart. The agent runs it again from the
+// same spec either way; the word an operator wants for that when the process is
+// not there is "start".
+func TestRestartOfAnExitedProcessReadsAsStart(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.focus, m.procCursor = PaneProcesses, 2
+	frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+	require.Contains(t, frame, "r start")
+	require.NotContains(t, frame, "r restart")
+
+	m.procCursor = 0
+	frame = Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+	require.Contains(t, frame, "r restart")
+}
+
+// ------------------------------------------------------------- scheduling
+
+// TestTickFetchesOnlyWhatIsDue is the core of the refresh policy: a tick is
+// cheap, and only the panes whose period has elapsed cost anything.
+func TestTickFetchesOnlyWhatIsDue(t *testing.T) {
+	t.Parallel()
+
+	base := demoModel(80, 24)
+	base.now = fixedNow
+
+	// A second after everything arrived, the only thing owed is the next log
+	// window: the last one ran to its deadline, so following means opening
+	// another. See TestAFailedLogWindowBacksOff for the case where it does not.
+	_, effects := base.tick(fixedNow.Add(time.Second))
+	require.Equal(t, []EffectKind{EffectLogs}, kinds(effects))
+
+	// The sandbox listing is due at its period, and it is local: it is the one
+	// effect that costs no agent traffic.
+	_, effects = base.tick(fixedNow.Add(DefaultSchedule.Sandboxes))
+	require.Contains(t, kinds(effects), EffectSandboxes)
+	require.NotContains(t, kinds(effects), EffectProcesses, "the process list is slower than the listing")
+
+	// The process list at its own, longer, period.
+	_, effects = base.tick(fixedNow.Add(DefaultSchedule.Processes))
+	require.Contains(t, kinds(effects), EffectProcesses)
+	require.NotContains(t, kinds(effects), EffectDetail, "host detail is much slower than the process list")
+
+	_, effects = base.tick(fixedNow.Add(DefaultSchedule.Detail))
+	require.Contains(t, kinds(effects), EffectDetail)
+}
+
+// TestTickNeverStartsASecondFetchOnTopOfTheFirst. On a slow sandbox this is
+// the difference between a view that is behind and a view with a queue of
+// answers to questions nobody is asking any more.
+func TestTickNeverStartsASecondFetchOnTopOfTheFirst(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.now = fixedNow
+	m, effects := m.tick(fixedNow.Add(time.Minute))
+	require.NotEmpty(t, effects)
+
+	for i := range 10 {
+		var more []Effect
+		m, more = m.tick(fixedNow.Add(time.Minute + time.Duration(i+1)*time.Second))
+		require.Emptyf(t, more, "tick %d started a fetch while one was in flight", i)
+	}
+}
+
+// TestNothingIsFetchedForASandboxNobodyIsLookingAt is the whole reason a fleet
+// of any size is watchable: the per-sandbox cost is health, which the pool
+// already pays in the background, and nothing else.
+func TestNothingIsFetchedForASandboxNobodyIsLookingAt(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.sandboxes = bigFleet()
+	m.sbCursor = 3
+	m.now = fixedNow
+	m.procState, m.detailState, m.logState = paneState{}, paneState{}, paneState{}
+
+	_, effects := m.tick(fixedNow.Add(time.Minute))
+	for _, e := range effects {
+		if e.Kind == EffectSandboxes {
+			continue
+		}
+		require.Equalf(t, "node-04", e.Sandbox,
+			"%s was fetched for %s, which is not the focused sandbox", e.Kind, e.Sandbox)
+	}
+}
+
+// TestAnEmptyFleetCostsNoAgentTraffic.
+func TestAnEmptyFleetCostsNoAgentTraffic(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel(DefaultSchedule, false)
+	m.sbLoaded = true
+	_, effects := m.tick(fixedNow.Add(time.Hour))
+	require.Equal(t, []EffectKind{EffectSandboxes}, kinds(effects))
+}
+
+// TestLogsRearmAsSoonAsAWindowCloses. The bound on a log follow is the window,
+// and the window is also the period: waiting out a second timer after one
+// closed would leave a gap in what the pane can see.
+func TestLogsRearmAsSoonAsAWindowCloses(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.now = fixedNow
+
+	// A window is open, so nothing asks for a second one.
+	m.logState.inFlight = true
+	_, effects := m.tick(fixedNow.Add(time.Second))
+	require.NotContains(t, kinds(effects), EffectLogs)
+
+	// It closes at its deadline, and the next tick opens the next one.
+	m, _ = m.Step(logsMsg{sandbox: "alpha", processID: "p-web", logs: demoLogs()})
+	require.False(t, m.logState.inFlight)
+
+	_, effects = m.tick(fixedNow.Add(2 * time.Second))
+	require.Contains(t, kinds(effects), EffectLogs)
+
+	// And every window is bounded, both in time and in lines retained.
+	for _, e := range effects {
+		if e.Kind == EffectLogs {
+			require.True(t, e.Logs.Follow)
+			require.Greater(t, e.Logs.FollowFor, time.Duration(0), "a follow with no bound is an unbounded stream")
+			require.LessOrEqual(t, e.Logs.FollowFor, time.Minute)
+			require.Greater(t, e.Logs.MaxLines, 0)
+		}
+	}
+}
+
+// -------------------------------------------------------------- results
+
+// TestAnswersForSomewhereElseAreDropped. An answer that arrives after the
+// operator has moved on must not be painted over the machine they moved to.
+func TestAnswersForSomewhereElseAreDropped(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	before := m.processes
+
+	m, _ = m.Step(processesMsg{sandbox: "gamma", processes: []Process{{ID: "x", Name: "wrong"}}})
+	require.Equal(t, before, m.processes)
+	require.Equal(t, "alpha", m.procFor)
+
+	m, _ = m.Step(detailMsg{sandbox: "gamma", detail: Detail{Hostname: "wrong"}})
+	require.Equal(t, "alpha", m.detailFor)
+
+	m, _ = m.Step(logsMsg{sandbox: "alpha", processID: "p-other", logs: Logs{Lines: []LogLine{{Text: "wrong"}}}})
+	require.Equal(t, demoLogs().Lines, m.logs.Lines)
+}
+
+// TestAFailedRefreshKeepsTheLastThingSeen. Blanking a pane when a sandbox stops
+// answering loses the last thing an operator saw before it went away, which is
+// usually the reason it went away.
+func TestAFailedRefreshKeepsTheLastThingSeen(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m, _ = m.Step(processesMsg{sandbox: "alpha", err: errors.New("no answer within the timeout")})
+	require.Len(t, m.processes, 4, "the process list was blanked by a failed refresh")
+	require.True(t, m.procState.stale)
+
+	frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+	require.Contains(t, frame, "web-dev-server")
+	require.Contains(t, frame, "(stale)", "a pane holding old data must say so")
+}
+
+// TestTheCursorStaysOnWhatItWasOn. A listing that re-sorts or gains a member
+// must not move the selection under an operator who is one keystroke from a
+// confirmation prompt about it.
+func TestTheCursorStaysOnWhatItWasOn(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.sbCursor = 2 // gamma
+	grown := append([]Sandbox{{Name: "aaa-new", Health: client.HealthUnknown}}, demoFleet()...)
+	m, _ = m.Step(sandboxesMsg{sandboxes: grown, at: fixedNow})
+	sb, ok := m.selectedSandbox()
+	require.True(t, ok)
+	require.Equal(t, "gamma", sb.Name)
+
+	// And the same for the process table, which refreshes far more often.
+	m = demoModel(80, 24)
+	m.focus, m.procCursor = PaneProcesses, 1 // queue-worker
+	reordered := demoProcesses()
+	reordered[0], reordered[1] = reordered[1], reordered[0]
+	m, _ = m.Step(processesMsg{sandbox: "alpha", processes: reordered})
+	p, ok := m.selectedProcess()
+	require.True(t, ok)
+	require.Equal(t, "queue-worker", p.Name)
+}
+
+// TestChangingSandboxClearsWhatBelongedToTheLastOne. This is the one case where
+// blanking is right: a different machine is a different question, not a stale
+// answer to the same one.
+func TestChangingSandboxClearsWhatBelongedToTheLastOne(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	require.NotEmpty(t, m.processes)
+	m, _ = press(m, "down")
+
+	require.Empty(t, m.processes)
+	require.Empty(t, m.logs.Lines)
+	require.Equal(t, "", m.detailFor)
+
+	frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+	require.NotContains(t, frame, "web-dev-server",
+		"the previous sandbox's processes are still on screen")
+}
+
+// TestSelectingAProcessOnAnotherSandboxIsImpossible. procFor is what stops a
+// mutating action aimed at a process on the machine the operator was looking at
+// a moment ago.
+func TestSelectingAProcessOnAnotherSandboxIsImpossible(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.sbCursor = 1 // beta-builder, while procFor is still alpha
+	_, ok := m.selectedProcess()
+	require.False(t, ok)
+
+	next, effects := m.Step(key("x"))
+	require.Empty(t, effects)
+	require.Equal(t, modeNormal, next.mode)
+}
+
+// TestActionsRefreshWhatTheyChanged, so the operator sees the result rather
+// than waiting out a period wondering whether the keystroke landed.
+func TestActionsRefreshWhatTheyChanged(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m, effects := m.Step(actionMsg{what: "stopped web-dev-server on alpha"})
+	require.Equal(t, []EffectKind{EffectProcesses}, kinds(effects))
+	require.Equal(t, "stopped web-dev-server on alpha", m.status)
+
+	m, effects = m.Step(actionMsg{what: "stop web-dev-server on alpha", err: errors.New("permission denied")})
+	require.Empty(t, effects, "a failed action must not be retried by itself")
+	require.Contains(t, m.status, "permission denied")
+}
+
+// TestToolchainsAreProbedOnlyWhenAskedFor: the probe is measurably slower, and
+// a view that ran it on a timer would pay for it on every refresh.
+func TestToolchainsAreProbedOnlyWhenAskedFor(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.now = fixedNow
+	_, effects := m.tick(fixedNow.Add(time.Hour))
+	for _, e := range effects {
+		require.Falsef(t, e.Toolchains, "%s asked for toolchains without being told to", e.Kind)
+	}
+
+	m, effects = m.Step(key("t"))
+	require.Equal(t, []EffectKind{EffectDetail}, kinds(effects))
+	require.True(t, effects[0].Toolchains)
+
+	m, _ = m.Step(key("t"))
+	require.False(t, m.toolchains)
+}
+
+// TestTheShellKeySaysWhatItCannotDo. #43 is not merged, so the action is not
+// wired; a key that silently did nothing would read as a broken program rather
+// than an unfinished one.
+func TestTheShellKeySaysWhatItCannotDo(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	next, effects := m.Step(key("s"))
+	require.Empty(t, effects)
+	require.Contains(t, next.status, "#43")
+
+	wired := demoModel(80, 24)
+	wired.shellWired = true
+	next, effects = wired.Step(key("s"))
+	require.Equal(t, []EffectKind{EffectOpenShell}, kinds(effects))
+	require.Equal(t, "alpha", effects[0].Sandbox)
+	require.Equal(t, "10.0.0.11:9443", effects[0].Address)
+	require.Empty(t, next.status)
+}
+
+// TestLogFollowReleasesOnScrollAndResumesOnF, so new output does not yank the
+// view away from the line an operator is reading.
+func TestLogFollowReleasesOnScrollAndResumesOnF(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.focus = PaneLogs
+	require.True(t, m.logFollow)
+
+	m, _ = press(m, "up")
+	require.False(t, m.logFollow)
+	require.Equal(t, 1, m.logScroll)
+
+	// A window arriving while scrolled back must not move the view.
+	m, _ = m.Step(logsMsg{sandbox: "alpha", processID: "p-web", logs: demoLogs()})
+	require.Equal(t, 1, m.logScroll)
+
+	m, _ = press(m, "f")
+	require.True(t, m.logFollow)
+	require.Equal(t, 0, m.logScroll)
+}
+
+// TestResizeNeverLeavesTheScrollPastTheEnd.
+func TestResizeNeverLeavesTheScrollPastTheEnd(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(200, 60)
+	m.focus = PaneLogs
+	m, _ = press(m, "g")
+	require.Positive(t, m.logScroll)
+
+	m.logs = Logs{Lines: []LogLine{{Text: "one"}}}
+	m, _ = m.Step(sizeMsg(40, 12))
+	require.LessOrEqual(t, m.logScroll, 0)
+}
+
+// TestAFailedLogWindowBacksOff. Re-arming on every tick against a machine that
+// has already refused would be a request a second at a sandbox that is down.
+func TestAFailedLogWindowBacksOff(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(80, 24)
+	m.now = fixedNow
+	m.logState.inFlight = true
+	m, _ = m.Step(logsMsg{sandbox: "alpha", processID: "p-web", err: errors.New("no answer within the timeout")})
+
+	_, effects := m.tick(fixedNow.Add(500 * time.Millisecond))
+	require.NotContains(t, kinds(effects), EffectLogs)
+
+	_, effects = m.tick(fixedNow.Add(DefaultSchedule.LogWindow))
+	require.Contains(t, kinds(effects), EffectLogs)
+}
+
+func kinds(effects []Effect) []EffectKind {
+	if len(effects) == 0 {
+		return nil
+	}
+	out := make([]EffectKind, 0, len(effects))
+	for _, e := range effects {
+		out = append(out, e.Kind)
+	}
+	return out
+}
+
+// TestEveryKeyIsInTheHelp. A keymap and a help screen that disagree is how an
+// operator concludes a key does not exist.
+func TestEveryKeyIsInTheHelp(t *testing.T) {
+	t.Parallel()
+
+	documented := map[string]bool{}
+	for _, k := range helpKeys {
+		for _, part := range strings.Fields(strings.ReplaceAll(k[0], "/", " ")) {
+			documented[part] = true
+		}
+	}
+	for _, k := range []string{"tab", "shift+tab", "enter", "r", "x", "S", "s", "f", "t", "ctrl+r", "?", "q", "j", "k", "g", "G"} {
+		require.Truef(t, documented[k], "key %q is bound but not in the help", k)
+	}
+}
