@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -129,6 +130,31 @@ func newService(t *testing.T, opts options) *Service {
 
 	svc, ok := built.(*Service)
 	require.True(t, ok)
+
+	// Wait for the handlers before the log they write to is closed.
+	//
+	// Registered after the two cleanups above, so it runs before them: the
+	// session's record is written on the way out of Shell, grpc.Server.Stop
+	// does not wait for handlers, and several of these tests deliberately walk
+	// away from a session that is still running. A handler still unwinding
+	// when Audit.Close lands reopens the file — Close documents that further
+	// writes do — and recreates it inside a temp directory RemoveAll is
+	// already walking. On Unix RemoveAll unlinks an open file and nobody ever
+	// sees it; on Windows it is "the process cannot access the file because it
+	// is being used by another process", reported against whichever test the
+	// scheduler picked rather than the one that left the session open.
+	//
+	// forward's harness carries the same wait for the same reason. active
+	// drops only after finish returns, so an idle service is one whose records
+	// are all on disk.
+	t.Cleanup(func() {
+		deadline := time.Now().Add(30 * time.Second)
+		for svc.active.Load() > 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		assert.Zero(t, svc.active.Load(), "a shell session outlived the test that opened it")
+	})
+
 	if len(opts.loginTo) > 0 {
 		svc.loginShell = func() []string { return opts.loginTo }
 	}

@@ -120,7 +120,10 @@ func executableAccessRemedy(exe, goos string) []string {
 	if goos == "windows" {
 		return []string{
 			`mkdir "C:\Program Files\fleet"`,
-			fmt.Sprintf(`Copy-Item %q "C:\Program Files\fleet\fleet-agent.exe"`, exe),
+			// winQuote rather than %q: this is a command an operator pastes
+			// into a Windows shell, and %q would double every backslash in a
+			// path that is guaranteed to have them.
+			fmt.Sprintf(`Copy-Item %s "C:\Program Files\fleet\fleet-agent.exe"`, winQuote(exe)),
 			`& "C:\Program Files\fleet\fleet-agent.exe" service install`,
 		}
 	}

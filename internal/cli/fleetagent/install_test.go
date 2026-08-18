@@ -129,20 +129,34 @@ func TestServiceInstall_SwitchingMechanismDoesNotStartAStoppedAgent(t *testing.T
 }
 
 // Re-running install over its own registration replaces the definition and
-// restarts what was running, which is what makes re-running an installer safe.
+// leaves the agent running, which is what makes re-running an installer safe.
 //
-// The stop is the load-bearing step, and it was missing. removeOtherMechanism
-// stops the registration it removes; this path — the same command, replacing
-// its own definition rather than the other mechanism's — went straight to
-// Uninstall. On Windows DeleteService only *marks* a running service for
-// deletion, so the entry stays in the SCM database, the CreateService that
-// follows fails with "service fleet-agent already exists", and the host is left
-// with a definition marked for deletion and no replacement: an agent that
-// disappears at the next reboot, from the command this one documents as safe to
-// re-run. launchd stops the job inside its own Uninstall and systemd disables a
-// unit whose process keeps running, so the two managers CI can reason about
-// both hid it.
-func TestServiceInstall_ReplacesItsOwnDefinitionAndRestartsIt(t *testing.T) {
+// Two steps are load-bearing and they arrived one audit round apart.
+//
+// The stop was missing. removeOtherMechanism stops the registration it removes;
+// this path — the same command, replacing its own definition rather than the
+// other mechanism's — went straight to Uninstall. On Windows DeleteService only
+// *marks* a running service for deletion, so the entry stays in the SCM
+// database, the CreateService that follows fails with "service fleet-agent
+// already exists", and the host is left with a definition marked for deletion
+// and no replacement: an agent that disappears at the next reboot, from the
+// command this one documents as safe to re-run. launchd stops the job inside
+// its own Uninstall and systemd disables a unit whose process keeps running, so
+// the two managers CI can reason about both hid it.
+//
+// And then the resume has to be a Start. Adding the stop is what made this
+// definition a freshly written one that has never run, and that is the state
+// kardianos's Windows Restart cannot leave: it is ControlService(STOP) followed
+// by StartService and it returns at the first failure, so the stop fails with
+// ERROR_SERVICE_NOT_ACTIVE and StartService is never reached. launchd's
+// unload-then-load has the same shape. The command reported "could not be
+// started", exited zero, and left the agent down — the exact failure round 4
+// fixed for the mechanism switch, walked back in through the fix for the one
+// above. It is decided on whether anything is running under the definition now,
+// not on what the host carried when the command began, which is also right for
+// systemd: it keeps the old process alive across a unit replacement and answers
+// active, so Linux still restarts.
+func TestServiceInstall_ReplacesItsOwnDefinitionAndKeepsItRunning(t *testing.T) {
 	args := installArgs(t)
 	mechanism := fleetagent.MechanismService
 	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
@@ -156,12 +170,41 @@ func TestServiceInstall_ReplacesItsOwnDefinitionAndRestartsIt(t *testing.T) {
 	text := out.String()
 	require.Equal(t, 0, code, "%s", text)
 
-	assert.Equal(t, []string{"new:stop", "new:uninstall", "new:install", "new:restart"}, calls(),
+	assert.Equal(t, []string{"new:stop", "new:uninstall", "new:install", "new:start"}, calls(),
 		"kardianos refuses to install over an existing definition, so a re-run has to replace it — "+
-			"and the SCM will not let the replacement be written while the old one is still running")
+			"the SCM will not let the replacement be written while the old one is still running, and "+
+			"what that leaves cannot be restarted, only started")
 	assert.Contains(t, text, "existing service definition removed for replacement")
 	assert.Contains(t, text, "reinstalled")
 	assert.Contains(t, text, "service restarted with the new definition")
+	assert.NotContains(t, text, "could not be started",
+		"the agent was running before this command and has to be running after it")
+}
+
+// And the shape that says the choice is not "always Start": a daemon the
+// replacement did not manage to stop is restarted onto the new definition.
+//
+// install says so and carries on when a stop fails, because a stop that failed
+// is not a reason to leave the host on the old definition. What that produces
+// is a new definition with the old daemon still running under it, and there
+// Start is the wrong call: `systemctl start` on a unit systemd already
+// considers active does nothing at all, and the operator is left running the
+// definition this command was replacing, silently. Restart is what replaces it.
+func TestServiceInstall_RestartsAReplacementItCouldNotStop(t *testing.T) {
+	args := installArgs(t)
+	mechanism := fleetagent.MechanismService
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed: []fleetagent.Mechanism{mechanism},
+		Running:   map[fleetagent.Mechanism]bool{mechanism: true},
+		StopFails: true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	require.Equal(t, 0, fleetagent.Main(args, out), "%s", out.String())
+	assert.Equal(t, []string{"new:stop", "new:uninstall", "new:install", "new:restart"}, calls(),
+		"a daemon still running under the new definition is restarted onto it, not started beside itself")
+	assert.Contains(t, out.String(), "could not stop the running")
 }
 
 // And a registration that is not running is not stopped: there is nothing to
@@ -222,6 +265,71 @@ func TestServiceInstall_SaysTheHostIsUnregisteredWhenTheWriteFails(t *testing.T)
 	assert.Contains(t, err.Error(), "is now not installed",
 		"the previous registration is gone and the new one did not land; an operator reading this as `nothing happened` leaves the host with no agent")
 	assert.Contains(t, err.Error(), "Re-run `service install`")
+}
+
+// A removal that fails after the daemon has been stopped says the agent is down.
+//
+// Round 4 established this for the failed *write*: "install service: ..." on its
+// own reads as "nothing happened", which is the one thing that is not true. The
+// stop round 5 added moves the same event one step earlier — install now stops
+// the daemon before it removes anything, because on Windows DeleteService only
+// marks a *running* service for deletion — so a removal that refuses leaves an
+// agent that is down because of this command, and said so nowhere.
+func TestServiceInstall_SaysTheAgentIsDownWhenTheRemovalFails(t *testing.T) {
+	args := installArgs(t)
+	mechanism := fleetagent.MechanismService
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed:     []fleetagent.Mechanism{mechanism},
+		Running:       map[fleetagent.Mechanism]bool{mechanism: true},
+		FailUninstall: true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, args...)
+
+	require.Error(t, err, "%s", out.String())
+	assert.Equal(t, []string{"new:stop", "new:uninstall"}, calls(),
+		"nothing may be registered over a definition the manager would not remove")
+	assert.Contains(t, err.Error(), "is not running now",
+		"the daemon was stopped by this command and an operator reading this as `nothing happened` leaves the agent down")
+	assert.Contains(t, err.Error(), "service start")
+}
+
+// And the same from the removal of the *other* mechanism, which is the flow
+// `status` prints as the remedy for a confined agent.
+func TestServiceInstall_SaysTheAgentIsDownWhenTheOtherRemovalFails(t *testing.T) {
+	args := installArgs(t)
+	calls, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed:     []fleetagent.Mechanism{fleetagent.MechanismTask},
+		Running:       map[fleetagent.Mechanism]bool{fleetagent.MechanismTask: true},
+		FailUninstall: true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, args...)
+
+	require.Error(t, err, "%s", out.String())
+	assert.Equal(t, []string{"task:stop", "task:uninstall"}, calls())
+	assert.Contains(t, err.Error(), "is not running now")
+}
+
+// A removal that fails without anything having been stopped says nothing extra:
+// the host is where it was, and a note about a stopped agent would be false.
+func TestServiceInstall_SaysNothingAboutAStoppedAgentThatWasNotRunning(t *testing.T) {
+	args := installArgs(t)
+	mechanism := fleetagent.MechanismService
+	_, _, restore := fleetagent.PinInstallForTest(fleetagent.InstallHostForTest{
+		Installed:     []fleetagent.Mechanism{mechanism},
+		FailUninstall: true,
+	})
+	defer restore()
+
+	out := &bytes.Buffer{}
+	err := runAgentCommand(t, out, args...)
+	require.Error(t, err, "%s", out.String())
+	assert.NotContains(t, err.Error(), "is not running now")
 }
 
 // A definition that cannot even be assembled is discovered before anything is
@@ -570,6 +678,29 @@ func TestForeignConfigDirNote(t *testing.T) {
 		assert.Contains(t, note, tc.fix,
 			"goos %s: a note without the command that fixes it leaves the operator where they were", tc.goos)
 	}
+}
+
+// The Windows half of it, driven with the shapes Windows actually produces.
+//
+// Both arguments of that `icacls` line have backslashes in them on a real host
+// — `%ProgramData%\...` and `COMPUTERNAME\build`, which is the spelling this
+// document tells an operator to pass — and the note was composed with %q, which
+// is Go string syntax and doubles every one of them. A doubled *path* survives,
+// because Win32 collapses repeated separators; a doubled *account* does not,
+// because an account name is not a path: icacls answers "No mapping between
+// account names and security IDs was done", and the operator whose daemon
+// cannot read its own config is handed a remedy that does not work.
+//
+// The rule was only ever driven with a Unix path and a bare account name, which
+// is the one pair of inputs on which %q and a plain quote agree.
+func TestForeignConfigDirNote_QuotesTheWindowsShapesUnchanged(t *testing.T) {
+	note := strings.Join(fleetagent.ForeignConfigDirNoteForTest(
+		`D:\fleet\enroll`, `WORKSTATION\build`, "windows"), "\n")
+
+	assert.Contains(t, note, `icacls "D:\fleet\enroll" /grant "WORKSTATION\build:(RX)"`,
+		"the command an operator pastes has to name the directory and the account they gave, byte for byte")
+	assert.NotContains(t, note, `\\`,
+		"a doubled backslash is Go string syntax leaking into a Windows command line")
 }
 
 // And `install` prints it, for the config it was actually given.

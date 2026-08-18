@@ -404,6 +404,61 @@ func TestConfinementFor_TheAccountAsThePlatformNamesIt(t *testing.T) {
 	assert.Contains(t, strings.Join(detail, "\n"), "built-in service identity has no operator profile")
 }
 
+// The same verdict on a host whose display names are not English.
+//
+// rep.Account is what LookupAccountSid answered, and that is the *display* name
+// on the installation that answered: Windows localises them. The fifth audit
+// round found this verdict unable to fire because the English display name has
+// a space in it that CreateService's spelling does not; a German or French host
+// does not spell it with those letters at all, so folding cannot reach it and
+// no list of names can be kept complete. Such a report fell through to the
+// named-account verdict, which tells the operator their agent's "profile was
+// never loaded" — untrue of the account whose profile that is — and, with
+// %USERPROFILE% unset, through that one too, leaving the whole point of #74
+// reported as plain `running` and exiting zero.
+//
+// The SID does not move. S-1-5-18, -19 and -20 are those three strings on every
+// installation of Windows in every language, which is why Microsoft's own
+// guidance is to compare SIDs and never names.
+func TestConfinementFor_TheAccountAsItsSIDWhenTheNameIsNotEnglish(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sid  string
+	}{
+		{"NT-AUTORITAET\\NETZWERKDIENST", "S-1-5-20"},
+		{"AUTORITE NT\\SERVICE LOCAL", "S-1-5-19"},
+		{"AUTORITE NT\\Systeme", "S-1-5-18"},
+	} {
+		summary, detail, remedy := fleetagent.ConfinementForTest(&fleetagent.RuntimeReportForTest{
+			Account:     tc.name,
+			AccountSID:  tc.sid,
+			SessionZero: true,
+			Visibility:  fleetagent.ProfileUnknownForTest,
+		})
+		assert.Equal(t, "running, but unusable", summary, "account %s (%s)", tc.name, tc.sid)
+		assert.Contains(t, strings.Join(detail, "\n"), "built-in service identity has no operator profile",
+			"%s is that identity whatever this host calls it, and the SID is what says so", tc.sid)
+		assert.NotContains(t, strings.Join(detail, "\n"), "profile was never loaded",
+			"that is the named-account verdict, and it names a fault this account does not have")
+		assert.Contains(t, strings.Join(remedy, "\n"), "--user DOMAIN",
+			"a built-in identity has a second way out, and this is the only verdict that offers it")
+		assert.Contains(t, strings.Join(detail, "\n"), tc.name,
+			"and the operator is still shown the name their own host prints")
+	}
+
+	// A name this rule does not recognise and no SID to fall back on is not
+	// turned into a verdict: an ordinary account in session 0 is a service, and
+	// this branch is about the built-in identities.
+	summary, _, _ := fleetagent.ConfinementForTest(&fleetagent.RuntimeReportForTest{
+		Account:     `CORP\build`,
+		AccountSID:  "S-1-5-21-1-2-3-1001",
+		Home:        `C:\Users\build`,
+		SessionZero: true,
+		Visibility:  fleetagent.ProfileUnknownForTest,
+	})
+	assert.Empty(t, summary, "a named account with its own profile is not this verdict")
+}
+
 // pinAgentConfig writes a config naming a fresh state directory and points the
 // agent's own discovery at it, which is how `service status` finds the runtime
 // report.

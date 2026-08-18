@@ -233,6 +233,10 @@ func currentAccount() string {
 	return ""
 }
 
+// currentAccountSID is a Windows question: there is no SID to record here, and
+// an empty answer is what every rule built on one treats as "nothing to say".
+func currentAccountSID() string { return "" }
+
 // inSessionZero is a Windows question; Unix has no session 0 to be isolated in.
 func inSessionZero() bool { return false }
 
