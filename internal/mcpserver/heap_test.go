@@ -48,6 +48,13 @@ import (
 // copy the handler makes, anywhere, is on the far side of the baseline.
 
 // liveHeap forces a collection and reports what is still reachable.
+//
+// It reads the *process's* heap, which is why every test that samples it is
+// sequential and has to stay that way: a parallel test allocating alongside is
+// indistinguishable from the handler under test holding its payload, and it
+// would fail whichever way round the noise happened to land. Sequential tests
+// all complete before the first parallel one is released, so this stays a
+// measurement of one thing.
 func liveHeap() uint64 {
 	runtime.GC()
 	var ms runtime.MemStats

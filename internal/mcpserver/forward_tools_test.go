@@ -36,6 +36,7 @@ import (
 // ------------------------------------------------------------- the basics
 
 func TestForward_ReachesARemoteHTTPServerOverLocalhost(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	const body = "the response body from the sandbox"
 	remote := startHTTPServer(t, body)
@@ -62,6 +63,7 @@ func TestForward_ReachesARemoteHTTPServerOverLocalhost(t *testing.T) {
 }
 
 func TestForward_ZeroLocalPortAllocatesAUsablePort(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "allocated")
 
@@ -78,6 +80,7 @@ func TestForward_ZeroLocalPortAllocatesAUsablePort(t *testing.T) {
 }
 
 func TestForward_HonoursAnExplicitLocalPort(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "explicit")
 	want := freePort(t)
@@ -93,6 +96,7 @@ func TestForward_HonoursAnExplicitLocalPort(t *testing.T) {
 // ------------------------------------------------------ concurrency, size
 
 func TestForward_CarriesManyConcurrentConnections(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "concurrent")
 
@@ -136,6 +140,7 @@ func TestForward_CarriesManyConcurrentConnections(t *testing.T) {
 // is sent, so an implementation that buffered a whole direction before
 // forwarding it would deadlock here rather than merely be slow.
 func TestForward_StreamsALargeTransferWithoutBufferingIt(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
 
@@ -181,6 +186,7 @@ func TestForward_StreamsALargeTransferWithoutBufferingIt(t *testing.T) {
 // what `curl` does on a request with no keep-alive, and getting it wrong
 // produces a forward that works for browsers and hangs for scripts.
 func TestForward_HalfCloseInEachDirectionIsIndependent(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	// A server that reads to EOF and only then answers: it cannot reply until
 	// the client's write side is closed, so the reply proves the half-close
@@ -206,6 +212,7 @@ func TestForward_HalfCloseInEachDirectionIsIndependent(t *testing.T) {
 // The other direction: the sandbox-side server closes first, and the local
 // client sees a clean EOF rather than a reset.
 func TestForward_RemoteCloseGivesTheLocalClientACleanEOF(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startGreetThenCloseServer(t, "goodbye")
 
@@ -226,6 +233,7 @@ func TestForward_RemoteCloseGivesTheLocalClientACleanEOF(t *testing.T) {
 // must still arrive. Shutting the whole connection on a half-close is the bug
 // this catches, and it is invisible to every test above.
 func TestForward_ClientCanStillSendAfterTheRemoteHalfCloses(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	// Buffered, and read until the expected body turns up: the forward's
@@ -279,6 +287,7 @@ func TestForward_ClientCanStillSendAfterTheRemoteHalfCloses(t *testing.T) {
 // A forward is owned by the MCP server process, not by the call that opened
 // it: it has to still be there after unrelated tool calls.
 func TestForward_SurvivesUnrelatedToolCalls(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "still here")
 
@@ -296,6 +305,11 @@ func TestForward_SurvivesUnrelatedToolCalls(t *testing.T) {
 }
 
 func TestForward_StopClosesTheListenerAndDropsConnections(t *testing.T) {
+	// No t.Parallel. What is asserted is the state of one particular loopback
+	// port, and that port came from the kernel's ephemeral range — freePort's
+	// range is reserved against this, but a port the *product* allocated is not.
+	// A concurrent test binding it would answer this test's question wrongly, in
+	// whichever direction the assertion runs.
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
 
@@ -335,6 +349,7 @@ func TestForward_StopClosesTheListenerAndDropsConnections(t *testing.T) {
 // looks up the loopback forward of the same port, finds nothing, and fails —
 // which reads to a caller as the forward having closed itself.
 func TestForward_TheStopCallItSuggestsActuallyStopsIt(t *testing.T) {
+	t.Parallel()
 	// A host on the allow list, taking the same path a real off-box target
 	// takes, while still reaching a server this test can stand up.
 	f := newLiveFixture(t, liveAgentOptions{forwardAllowedHosts: []string{"localhost"}})
@@ -367,6 +382,9 @@ func TestForward_TheStopCallItSuggestsActuallyStopsIt(t *testing.T) {
 // accepts a connection and drops it — the one outcome a caller cannot diagnose,
 // and the reason opening a forward preflights at all.
 func TestForward_RemovingTheSandboxClosesItsForwards(t *testing.T) {
+	// No t.Parallel, for the reason
+	// TestForward_StopClosesTheListenerAndDropsConnections gives: the assertion
+	// is on one particular ephemeral port, which nothing reserves.
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "about to go")
 
@@ -398,6 +416,9 @@ func TestForward_RemovingTheSandboxClosesItsForwards(t *testing.T) {
 // fleet_remove is running. The window is small, which is exactly why it would
 // be found by a user and not by a test that only checks the end state.
 func TestForward_RemovingTheSandboxClosesForwardsBeforeTheChannel(t *testing.T) {
+	// No t.Parallel, for the reason
+	// TestForward_StopClosesTheListenerAndDropsConnections gives: the assertion
+	// is on one particular ephemeral port, which nothing reserves.
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "ordering")
 
@@ -422,6 +443,7 @@ func TestForward_RemovingTheSandboxClosesForwardsBeforeTheChannel(t *testing.T) 
 }
 
 func TestForward_StopWithNoSuchForwardListsWhatIsOpen(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "open")
 
@@ -440,6 +462,7 @@ func TestForward_StopWithNoSuchForwardListsWhatIsOpen(t *testing.T) {
 // survived the process would hold its port against the next server, and the
 // user would see "address already in use" from a process that is gone.
 func TestForward_ServerCloseReleasesEveryLocalListener(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "released")
 	localPort := freePort(t)
@@ -469,6 +492,7 @@ func TestForward_ServerCloseReleasesEveryLocalListener(t *testing.T) {
 // Binding loopback only is the difference between forwarding a port to
 // yourself and publishing a tunnel into the sandbox on a coffee-shop LAN.
 func TestForward_LocalListenerIsNotReachableFromAnotherInterface(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "loopback only")
 
@@ -489,6 +513,7 @@ func TestForward_LocalListenerIsNotReachableFromAnotherInterface(t *testing.T) {
 // Connecting to a closed remote port has to fail with something readable,
 // before a listener exists — not open a local port that accepts and then dies.
 func TestForward_ClosedRemotePortIsAClearErrorNotAHangingListener(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	closed := freePort(t) // reserved and released: nothing is listening there
 
@@ -511,6 +536,7 @@ func TestForward_ClosedRemotePortIsAClearErrorNotAHangingListener(t *testing.T) 
 // operator to have said so. Without that, every agent is a general-purpose
 // pivot into whatever network it sits in.
 func TestForward_NonLoopbackRemoteHostIsRefusedByDefault(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	// TEST-NET-1, which is reserved and routes nowhere: the point is that the
@@ -524,6 +550,7 @@ func TestForward_NonLoopbackRemoteHostIsRefusedByDefault(t *testing.T) {
 }
 
 func TestForward_NonLoopbackRemoteHostIsPermittedWhenConfigured(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{forwardAllowedHosts: []string{"192.0.2.1"}})
 
 	msg := f.liveFails("fleet_forward", map[string]any{
@@ -540,6 +567,7 @@ func TestForward_NonLoopbackRemoteHostIsPermittedWhenConfigured(t *testing.T) {
 // is judged: checking the string alone would refuse the most common spelling
 // of the default.
 func TestForward_LocalhostByNameResolvesToLoopbackAndIsAllowed(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "by name")
 
@@ -551,6 +579,7 @@ func TestForward_LocalhostByNameResolvesToLoopbackAndIsAllowed(t *testing.T) {
 }
 
 func TestForward_DisabledAgentSaysSo(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{forwardDisabled: true})
 	remote := startHTTPServer(t, "unreachable")
 
@@ -559,6 +588,7 @@ func TestForward_DisabledAgentSaysSo(t *testing.T) {
 }
 
 func TestForward_RejectsAnOutOfRangePort(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	assert.Contains(t, f.liveFails("fleet_forward", map[string]any{"remote_port": 0}), "1-65535")
 	assert.Contains(t, f.liveFails("fleet_forward", map[string]any{"remote_port": 70000}), "1-65535")
@@ -568,6 +598,7 @@ func TestForward_RejectsAnOutOfRangePort(t *testing.T) {
 }
 
 func TestForward_ReopeningOnADifferentLocalPortSaysWhatToDo(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "already")
 
@@ -587,6 +618,7 @@ func TestForward_ReopeningOnADifferentLocalPortSaysWhatToDo(t *testing.T) {
 // an audit record naming what was asked for, what it became, and how much went
 // through — and a forward to the sandbox's own loopback produces none.
 func TestForward_NonLoopbackForwardIsAudited(t *testing.T) {
+	t.Parallel()
 	// "localhost" on the allow list is the operator having listed a host by
 	// name. It takes the same path a real off-box target does — listed hosts
 	// are dialed by name and audited whatever they resolve to — while still
@@ -639,6 +671,7 @@ func TestForward_NonLoopbackForwardIsAudited(t *testing.T) {
 
 // A refusal is recorded too, from the tool call that caused it.
 func TestForward_RefusedNonLoopbackForwardIsAudited(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	msg := f.liveFails("fleet_forward", map[string]any{
@@ -665,6 +698,7 @@ func TestForward_RefusedNonLoopbackForwardIsAudited(t *testing.T) {
 // A loopback forward is a convenience on a host the caller already has exec
 // on, and it stays out of the log so the pivots in it remain findable.
 func TestForward_LoopbackForwardIsNotAudited(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startHTTPServer(t, "not audited")
 
@@ -712,6 +746,11 @@ func auditRecords(t *testing.T, path string) []policy.Record {
 // construction — see TestForward_ReleasesEveryConnectionWhileItStaysOpen, which
 // is the assertion that can see one.
 func TestForward_NoGoroutineLeakAcrossManyConnections(t *testing.T) {
+	// No t.Parallel. goleak counts every goroutine in the process and the
+	// descriptor snapshot counts every open file in it, so anything else running
+	// at the same time is counted as this test's leak. Sequential tests all run
+	// before any parallel one starts, which is what keeps this measurement of the
+	// whole process a measurement of one thing.
 	f := newLiveFixture(t, liveAgentOptions{})
 	remote := startEchoServer(t)
 
@@ -765,6 +804,9 @@ func TestForward_NoGoroutineLeakAcrossManyConnections(t *testing.T) {
 // still stops working after a few thousand connections — just with a different
 // error message.
 func TestForward_ReleasesEveryConnectionWhileItStaysOpen(t *testing.T) {
+	// No t.Parallel, for the reason
+	// TestForward_NoGoroutineLeakAcrossManyConnections gives: goleak and the
+	// descriptor snapshot both count the whole process.
 	f := newLiveFixture(t, liveAgentOptions{})
 	echo := startEchoServer(t)
 	// A server that answers nothing and resets the connection instead, which is

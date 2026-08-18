@@ -41,6 +41,18 @@ type transferResult struct {
 
 // localWorkspace makes a temporary directory the process's working directory
 // for the test, which is what the local write confinement is measured against.
+//
+// Every test that calls this is sequential, and none of them can be otherwise:
+// t.Chdir moves the *process*, and the runtime panics if it is reached from a
+// test with t.Parallel set. That is not an accident of the fixture — the thing
+// under test is confinement to the working directory, and there is one of those
+// per process. Giving each test its own directory does not help, because the
+// question the tool asks is "where am I", not "which directory was I handed".
+// Isolating it for real would mean the transfer tools taking a working
+// directory rather than reading os.Getwd, which is a change to the product, not
+// to its tests.
+//
+// It costs what it costs: these are ~3s of the package's sequential phase.
 func localWorkspace(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -714,6 +726,7 @@ func TestTransfer_BadDirectionIsRefusedWithTheTwoThatWork(t *testing.T) {
 // heap sampled while the content is still moving, because an implementation
 // that buffered the file and released it at the end shows nothing afterwards.
 func TestTransfer_APulledFileIsNeverHeldWhole(t *testing.T) {
+	// No t.Parallel: this measures the process's live heap. See liveHeap.
 	if testing.Short() {
 		t.Skip("moves 64 MiB")
 	}
@@ -750,6 +763,7 @@ func TestTransfer_APulledFileIsNeverHeldWhole(t *testing.T) {
 // direction. The push path reads the local file in chunks and sends each one;
 // holding the file whole would be an io.ReadAll of the source.
 func TestTransfer_APushedFileIsNeverHeldWhole(t *testing.T) {
+	// No t.Parallel: this measures the process's live heap. See liveHeap.
 	if testing.Short() {
 		t.Skip("moves 64 MiB")
 	}

@@ -104,6 +104,7 @@ func writeRemote(t *testing.T, path, content string) {
 // the line number right-aligned in six columns followed by a tab, and a model
 // that has learned to read that shape must not have to relearn it here.
 func TestRead_IsLineNumberedInTheShapeOfTheBuiltInRead(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("main.go")
 	writeRemote(t, path, "package main\n\nfunc main() {}\n")
@@ -121,6 +122,7 @@ func TestRead_IsLineNumberedInTheShapeOfTheBuiltInRead(t *testing.T) {
 
 // TestRead_OffsetAndLimitWindowTheFileAndReportTheWhole.
 func TestRead_OffsetAndLimitWindowTheFileAndReportTheWhole(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("many.txt")
 
@@ -147,6 +149,7 @@ func TestRead_OffsetAndLimitWindowTheFileAndReportTheWhole(t *testing.T) {
 // two thousand lines of a hundred thousand, with nothing saying so, will
 // conclude the file ends there.
 func TestRead_DefaultsToASaneLineLimitAndSaysThatItDid(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("huge.txt")
 
@@ -166,6 +169,7 @@ func TestRead_DefaultsToASaneLineLimitAndSaysThatItDid(t *testing.T) {
 
 // TestRead_BinaryFileIsRefusedWithAClearMessage.
 func TestRead_BinaryFileIsRefusedWithAClearMessage(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("app.bin")
 	writeRemote(t, path, "\x7fELF\x00\x01\x02\x03binary\x00content")
@@ -186,6 +190,7 @@ func TestRead_BinaryFileIsRefusedWithAClearMessage(t *testing.T) {
 
 // TestRead_MissingFileIsAClearNotFound, not a gRPC status.
 func TestRead_MissingFileIsAClearNotFound(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	missing := f.path("nope.go")
 
@@ -202,6 +207,7 @@ func TestRead_MissingFileIsAClearNotFound(t *testing.T) {
 // after a read is often an edit, and an old_string built from a rendering that
 // silently dropped the CR would not match.
 func TestRead_CRLFIsPreservedOnDiskAndCalledOutInTheResult(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("crlf.txt")
 	writeRemote(t, path, "alpha\r\nbeta\r\n")
@@ -220,6 +226,7 @@ func TestRead_CRLFIsPreservedOnDiskAndCalledOutInTheResult(t *testing.T) {
 
 // TestWrite_CreatesAFileAndReportsThatItDid.
 func TestWrite_CreatesAFileAndReportsThatItDid(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("nested", "new.txt")
 
@@ -263,6 +270,7 @@ func (c *capturingFiles) WriteFile(context.Context, ...grpc.CallOption) (grpc.Cl
 // an identical result — right up to the size where gRPC refuses the message,
 // which is exactly the size at which nobody is watching.
 func TestWrite_LargeContentIsStreamedRatherThanSentWhole(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	capture := &capturingFiles{FileServiceClient: f.backend.files}
 	f.clients.filesOverride = capture
@@ -305,6 +313,7 @@ func TestWrite_LargeContentIsStreamedRatherThanSentWhole(t *testing.T) {
 // rather than at the write stream's header, which is late enough for a copy
 // made on the way there to hide behind it.
 func TestWrite_LargeContentIsNotCopiedWhole(t *testing.T) {
+	// No t.Parallel: this measures the process's live heap. See liveHeap.
 	if testing.Short() {
 		t.Skip("moves 64 MiB")
 	}
@@ -372,6 +381,7 @@ func (r *refusingWriteFiles) WriteFile(context.Context, ...grpc.CallOption) (grp
 // the path is a prefix of what was asked for — and returning that answer says
 // "written" about a file that was not.
 func TestWrite_AStreamThatStoppedAcceptingContentIsNotReportedAsAWrite(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	f.clients.filesOverride = &refusingWriteFiles{FileServiceClient: f.backend.files}
 
@@ -386,6 +396,7 @@ func TestWrite_AStreamThatStoppedAcceptingContentIsNotReportedAsAWrite(t *testin
 
 // TestEdit_ReturnsAReadableDiff.
 func TestEdit_ReturnsAReadableDiff(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("edit.go")
 	writeRemote(t, path, "package main\n\nconst version = \"0.1.0\"\n")
@@ -410,6 +421,7 @@ func TestEdit_ReturnsAReadableDiff(t *testing.T) {
 // model to add surrounding context, where "the edit failed" tells it to try
 // the same thing again.
 func TestEdit_TwoMatchesErrorsWithTheCountAndLeavesTheFileAlone(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("dup.go")
 	const original = "value := 1\nother := 2\nvalue := 1\n"
@@ -431,6 +443,7 @@ func TestEdit_TwoMatchesErrorsWithTheCountAndLeavesTheFileAlone(t *testing.T) {
 // TestEdit_ReplaceAllChangesEveryOccurrence, which is the other half of the
 // uniqueness rule.
 func TestEdit_ReplaceAllChangesEveryOccurrence(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("dup.go")
 	writeRemote(t, path, "value := 1\nother := 2\nvalue := 1\n")
@@ -449,6 +462,7 @@ func TestEdit_ReplaceAllChangesEveryOccurrence(t *testing.T) {
 
 // TestLs_ListsDirectoriesFirstWithHumanReadableSizes.
 func TestLs_ListsDirectoriesFirstWithHumanReadableSizes(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("src", "main.go"), "package main\n")
 	writeRemote(t, f.path("README.md"), strings.Repeat("x", 4096))
@@ -466,6 +480,7 @@ func TestLs_ListsDirectoriesFirstWithHumanReadableSizes(t *testing.T) {
 // TestLs_EmptyDirectorySaysSo rather than returning two absent lists the model
 // has to interpret.
 func TestLs_EmptyDirectorySaysSo(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	require.NoError(t, os.MkdirAll(f.path("empty"), 0o755))
 
@@ -479,6 +494,7 @@ func TestLs_EmptyDirectorySaysSo(t *testing.T) {
 
 // TestLs_TruncationIsReported.
 func TestLs_TruncationIsReported(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	for i := range 10 {
 		writeRemote(t, f.path("many", fmt.Sprintf("file%02d.txt", i)), "x")
@@ -503,6 +519,7 @@ func TestLs_TruncationIsReported(t *testing.T) {
 // set explicitly: files written a millisecond apart share a timestamp on a
 // filesystem with one-second granularity, which is most of them.
 func TestGlob_ReturnsMatchesNewestFirst(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("a", "one.go"), "package a\n")
 	writeRemote(t, f.path("b", "two.go"), "package b\n")
@@ -530,6 +547,7 @@ func TestGlob_ReturnsMatchesNewestFirst(t *testing.T) {
 // TestGlob_NoMatchesExplainsTheAnchoringRule, which is the mistake a model
 // makes here: *.go where **/*.go was meant.
 func TestGlob_NoMatchesExplainsTheAnchoringRule(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("deep", "main.go"), "package main\n")
 
@@ -544,6 +562,7 @@ func TestGlob_NoMatchesExplainsTheAnchoringRule(t *testing.T) {
 // TestGrep_RendersMatchesCompactlyWithContext, in grep's own shape: a colon
 // after the line number for a match, a dash for context.
 func TestGrep_RendersMatchesCompactlyWithContext(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	path := f.path("app.go")
 	writeRemote(t, path, "package main\n\nfunc handler() {\n\tpanic(\"boom\")\n}\n")
@@ -565,6 +584,7 @@ func TestGrep_RendersMatchesCompactlyWithContext(t *testing.T) {
 // so a truncated search is also an incomplete one, and saying only "truncated"
 // would let a model conclude the rest of the tree has no matches.
 func TestGrep_ReportsTruncationAndHowLittleWasRead(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	for i := range 20 {
 		writeRemote(t, f.path("pkg", fmt.Sprintf("file%02d.go", i)), "package pkg\n// TODO: something\n")
@@ -598,6 +618,7 @@ func (s *summarylessFiles) Grep(context.Context, *sandboxdv1.GrepRequest, ...grp
 // rendered as a search that found nothing, and the model's next move after "no
 // matches" is to stop looking there.
 func TestGrep_ASearchWithoutASummaryIsNotReportedAsNoMatches(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	f.clients.filesOverride = &summarylessFiles{FileServiceClient: f.backend.files}
 
@@ -609,6 +630,7 @@ func TestGrep_ASearchWithoutASummaryIsNotReportedAsNoMatches(t *testing.T) {
 
 // TestGrep_FilesOnlyReturnsNames.
 func TestGrep_FilesOnlyReturnsNames(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("one.go"), "// TODO: a\n// TODO: b\n")
 
@@ -623,6 +645,7 @@ func TestGrep_FilesOnlyReturnsNames(t *testing.T) {
 
 // TestGrep_NoMatchesSaysWhatWasSearched.
 func TestGrep_NoMatchesSaysWhatWasSearched(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	writeRemote(t, f.path("one.go"), "package one\n")
 
@@ -644,6 +667,7 @@ func TestGrep_NoMatchesSaysWhatWasSearched(t *testing.T) {
 // unconfined and there is no rejection to name roots in, which the test below
 // asserts rather than leaves implied.
 func TestFiles_JailRejectionNamesTheAllowedRoots(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{execDisabled: true})
 	outside := filepath.Join(t.TempDir(), "escape.txt")
 
@@ -662,6 +686,7 @@ func TestFiles_JailRejectionNamesTheAllowedRoots(t *testing.T) {
 // roots existed — would be the model-facing version of telling an operator
 // they are confined when they are not.
 func TestFiles_AnUnconfinedAgentIsNotToldItIsConfined(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	elsewhere := filepath.Join(t.TempDir(), "anywhere.txt")
 

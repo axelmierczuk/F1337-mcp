@@ -13,6 +13,7 @@ import (
 // TestSelection_ExplicitArgumentOverridesTheStickyDefault: rule 1 beats
 // rule 2, and it does so without disturbing rule 2.
 func TestSelection_ExplicitArgumentOverridesTheStickyDefault(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -30,6 +31,7 @@ func TestSelection_ExplicitArgumentOverridesTheStickyDefault(t *testing.T) {
 // without anyone revisiting the calls written while it had one member, and
 // implicit targeting is how the wrong host gets written to.
 func TestSelection_NoTargetIsAStructuredError(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 
@@ -45,6 +47,7 @@ func TestSelection_NoTargetIsAStructuredError(t *testing.T) {
 // TestSelection_EmptyFleetPointsAtEnrollment: with nothing registered, the
 // answer is not "select something" but "there is nothing to select".
 func TestSelection_EmptyFleetPointsAtEnrollment(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	text := f.fails("fleet_info", map[string]any{}, "")
 	assert.Contains(t, text, "none are registered")
@@ -55,6 +58,7 @@ func TestSelection_EmptyFleetPointsAtEnrollment(t *testing.T) {
 // file, not in the process, which is the whole reason it is persisted rather
 // than held in memory.
 func TestSelection_SurvivesAServerRestart(t *testing.T) {
+	t.Parallel()
 	first := newFixture(t, fixtureOptions{})
 	first.add("build-box", "build-box.internal:8722", nil)
 	first.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -78,6 +82,7 @@ func TestSelection_SurvivesAServerRestart(t *testing.T) {
 // design cannot: two clients against one registry, neither moving the other's
 // target out from under it.
 func TestSelection_TwoIdentitiesAreIndependent(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -103,6 +108,7 @@ func TestSelection_TwoIdentitiesAreIndependent(t *testing.T) {
 // identity that a real client supplies without knowing anything about
 // fleet: the implementation name it reports at connect time.
 func TestSelection_ClientsWithDistinctImplementationNamesAreDistinct(t *testing.T) {
+	t.Parallel()
 	first := newFixture(t, fixtureOptions{clientName: "editor-a"})
 	first.add("build-box", "build-box.internal:8722", nil)
 	first.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -122,6 +128,7 @@ func TestSelection_ClientsWithDistinctImplementationNamesAreDistinct(t *testing.
 // mints is the spec-shaped half of the design, and it has to actually work
 // when passed back.
 func TestSelection_HandleResolvesAsTheSandboxArgument(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -146,6 +153,7 @@ func TestSelection_HandleResolvesAsTheSandboxArgument(t *testing.T) {
 // wrong when another client removed its target, and the fix is to re-select
 // rather than to correct a name.
 func TestSelection_StaleSelectionIsDistinctFromATypo(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.add("gpu-01", "gpu-01.internal:8722", nil)
@@ -219,6 +227,7 @@ var echoFixtures = map[string]struct {
 // moment it is registered — including one that bypasses this package's
 // helpers, which is exactly the case a per-handler convention would miss.
 func TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox(t *testing.T) {
+	t.Parallel()
 	listed, err := newFixture(t, fixtureOptions{}).session.ListTools(t.Context(), &mcp.ListToolsParams{})
 	require.NoError(t, err)
 	require.NotEmpty(t, listed.Tools)
@@ -278,6 +287,7 @@ func TestEcho_EveryRegisteredToolCarriesTheResolvedSandbox(t *testing.T) {
 // from its own input schema, without knowing anything about it. It catches a
 // tool registered outside the helpers before anyone has written it a fixture.
 func TestEcho_SynthesisedCallsAlsoEcho(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	f.ok("fleet_select", map[string]any{"name": "build-box"}, "")
@@ -312,6 +322,7 @@ func TestEcho_SynthesisedCallsAlsoEcho(t *testing.T) {
 // TestEcho_NoTargetedToolRunsWithoutResolution is the other half: whatever a
 // targeted tool does, it cannot do it before a sandbox has been resolved.
 func TestEcho_NoTargetedToolRunsWithoutResolution(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	f.add("build-box", "build-box.internal:8722", nil)
 	// Deliberately nothing selected.

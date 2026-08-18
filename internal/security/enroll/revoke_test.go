@@ -16,6 +16,7 @@ import (
 )
 
 func TestRevoke_InvalidatesAnUnusedToken(t *testing.T) {
+	t.Parallel()
 	store, err := enroll.OpenTokenStore(filepath.Join(t.TempDir(), "tokens.yaml"))
 	require.NoError(t, err)
 
@@ -36,6 +37,7 @@ func TestRevoke_InvalidatesAnUnusedToken(t *testing.T) {
 // that it is revoked, and a later attempt to use it should read as "withdrawn"
 // rather than "never existed".
 func TestRevoke_LeavesTheRecordVisible(t *testing.T) {
+	t.Parallel()
 	store, err := enroll.OpenTokenStore(filepath.Join(t.TempDir(), "tokens.yaml"))
 	require.NoError(t, err)
 	_, rec, err := store.Mint(enroll.MintOptions{Name: "build-box"})
@@ -55,6 +57,7 @@ func TestRevoke_LeavesTheRecordVisible(t *testing.T) {
 // different processes: `enroll revoke` in one has to stop `serve` in the other
 // from honouring the token.
 func TestRevoke_IsVisibleToAStoreOpenedAfterwards(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 	minting, err := enroll.OpenTokenStore(path)
 	require.NoError(t, err)
@@ -72,6 +75,7 @@ func TestRevoke_IsVisibleToAStoreOpenedAfterwards(t *testing.T) {
 // A prefix is enough, because that is how an operator will use it — but only
 // one that identifies a single token.
 func TestRevoke_AcceptsAPrefix(t *testing.T) {
+	t.Parallel()
 	store, err := enroll.OpenTokenStore(filepath.Join(t.TempDir(), "tokens.yaml"))
 	require.NoError(t, err)
 	_, rec, err := store.Mint(enroll.MintOptions{Name: "build-box"})
@@ -95,6 +99,7 @@ func TestRevoke_AcceptsAPrefix(t *testing.T) {
 // cannot be asked for a collision. Revoke matches on the stored hash, so what
 // makes two entries ambiguous is a shared prefix, not a shared preimage.
 func TestRevoke_RefusesAnAmbiguousPrefix(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 	now := time.Now().UTC()
 	issued := now.Add(-time.Minute).Format(time.RFC3339Nano)
@@ -127,6 +132,7 @@ func TestRevoke_RefusesAnAmbiguousPrefix(t *testing.T) {
 }
 
 func TestRevoke_RejectsAnUnknownID(t *testing.T) {
+	t.Parallel()
 	store, err := enroll.OpenTokenStore(filepath.Join(t.TempDir(), "tokens.yaml"))
 	require.NoError(t, err)
 	_, err = store.Revoke("deadbeef")
@@ -137,6 +143,7 @@ func TestRevoke_RejectsAnUnknownID(t *testing.T) {
 // reporting it as success would tell the operator they closed a window they did
 // not touch.
 func TestRevoke_RefusesATokenThatIsAlreadySpent(t *testing.T) {
+	t.Parallel()
 	store, err := enroll.OpenTokenStore(filepath.Join(t.TempDir(), "tokens.yaml"))
 	require.NoError(t, err)
 	token, rec, err := store.Mint(enroll.MintOptions{Name: "build-box"})
@@ -164,6 +171,7 @@ func TestRevoke_RefusesATokenThatIsAlreadySpent(t *testing.T) {
 // mint/serve split, and a lock held only in-process would pass a test that
 // shared one store and fail in production.
 func TestRevoke_RacingARedemptionLeavesExactlyOneWinner(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 	operator, err := enroll.OpenTokenStore(path)
 	require.NoError(t, err)
@@ -238,6 +246,7 @@ func TestRevoke_RacingARedemptionLeavesExactlyOneWinner(t *testing.T) {
 // The id must be derived from the stored hash rather than from the token, or a
 // listing would be publishing a prefix of the secret it is meant not to show.
 func TestTokenID_IsNotDerivedFromTheTokenValue(t *testing.T) {
+	t.Parallel()
 	store, err := enroll.OpenTokenStore(filepath.Join(t.TempDir(), "tokens.yaml"))
 	require.NoError(t, err)
 	token, rec, err := store.Mint(enroll.MintOptions{Name: "build-box"})

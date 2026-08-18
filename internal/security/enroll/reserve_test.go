@@ -35,6 +35,7 @@ import (
 // one class of address an enrolling host may add on its own, and 127.0.0.0/8
 // has sixteen million of them.
 func TestEnroll_SANsRejectedByTheCARecordNothing(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -66,6 +67,7 @@ func TestEnroll_SANsRejectedByTheCARecordNothing(t *testing.T) {
 // The same ordering, reached through the operator's own input rather than the
 // caller's: a token minted for a name the CA cannot put in a certificate.
 func TestEnroll_UncertifiableReservedNameRecordsNothing(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -88,6 +90,7 @@ func TestEnroll_UncertifiableReservedNameRecordsNothing(t *testing.T) {
 // A label one character under the DNS limit fits; the same label with the "-2"
 // a collision appends does not.
 func TestEnroll_UncertifiableCollisionNameRecordsNothing(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -120,6 +123,7 @@ func TestEnroll_UncertifiableCollisionNameRecordsNothing(t *testing.T) {
 // starts reaching the leaf again — which is the exact defect rounds 1, 2 and 3
 // each found once — the overshoot stops being harmless, and this fails.
 func TestEnroll_OvershotCollisionNameReachesNoCertificate(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -167,6 +171,7 @@ func (b brokenSigner) CertPEM() []byte { return b.bundle }
 // InvalidArgument tells an unauthenticated caller its request was malformed
 // when it was not, and hands it the control plane's internal detail on the way.
 func TestEnroll_SigningFailureIsNotBlamedOnTheCaller(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: brokenSigner{bundle: caObj.CertPEM()}}
@@ -194,6 +199,7 @@ func TestEnroll_SigningFailureIsNotBlamedOnTheCaller(t *testing.T) {
 // same shape of gap that let the subject through. It is asserted here so that a
 // later change to SignCSR that "helpfully" carries CSR names over is caught.
 func TestEnroll_CSRContentsDoNotReachTheLeaf(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -235,6 +241,7 @@ func TestEnroll_CSRContentsDoNotReachTheLeaf(t *testing.T) {
 // Left bracketed it reached the certificate as a DNS name, which the CA then
 // refused — after the registry entry had been written.
 func TestEnroll_BareBracketedIPv6LoopbackIsCertified(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}

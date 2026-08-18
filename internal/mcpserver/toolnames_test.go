@@ -51,6 +51,7 @@ var allToolNames = []string{
 // than a per-name Contains loop for that second half — a loop over the expected
 // names cannot see an extra one.
 func TestToolsListReturnsExactlyTheNamedTools(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 
 	listed, err := f.session.ListTools(t.Context(), &mcp.ListToolsParams{})
@@ -74,6 +75,7 @@ func TestToolsListReturnsExactlyTheNamedTools(t *testing.T) {
 // not act on a fleet, it acts on one member of one, so an argument named
 // "fleet" there would be actively wrong.
 func TestToolNamesDoNotRenameTheConcept(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 
 	listed, err := f.session.ListTools(t.Context(), &mcp.ListToolsParams{})

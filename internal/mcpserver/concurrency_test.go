@@ -17,6 +17,7 @@ import (
 // update would move one client's target onto another's host, which is the one
 // failure mode this system must not have.
 func TestConcurrent_SelectionsDoNotInterfere(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	const identities = 8
 	const rounds = 6
@@ -55,6 +56,7 @@ func TestConcurrent_SelectionsDoNotInterfere(t *testing.T) {
 // two of them interleaving would leave a name registered twice, and a later
 // call would then reach whichever copy sorted first.
 func TestConcurrent_AddNeverRegistersANameTwice(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t, fixtureOptions{})
 	const workers = 6
 
@@ -92,6 +94,7 @@ func TestConcurrent_AddNeverRegistersANameTwice(t *testing.T) {
 // genuinely overlap. Read-modify-writing the closer list without a lock is a
 // data race that -race would eventually catch as a CI flake.
 func TestConcurrent_CloseIsSafeAndIdempotent(t *testing.T) {
+	t.Parallel()
 	server, err := mcpserver.New(mcpserver.Options{
 		ConfigDir: t.TempDir(),
 		LogWriter: &testWriter{t: t},

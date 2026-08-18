@@ -53,6 +53,7 @@ func leafOf(t *testing.T, certPEM []byte) *x509.Certificate {
 // plane obliges, that host can present itself as prod-db to the MCP server for
 // the leaf's whole 90-day life, and mTLS stops being worth anything.
 func TestEnroll_RequestedAddressesCannotWidenTheCertificate(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -77,6 +78,7 @@ func TestEnroll_RequestedAddressesCannotWidenTheCertificate(t *testing.T) {
 }
 
 func TestEnroll_WildcardAddressRejected(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -99,6 +101,7 @@ func TestEnroll_WildcardAddressRejected(t *testing.T) {
 // The leaf carries what the operator authorized at mint time, and nothing the
 // enrolling host added on its own.
 func TestEnroll_LeafCarriesOnlyAuthorizedNames(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -136,6 +139,7 @@ func TestEnroll_LeafCarriesOnlyAuthorizedNames(t *testing.T) {
 // only the sandbox, and says so rather than quietly certifying whatever the
 // agent asked for.
 func TestEnroll_TokenWithoutAddressesNamesOnlyTheSandbox(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -164,6 +168,7 @@ func TestEnroll_TokenWithoutAddressesNamesOnlyTheSandbox(t *testing.T) {
 // Loopback names the enrolling host and nothing else, so it cannot be used to
 // impersonate a peer and does not need pre-authorization.
 func TestEnroll_LoopbackIsAlwaysAllowed(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -188,6 +193,7 @@ func TestEnroll_LoopbackIsAlwaysAllowed(t *testing.T) {
 // Leaving it unbounded means an attacker who finds it can drive the CA's
 // signing path as fast as the network allows.
 func TestEnroll_RateLimited(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{
@@ -212,6 +218,12 @@ func TestEnroll_RateLimited(t *testing.T) {
 	assert.True(t, limited, "repeated enrollment attempts must eventually be throttled")
 }
 
+// Sequential, deliberately. The last three lines below turn on a 20ms window:
+// two adjacent Allow calls have to land inside one, and a third has to land
+// after it. Nothing here is shared with another test — it is the *scheduler*
+// that is shared, and running this alongside a dozen other suites is what puts
+// a 20ms gap between two consecutive statements. Parallelism cannot make this
+// test faster (it is 40ms) and can only make it lie.
 func TestRateLimiter_GlobalAndPerPeer(t *testing.T) {
 	perPeer := enroll.NewRateLimiter(time.Minute, 2, 0)
 	require.NoError(t, perPeer.Allow("10.0.0.1"))
@@ -239,6 +251,7 @@ func TestRateLimiter_GlobalAndPerPeer(t *testing.T) {
 // token that only exists in the minting process's memory can never be
 // redeemed.
 func TestTokenStore_PersistsAcrossProcesses(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 
 	minter, err := enroll.OpenTokenStore(path)
@@ -261,6 +274,7 @@ func TestTokenStore_PersistsAcrossProcesses(t *testing.T) {
 }
 
 func TestTokenStore_FileHoldsNoPlaintextToken(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 	store, err := enroll.OpenTokenStore(path)
 	require.NoError(t, err)
@@ -276,6 +290,7 @@ func TestTokenStore_FileHoldsNoPlaintextToken(t *testing.T) {
 // enrolls. Without pruning, the store only grows, and every redemption scans
 // all of it.
 func TestTokenStore_PrunesSpentTokens(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 
 	// Written directly rather than minted, because a token old enough to
@@ -322,6 +337,7 @@ func tokenYAML(hash, name, issued, expiresOrUsed string, used bool) string {
 // CA itself — that is the whole point of the change, since it is what lets the
 // CA private key stay out of the listener.
 func TestDial_PinnedCAVerifiesAChainedLeaf(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -339,6 +355,7 @@ func TestDial_PinnedCAVerifiesAChainedLeaf(t *testing.T) {
 // compromised sandbox from standing up a fake enrollment endpoint and
 // harvesting tokens from hosts that were told to trust this fleet's CA.
 func TestDial_AgentLeafCannotImpersonateTheControlPlane(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -391,6 +408,7 @@ func agentServingCert(t *testing.T, caObj *ca.CA, name string) tls.Certificate {
 // The registry entry is what reserves a name, so it is taken before the
 // certificate is signed.
 func TestEnroll_RecordsSandboxInFleet(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	rec := &recordingFleet{}

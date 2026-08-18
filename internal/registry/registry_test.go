@@ -25,6 +25,12 @@ func newTestRegistry(t *testing.T) (*registry.Registry, string) {
 	return r, path
 }
 
+// Sequential, and it cannot be otherwise: every case here calls t.Setenv, and
+// the runtime panics if that is reached from a test with t.Parallel set — the
+// environment is process-wide, so a parallel test changing it would be changing
+// it under every other test at once. That is not a limitation of this test, it
+// is what ConfigDir reads: the resolution order it exists to implement is an
+// order over environment variables.
 func TestConfigDir(t *testing.T) {
 	// Every case pins the search roots at a temp directory. Left to the real
 	// environment these would consult the developer's own ~/.config, where an
@@ -99,6 +105,7 @@ func TestConfigDir(t *testing.T) {
 }
 
 func TestRoundTrip_AllFieldsSurvive(t *testing.T) {
+	t.Parallel()
 	r, path := newTestRegistry(t)
 
 	now := time.Now().UTC().Truncate(time.Second)
@@ -141,6 +148,7 @@ func TestRoundTrip_AllFieldsSurvive(t *testing.T) {
 }
 
 func TestAdd_DuplicateNameFails(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	require.NoError(t, r.Add(registry.Sandbox{Name: "a", Address: "x:1"}))
 	err := r.Add(registry.Sandbox{Name: "a", Address: "y:2"})
@@ -148,18 +156,21 @@ func TestAdd_DuplicateNameFails(t *testing.T) {
 }
 
 func TestAdd_RequiresName(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	err := r.Add(registry.Sandbox{Address: "x:1"})
 	require.Error(t, err)
 }
 
 func TestGet_NotFound(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	_, err := r.Get("missing")
 	require.ErrorIs(t, err, registry.ErrNotFound)
 }
 
 func TestRemove(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	require.NoError(t, r.Add(registry.Sandbox{Name: "a", Address: "x:1"}))
 	require.NoError(t, r.Add(registry.Sandbox{Name: "b", Address: "y:2"}))
@@ -176,12 +187,14 @@ func TestRemove(t *testing.T) {
 }
 
 func TestRemove_NotFound(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	err := r.Remove("missing")
 	require.ErrorIs(t, err, registry.ErrNotFound)
 }
 
 func TestUpdateLastSeen(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	require.NoError(t, r.Add(registry.Sandbox{Name: "a", Address: "x:1"}))
 
@@ -194,6 +207,7 @@ func TestUpdateLastSeen(t *testing.T) {
 }
 
 func TestUpdateHostInfo(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	require.NoError(t, r.Add(registry.Sandbox{Name: "a", Address: "x:1"}))
 
@@ -207,6 +221,7 @@ func TestUpdateHostInfo(t *testing.T) {
 }
 
 func TestSelection_PersistsAcrossRestart(t *testing.T) {
+	t.Parallel()
 	r, path := newTestRegistry(t)
 	require.NoError(t, r.SetSelection("client-1", "build-box"))
 
@@ -220,6 +235,7 @@ func TestSelection_PersistsAcrossRestart(t *testing.T) {
 }
 
 func TestSelection_IndependentPerClient(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	require.NoError(t, r.SetSelection("client-1", "build-box"))
 	require.NoError(t, r.SetSelection("client-2", "mac-mini"))
@@ -242,6 +258,7 @@ func TestSelection_IndependentPerClient(t *testing.T) {
 }
 
 func TestSelection_Unset(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	_, ok, err := r.GetSelection("nobody")
 	require.NoError(t, err)
@@ -249,6 +266,7 @@ func TestSelection_Unset(t *testing.T) {
 }
 
 func TestSelection_Clear(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	require.NoError(t, r.SetSelection("client-1", "build-box"))
 	require.NoError(t, r.ClearSelection("client-1"))
@@ -263,6 +281,7 @@ func TestSelection_Clear(t *testing.T) {
 // running the removal is rarely the only one pointing at it, and a selection
 // left pointing at a sandbox that no longer exists is worse than none.
 func TestSelection_ClearForSandboxReachesEveryClient(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 	require.NoError(t, r.SetSelection("client-1", "build-box"))
 	require.NoError(t, r.SetSelection("client-2", "build-box"))
@@ -294,6 +313,7 @@ func TestSelection_ClearForSandboxReachesEveryClient(t *testing.T) {
 // the caller's judgement; whether a string is fit to be a YAML key is this
 // package's.
 func TestSelection_RefusesAnIdentityUnfitToBeAKey(t *testing.T) {
+	t.Parallel()
 	r, path := newTestRegistry(t)
 
 	for name, id := range map[string]string{
@@ -318,6 +338,7 @@ func TestSelection_RefusesAnIdentityUnfitToBeAKey(t *testing.T) {
 }
 
 func TestMalformedFile_ClearErrorNamingPath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("not: valid: yaml: [unterminated"), 0o600))
@@ -328,6 +349,7 @@ func TestMalformedFile_ClearErrorNamingPath(t *testing.T) {
 }
 
 func TestTruncatedFile_DoesNotPanic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("version: 1\nsandboxes:\n  - name: a\n    addr"), 0o600))
@@ -338,6 +360,7 @@ func TestTruncatedFile_DoesNotPanic(t *testing.T) {
 }
 
 func TestEmptyFile_TreatedAsEmptyRegistry(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(""), 0o600))
@@ -350,6 +373,7 @@ func TestEmptyFile_TreatedAsEmptyRegistry(t *testing.T) {
 }
 
 func TestConcurrentWriters_DoNotCorruptFile(t *testing.T) {
+	t.Parallel()
 	r, path := newTestRegistry(t)
 
 	const n = 50
@@ -388,6 +412,7 @@ func TestConcurrentWriters_DoNotCorruptFile(t *testing.T) {
 }
 
 func TestConcurrentSelections_DoNotCorruptFile(t *testing.T) {
+	t.Parallel()
 	r, _ := newTestRegistry(t)
 
 	const n = 50
@@ -411,6 +436,7 @@ func TestConcurrentSelections_DoNotCorruptFile(t *testing.T) {
 }
 
 func TestFilePermissions(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits are not meaningful on Windows")
 	}

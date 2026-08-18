@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -524,15 +525,97 @@ func toAnySlice(in []string) []any {
 	return out
 }
 
-// freePort reserves a loopback port and releases it, for a test that needs a
-// port number before the process that will bind it exists.
+// freePort hands out a loopback port that nothing else in this process will
+// take, for the tests that have to name a port before the thing that binds it
+// exists.
+//
+// The obvious implementation — bind :0, read the port, close the listener — is
+// what this used to be, and it is a reserve-and-release with a window in it.
+// While every test ran one at a time that window was closed by construction.
+// It is not any more, and there are two ways through it: two calls racing for
+// the same port, and an unrelated `Listen(":0")` elsewhere in the suite landing
+// on a port a caller has reserved but not yet bound. Neither fails here — both
+// fail once, on someone else's machine, in a test that reads as unrelated.
+//
+// So the ports come from below the ephemeral range instead of out of it. Every
+// platform this suite runs on allocates :0 from a range starting at 32768
+// (Linux) or 49152 (macOS, Windows), so a port under 30000 is one the kernel
+// will not hand to anyone asking for "any port" — which is the whole of the
+// second failure. The counter under the mutex is the whole of the first.
+//
+// A port can still be held by something else on the machine, which is why each
+// candidate is proved bindable before it is returned rather than assumed to be.
+var freePortState struct {
+	mu   sync.Mutex
+	next int
+}
+
+// freePortBase and freePortLimit bracket the range freePort draws from: above
+// the registered ports in common use and below every platform's ephemeral
+// range. The offset by pid keeps two copies of this binary — `go test ./...`
+// runs packages concurrently — from marching over the same ports in step.
+const (
+	freePortBase  = 20000
+	freePortLimit = 30000
+)
+
 func freePort(t *testing.T) int {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := lis.Addr().(*net.TCPAddr).Port
-	require.NoError(t, lis.Close())
-	return port
+
+	freePortState.mu.Lock()
+	defer freePortState.mu.Unlock()
+	if freePortState.next == 0 {
+		freePortState.next = freePortBase + os.Getpid()%(freePortLimit-freePortBase)
+	}
+
+	for range freePortLimit - freePortBase {
+		port := freePortState.next
+		freePortState.next++
+		if freePortState.next >= freePortLimit {
+			freePortState.next = freePortBase
+		}
+		// Proved free, not assumed: the range is unlikely to be busy but it is
+		// not this process's to own.
+		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		require.NoError(t, lis.Close())
+		return port
+	}
+	t.Fatalf("no free port between %d and %d", freePortBase, freePortLimit)
+	return 0
+}
+
+// TestFreePort_IsDistinctAndOutsideTheEphemeralRange pins the two properties
+// the sweep to parallel tests actually depends on, because neither of them
+// shows up as a failure here when it breaks — they show up as a port collision
+// in an unrelated test, on a loaded machine, once.
+//
+// The bound is 32768: the lowest ephemeral floor of the three platforms this
+// suite runs on (Linux; macOS and Windows start at 49152). A port below it is
+// one no `Listen(":0")` anywhere else in this binary can be handed.
+func TestFreePort_IsDistinctAndOutsideTheEphemeralRange(t *testing.T) {
+	t.Parallel()
+
+	const lowestEphemeralFloor = 32768
+	seen := map[int]bool{}
+	for range 200 {
+		port := freePort(t)
+
+		assert.Falsef(t, seen[port], "freePort handed out %d twice", port)
+		seen[port] = true
+
+		assert.Greaterf(t, port, 1023, "freePort returned %d, which is a privileged port", port)
+		assert.Lessf(t, port, lowestEphemeralFloor,
+			"freePort returned %d, which is inside the ephemeral range: an unrelated Listen(\":0\") "+
+				"in a parallel test can be handed the same port between the reservation and the bind", port)
+
+		// And it is free *now*, which is the only moment a caller can use it.
+		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		require.NoErrorf(t, err, "freePort returned %d, which is not bindable", port)
+		require.NoError(t, lis.Close())
+	}
 }
 
 // eventually polls until cond holds, failing with msg if it never does.

@@ -93,6 +93,7 @@ type fakeNameChecker struct {
 func (f fakeNameChecker) Exists(name string) bool { return f.existing[name] }
 
 func TestFullLoop_MintEnrollValidatesAgainstCA(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -133,6 +134,7 @@ func TestFullLoop_MintEnrollValidatesAgainstCA(t *testing.T) {
 }
 
 func TestRedeem_UsedTwiceSequentially(t *testing.T) {
+	t.Parallel()
 	store := enroll.NewTokenStore()
 	token, _, err := store.Mint(enroll.MintOptions{Name: "build-box"})
 	require.NoError(t, err)
@@ -145,6 +147,7 @@ func TestRedeem_UsedTwiceSequentially(t *testing.T) {
 }
 
 func TestRedeem_ConcurrentRedemption_ExactlyOneSucceeds(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	// Rate limiting is disabled here so that what this test measures is the
@@ -203,6 +206,7 @@ func TestRedeem_ConcurrentRedemption_ExactlyOneSucceeds(t *testing.T) {
 }
 
 func TestRedeem_Expired(t *testing.T) {
+	t.Parallel()
 	store := enroll.NewTokenStore()
 	token, _, err := store.Mint(enroll.MintOptions{Name: "build-box", TTL: 10 * time.Millisecond})
 	require.NoError(t, err)
@@ -214,6 +218,7 @@ func TestRedeem_Expired(t *testing.T) {
 }
 
 func TestEnroll_ExpiredTokenRejectedOverRPC(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -242,6 +247,7 @@ func TestEnroll_ExpiredTokenRejectedOverRPC(t *testing.T) {
 }
 
 func TestEnroll_InvalidTokenRejected(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -263,6 +269,7 @@ func TestEnroll_InvalidTokenRejected(t *testing.T) {
 }
 
 func TestDial_WrongFingerprintAbortsBeforeTokenSent(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -295,6 +302,7 @@ func TestDial_WrongFingerprintAbortsBeforeTokenSent(t *testing.T) {
 }
 
 func TestDial_RequiresFingerprintUnlessOptedOut(t *testing.T) {
+	t.Parallel()
 	_, err := enroll.Dial(enroll.DialOptions{Address: "bufnet"})
 	require.ErrorIs(t, err, enroll.ErrFingerprintRequired)
 
@@ -303,6 +311,7 @@ func TestDial_RequiresFingerprintUnlessOptedOut(t *testing.T) {
 }
 
 func TestEnroll_NameCollisionAssignsDistinctName(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{
@@ -335,6 +344,7 @@ func TestEnroll_NameCollisionAssignsDistinctName(t *testing.T) {
 }
 
 func TestPrivateKeyNeverAppearsOnWire(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -382,6 +392,7 @@ func TestPrivateKeyNeverAppearsOnWire(t *testing.T) {
 }
 
 func TestEnroll_RejectsInvalidCSR(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}

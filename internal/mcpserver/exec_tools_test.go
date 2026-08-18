@@ -48,6 +48,7 @@ func (f *agentFixture) exec(t *testing.T, mode string, args map[string]any) exec
 
 // TestExec_SuccessReturnsExitZeroAndItsOutput.
 func TestExec_SuccessReturnsExitZeroAndItsOutput(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	out := f.exec(t, "streams", nil)
@@ -62,6 +63,7 @@ func TestExec_SuccessReturnsExitZeroAndItsOutput(t *testing.T) {
 // TestExec_FailureIsASuccessfulCallCarryingTheDiagnosis. An error result would
 // throw away the compiler output that is the only thing the model can act on.
 func TestExec_FailureIsASuccessfulCallCarryingTheDiagnosis(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	out := f.exec(t, "fail", nil)
@@ -75,6 +77,7 @@ func TestExec_FailureIsASuccessfulCallCarryingTheDiagnosis(t *testing.T) {
 // TestExec_EmptyOutputSaysSo. A blank result is indistinguishable from a hung
 // call, and the model's next move differs completely between the two.
 func TestExec_EmptyOutputSaysSo(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	out := f.exec(t, "quiet", nil)
@@ -87,6 +90,7 @@ func TestExec_EmptyOutputSaysSo(t *testing.T) {
 
 // TestExec_TimeoutNamesTheLimitThatWasHit.
 func TestExec_TimeoutNamesTheLimitThatWasHit(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	out := f.exec(t, "sleep", map[string]any{"argv": selfArgv("30"), "timeout_seconds": 1})
@@ -100,6 +104,7 @@ func TestExec_TimeoutNamesTheLimitThatWasHit(t *testing.T) {
 // TestExec_TruncatedOutputIsMarkedWithWhatWasDropped. The whole point of the
 // cap is that the model can tell a capped result from a complete one.
 func TestExec_TruncatedOutputIsMarkedWithWhatWasDropped(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	out := f.exec(t, "spew", map[string]any{"argv": selfArgv("262144"), "max_output_bytes": 4096})
@@ -116,6 +121,7 @@ func TestExec_TruncatedOutputIsMarkedWithWhatWasDropped(t *testing.T) {
 // TestExec_DefaultCapAppliesWithoutAnArgument covers the case the model will
 // actually hit: it did not think about output size at all.
 func TestExec_DefaultCapAppliesWithoutAnArgument(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	out := f.exec(t, "spew", map[string]any{"argv": selfArgv("1048576")})
@@ -132,6 +138,7 @@ func TestExec_DefaultCapAppliesWithoutAnArgument(t *testing.T) {
 // symptom this test exists to rule out: a sandbox slowly filling with
 // abandoned work that nothing is watching.
 func TestExec_CancellingTheToolCallKillsTheRemoteProcess(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	pidFile := filepath.Join(t.TempDir(), "helper.pid")
@@ -179,6 +186,7 @@ func requireProcessGone(t *testing.T, pid int) {
 // TestExec_MissingBinaryIsAToolErrorNamingIt. The other half of the contract:
 // a request the agent would not run at all is an error, not an exit code.
 func TestExec_MissingBinaryIsAToolErrorNamingIt(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	text := f.fails("fleet_exec", map[string]any{"argv": []any{"definitely-not-a-real-binary-xyz"}})
@@ -191,6 +199,7 @@ func TestExec_MissingBinaryIsAToolErrorNamingIt(t *testing.T) {
 // TestExec_PolicyDenialIsAToolError covers the third failure the issue names
 // alongside "unreachable" and "binary not found".
 func TestExec_PolicyDenialIsAToolError(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{caps: policy.Caps{MaxTimeout: 2 * time.Second}})
 
 	text := f.fails("fleet_exec", map[string]any{
@@ -203,6 +212,7 @@ func TestExec_PolicyDenialIsAToolError(t *testing.T) {
 
 // TestExec_ArgvIsRequired: an empty argv never reaches the agent.
 func TestExec_ArgvIsRequired(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 	text := f.fails("fleet_exec", map[string]any{"argv": []any{}})
 	assert.Contains(t, text, "argv")
@@ -215,6 +225,7 @@ func TestExec_ArgvIsRequired(t *testing.T) {
 // expired, the call fails instantly, and the error tells the model its call
 // timed out and to raise timeout_seconds.
 func TestExec_AnAbsurdTimeoutIsRefusedRatherThanWrappedAround(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	// 2^33 seconds: past the point where twice it, in nanoseconds, leaves the
@@ -230,6 +241,7 @@ func TestExec_AnAbsurdTimeoutIsRefusedRatherThanWrappedAround(t *testing.T) {
 
 // TestExec_StdinIsDelivered.
 func TestExec_StdinIsDelivered(t *testing.T) {
+	t.Parallel()
 	f := newAgentFixture(t, backendOptions{})
 
 	out := f.exec(t, "cat", map[string]any{"stdin": "fed through stdin"})
@@ -295,6 +307,10 @@ func (s *floodStream) Recv() (*sandboxdv1.ExecResponse, error) {
 // stream, because a tool that buffered and then trimmed would also show
 // nothing afterwards.
 func TestExec_MegabytesOfOutputDoNotBlowUpTheServer(t *testing.T) {
+	// No t.Parallel. The assertion is on this process's live heap, which every
+	// other test in the binary also allocates from: a second test running
+	// alongside would be measured as this handler holding the payload. See the
+	// note in heap_test.go on what liveHeap actually reads.
 	if testing.Short() {
 		t.Skip("streams 256 MiB")
 	}

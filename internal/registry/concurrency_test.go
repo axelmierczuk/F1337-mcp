@@ -23,6 +23,7 @@ import (
 // updates are silently lost — the file stays valid YAML, it just quietly
 // forgets sandboxes.
 func TestSeparateHandles_ConcurrentAddsAllSurvive(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 
 	const writers = 8
@@ -65,6 +66,7 @@ func TestSeparateHandles_ConcurrentAddsAllSurvive(t *testing.T) {
 // Selections are a map inside the same file, so a lost update there loses one
 // client's target rather than a fleet member.
 func TestSeparateHandles_ConcurrentSelectionsAllSurvive(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 
 	seed, err := registry.Open(path)
@@ -111,6 +113,7 @@ func TestSeparateHandles_ConcurrentSelectionsAllSurvive(t *testing.T) {
 // invariant on every platform, including the ones that cannot reproduce the
 // symptom.
 func TestOpen_ParsesUnderTheCrossProcessLock(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 	seed, err := registry.Open(path)
 	require.NoError(t, err)
@@ -149,6 +152,7 @@ func TestOpen_ParsesUnderTheCrossProcessLock(t *testing.T) {
 // make — which reads downstream as a lost update, in a registry that never lost
 // one.
 func TestSeparateHandles_OpenConcurrentWithWritesAlwaysSucceeds(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 	seed, err := registry.Open(path)
 	require.NoError(t, err)
@@ -190,6 +194,7 @@ func TestSeparateHandles_OpenConcurrentWithWritesAlwaysSucceeds(t *testing.T) {
 // Exists backs the enrollment collision check, so its failure direction
 // matters: an unknown name is free, anything else is treated as taken.
 func TestExists(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "registry.yaml")
 	reg, err := registry.Open(path)
 	require.NoError(t, err)

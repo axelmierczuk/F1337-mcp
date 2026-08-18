@@ -21,6 +21,7 @@ import (
 // The criterion this whole feature exists for: a probe that has actually
 // passed before the call returns, not one that has merely been configured.
 func TestProcessStart_TCPProbeReturnsOnlyOnceThePortIsLive(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	port := freePort(t)
 
@@ -54,6 +55,7 @@ func TestProcessStart_TCPProbeReturnsOnlyOnceThePortIsLive(t *testing.T) {
 // described readiness and then did not wait for it has the same problem as one
 // with no probe at all.
 func TestProcessStart_AProbeIsWaitedOnWithoutAskingForIt(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	port := freePort(t)
 
@@ -73,6 +75,7 @@ func TestProcessStart_AProbeIsWaitedOnWithoutAskingForIt(t *testing.T) {
 // still running. A readiness failure reported on its own sends the model
 // straight into another tool call, which is the turn this is meant to save.
 func TestProcessStart_ProbeTimeoutReturnsReadyErrorAndLogs(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	args := f.startHelper("never-ready", "chatter", "6", "40", "starting up")
@@ -105,6 +108,7 @@ func TestProcessStart_ProbeTimeoutReturnsReadyErrorAndLogs(t *testing.T) {
 // The ready_probe schema is the highest-leverage thing here, so its failure
 // modes have to be legible rather than silently accepted.
 func TestProcessStart_ProbeSchemaRejectsAmbiguityWithAUsableMessage(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	t.Run("no condition", func(t *testing.T) {
@@ -128,6 +132,7 @@ func TestProcessStart_ProbeSchemaRejectsAmbiguityWithAUsableMessage(t *testing.T
 // A start with no probe says so, and says why it matters. The sentence is the
 // point: it is what stops "started" being read as "usable".
 func TestProcessStart_WithoutAProbeSaysWhatStartedDoesNotMean(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	out := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("bare", "silent"))
@@ -142,6 +147,7 @@ func TestProcessStart_WithoutAProbeSaysWhatStartedDoesNotMean(t *testing.T) {
 // Twenty processes have to stay compact, because a listing that costs a
 // thousand tokens per check is one a model stops making.
 func TestProcessList_StaysCompactAtTwentyProcesses(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	ids := make([]string, 0, 20)
@@ -185,6 +191,7 @@ func TestProcessList_StaysCompactAtTwentyProcesses(t *testing.T) {
 
 // A listing has to say enough about a process to act on without a second call.
 func TestProcessList_ReportsStatePidUptimeRestartsPortsAndLastLine(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	port := freePort(t)
 
@@ -209,6 +216,7 @@ func TestProcessList_ReportsStatePidUptimeRestartsPortsAndLastLine(t *testing.T)
 }
 
 func TestProcessList_FiltersByStateAndName(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	alive := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("keeper", "silent"))
@@ -240,6 +248,7 @@ func TestProcessList_FiltersByStateAndName(t *testing.T) {
 // produces nothing at all. A call that never returns cannot be told apart from
 // a hung agent, and a model cannot recover from it.
 func TestProcessLogs_FollowReturnsOnASilentProcess(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{maxFollowDuration: 2 * time.Second})
 
 	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("mute", "silent"))
@@ -262,6 +271,7 @@ func TestProcessLogs_FollowReturnsOnASilentProcess(t *testing.T) {
 
 // A follow asking for longer than the agent permits is clamped, not honoured.
 func TestProcessLogs_FollowIsClampedToTheAgentMaximum(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{maxFollowDuration: time.Second})
 
 	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("mute-2", "silent"))
@@ -282,6 +292,7 @@ func TestProcessLogs_FollowIsClampedToTheAgentMaximum(t *testing.T) {
 // than one that says it has a hole, because a reader draws conclusions from
 // the adjacency of two lines that were never adjacent.
 func TestProcessLogs_DroppedLinesAreMarkedInline(t *testing.T) {
+	t.Parallel()
 	// Both bounds are shrunk: the ring alone loses nothing, because the
 	// rotating file behind it is what makes the ring's contents recoverable.
 	// A line is genuinely gone only once it has fallen out of both.
@@ -321,6 +332,7 @@ func TestProcessLogs_DroppedLinesAreMarkedInline(t *testing.T) {
 }
 
 func TestProcessLogs_SeparatesStdoutFromStderr(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start",
@@ -347,6 +359,7 @@ func TestProcessLogs_SeparatesStdoutFromStderr(t *testing.T) {
 }
 
 func TestProcessLogs_UnknownProcessIDListsTheValidOnes(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("real-one", "silent"))
 
@@ -364,6 +377,7 @@ func TestProcessLogs_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 // the argument was accepted — which is the same class of quiet acceptance the
 // probe's two float arguments were fixed for.
 func TestProcessTools_RefuseANegativeSecondsArgument(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("bounded", "silent"))
 
@@ -395,6 +409,7 @@ func TestProcessTools_RefuseANegativeSecondsArgument(t *testing.T) {
 // A graceful stop has to report whether it escalated, because "stopped" and
 // "killed after refusing to stop" are different facts about the process.
 func TestProcessSignal_GracefulStopReportsEscalationToKill(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{gracePeriod: time.Second})
 
 	t.Run("a process that exits on TERM does not escalate", func(t *testing.T) {
@@ -437,6 +452,7 @@ func TestProcessSignal_GracefulStopReportsEscalationToKill(t *testing.T) {
 
 // Signalling an id that does not exist has to name the ones that do.
 func TestProcessSignal_UnknownProcessIDListsTheValidOnes(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	one := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("alpha", "silent"))
@@ -459,6 +475,7 @@ func TestProcessSignal_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 // With nothing running at all the message says that rather than listing an
 // empty set, because "no processes" and "wrong id" need different fixes.
 func TestProcessSignal_UnknownProcessIDWithAnEmptyAgentSaysSo(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	msg := f.liveFails("fleet_process_signal", map[string]any{"process_id": "nothing", "signal": "TERM"})
 	assert.Contains(t, msg, "no processes at all")
@@ -466,6 +483,7 @@ func TestProcessSignal_UnknownProcessIDWithAnEmptyAgentSaysSo(t *testing.T) {
 }
 
 func TestProcessSignal_RejectsAnUnknownSignalName(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	msg := f.liveFails("fleet_process_signal", map[string]any{"process_id": "x", "signal": "SIGBANANA"})
 	assert.Contains(t, msg, "TERM")
@@ -476,6 +494,7 @@ func TestProcessSignal_RejectsAnUnknownSignalName(t *testing.T) {
 // A restart is the same process, not a similar one: the id it is found by has
 // to survive, or every reference the model holds becomes stale.
 func TestProcessRestart_PreservesTheProcessIDAndReportsTheNewState(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	port := freePort(t)
 
@@ -510,6 +529,7 @@ func TestProcessRestart_PreservesTheProcessIDAndReportsTheNewState(t *testing.T)
 }
 
 func TestProcessRestart_UnknownProcessIDListsTheValidOnes(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("only", "silent"))
 
@@ -525,6 +545,7 @@ func TestProcessRestart_UnknownProcessIDListsTheValidOnes(t *testing.T) {
 // path liveOK cannot: an explicit sandbox argument, which must win over the
 // sticky selection and be what comes back.
 func TestProcessTools_EchoTheResolvedSandbox(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	started := liveOK[tools.ProcessStartResult](f, "fleet_process_start", f.startHelper("echoed", "silent"))
@@ -550,6 +571,7 @@ func TestProcessTools_EchoTheResolvedSandbox(t *testing.T) {
 // The five tools are registered under the names the docs promise, as separate
 // tools rather than one action-dispatched one.
 func TestProcessTools_AreFiveDistinctRegisteredTools(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	registered := map[string]bool{}
@@ -571,6 +593,7 @@ func TestProcessTools_AreFiveDistinctRegisteredTools(t *testing.T) {
 // described. This is the one assertion that fails if someone folds the probe
 // back into a oneof or drops the descriptions.
 func TestProcessStart_ProbeSchemaIsFlatAndDescribed(t *testing.T) {
+	t.Parallel()
 	f := newLiveFixture(t, liveAgentOptions{})
 
 	listed, err := f.session.ListTools(t.Context(), nil)

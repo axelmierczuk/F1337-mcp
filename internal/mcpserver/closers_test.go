@@ -19,6 +19,7 @@ import (
 // is the property: a fixture that supplies its own Clients registers no pool
 // closer at all, so the case that matters is the one a live test cannot reach.
 func TestServerClose_ReleasesInReverseOfRegistration(t *testing.T) {
+	t.Parallel()
 	var order []string
 	s := &Server{}
 	for _, name := range []string{"pool", "registrar"} {

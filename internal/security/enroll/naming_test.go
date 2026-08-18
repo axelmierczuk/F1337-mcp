@@ -24,6 +24,7 @@ import (
 // in the leaf's SANs and that leaf is a working impersonation of whatever it
 // names — for its whole life, to every client that trusts the fleet CA.
 func TestEnroll_RequestedNameCannotWidenTheCertificate(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		// A DNS name: impersonates another fleet member dialled by name.
 		"another fleet member": "prod-db.internal",
@@ -70,6 +71,7 @@ func TestEnroll_RequestedNameCannotWidenTheCertificate(t *testing.T) {
 // a certificate subject and a registry key, so it is bounded before it gets
 // there.
 func TestEnroll_RequestedNameIsBounded(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"too long":         strings.Repeat("a", 129),
 		"control char":     "build\nbox",
@@ -97,6 +99,7 @@ func TestEnroll_RequestedNameIsBounded(t *testing.T) {
 // legitimate operator choice for bulk enrollment — but a name this side did not
 // choose is a registry label, never a certified identity.
 func TestEnroll_HostChosenNameIsNotCertified(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -133,6 +136,7 @@ func TestEnroll_HostChosenNameIsNotCertified(t *testing.T) {
 // what that certificate is, and the milestone that adds an audited principal
 // will read it. A token authorizes an identity or it does not.
 func TestEnroll_HostChosenNameStaysOutOfTheSubject(t *testing.T) {
+	t.Parallel()
 	for _, claimed := range []string{controlPlaneHost, "prod-db.internal", "10.0.0.9"} {
 		t.Run(claimed, func(t *testing.T) {
 			caObj := newTestCA(t)
@@ -166,6 +170,7 @@ func TestEnroll_HostChosenNameStaysOutOfTheSubject(t *testing.T) {
 // A token that does reserve a name certifies that name, in the subject as well
 // as the SANs — the fix above must not have thrown the ordinary case away.
 func TestEnroll_ReservedNameIsCertifiedInTheSubject(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj}
@@ -186,6 +191,7 @@ func TestEnroll_ReservedNameIsCertifiedInTheSubject(t *testing.T) {
 // distinct name and not the one already in the fleet, or resolving the
 // collision would issue a certificate for the incumbent.
 func TestEnroll_CollisionResolvedNameIsWhatGetsCertified(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{
@@ -216,6 +222,7 @@ type alwaysTaken struct{}
 func (alwaysTaken) Exists(string) bool { return true }
 
 func TestEnroll_UnresolvableCollisionTerminates(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj, Names: alwaysTaken{}}
@@ -299,6 +306,7 @@ func (r *racingRecorder) settle() {
 // loser of the write has to be handed the next free name rather than an
 // Internal error and a spent token.
 func TestEnroll_ConcurrentEnrollmentsGetDistinctNames(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := newRacingRecorder()
@@ -365,6 +373,7 @@ func (failingRecorder) Record(enroll.EnrolledSandbox) error {
 // plane's problem, and its message names the control plane's filesystem, so it
 // belongs in the log rather than in the response.
 func TestEnroll_RegistryFailureDoesNotLeakControlPlaneDetail(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: caObj, Fleet: failingRecorder{}}
@@ -386,6 +395,7 @@ func TestEnroll_RegistryFailureDoesNotLeakControlPlaneDetail(t *testing.T) {
 // registry entry is written first, to reserve the name before signing, so
 // everything that can reject the request has to run before that write.
 func TestEnroll_UnsignableRequestRecordsNothing(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}

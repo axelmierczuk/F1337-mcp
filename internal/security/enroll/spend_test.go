@@ -34,6 +34,7 @@ import (
 // three rounds on #54 fixed something the operator never reached, because the
 // test called the repaired function directly.
 func TestEnroll_ARefusedRequestLeavesTheTokenSpendable(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		refused *sandboxdv1.EnrollRequest
@@ -112,6 +113,7 @@ func TestEnroll_ARefusedRequestLeavesTheTokenSpendable(t *testing.T) {
 // store says afterwards. A machine under load makes this test slower and does
 // not make it flakier.
 func TestEnroll_ConcurrentEnrollmentsValidateTogetherAndOnlyOneSpendsTheToken(t *testing.T) {
+	t.Parallel()
 	const racers = 8
 
 	caObj := newTestCA(t)
@@ -248,6 +250,7 @@ func TestEnroll_ConcurrentEnrollmentsValidateTogetherAndOnlyOneSpendsTheToken(t 
 // redemption. That refusal is correct. Its cost was not: the token was gone
 // before the check ran.
 func TestEnroll_ALoopbackSANOverflowLeavesTheTokenSpendable(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -300,6 +303,7 @@ func TestEnroll_ALoopbackSANOverflowLeavesTheTokenSpendable(t *testing.T) {
 // it used to arrive with the token already spent, on a host whose real problem
 // was a name another fleet member was holding.
 func TestEnroll_AnUncertifiableCollisionNameLeavesTheTokenSpendable(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -331,6 +335,7 @@ func TestEnroll_AnUncertifiableCollisionNameLeavesTheTokenSpendable(t *testing.T
 // Inspect is the read half of the split: it answers the question Redeem asks
 // without doing what Redeem does.
 func TestTokenStore_InspectDoesNotSpendTheToken(t *testing.T) {
+	t.Parallel()
 	store := enroll.NewTokenStore()
 	token, _, err := store.Mint(enroll.MintOptions{
 		Name:      "build-box",
@@ -376,6 +381,7 @@ func TestTokenStore_InspectDoesNotSpendTheToken(t *testing.T) {
 }
 
 func TestTokenStore_InspectReportsEveryReasonRedeemWould(t *testing.T) {
+	t.Parallel()
 	store := enroll.NewTokenStore()
 
 	_, err := store.Inspect("sbx_nobody-minted-this")
@@ -405,6 +411,7 @@ func TestTokenStore_InspectReportsEveryReasonRedeemWould(t *testing.T) {
 // `fleetctl enroll mint` needs — the cost Redeem already avoids paying, which
 // the read half must not reintroduce.
 func TestTokenStore_InspectDoesNotRewriteTheStore(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 	store, err := enroll.OpenTokenStore(path)
 	require.NoError(t, err)
@@ -438,6 +445,7 @@ func TestTokenStore_InspectDoesNotRewriteTheStore(t *testing.T) {
 // misdirected error #58 is about, one layer down, and now reachable from the
 // read that was added in front of the redemption.
 func TestEnroll_AnUnreadableTokenStoreIsNotBlamedOnTheToken(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 	tokens, err := enroll.OpenTokenStore(path)
 	require.NoError(t, err)
@@ -585,6 +593,7 @@ func (n *mutableNames) remove(name string) {
 // that has been redeemed cannot be revoked — and that is exactly how an exit
 // ends up covered by a claim rather than by a test.
 func TestTokenStore_RecordsItHandsOutShareNothingWithTheStore(t *testing.T) {
+	t.Parallel()
 	store := enroll.NewTokenStore()
 	authorized := []string{"10.0.0.5:8722"}
 	labels := map[string]string{"role": "build"}
@@ -691,6 +700,7 @@ func (n *hookedNames) Exists(string) bool {
 // validated against is advisory, and the only thing that grants the right to
 // proceed re-checks everything.
 func TestEnroll_ATokenRevokedWhileItsRequestIsValidatedIsRefused(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -720,6 +730,7 @@ func TestEnroll_ATokenRevokedWhileItsRequestIsValidatedIsRefused(t *testing.T) {
 // its own `now`, so a token that expires between the read and the swap is
 // refused by the swap.
 func TestEnroll_ATokenThatExpiresWhileItsRequestIsValidatedIsRefused(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	fleet := &recordingFleet{}
@@ -748,6 +759,7 @@ func TestEnroll_ATokenThatExpiresWhileItsRequestIsValidatedIsRefused(t *testing.
 // front; this covers the write behind it, which is the path the reorder created
 // and the only one where a store failure arrives wrapped in errNotRedeemed.
 func TestEnroll_AStoreThatBreaksAtTheSwapIsNotBlamedOnTheToken(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "tokens.yaml")
 	tokens, err := enroll.OpenTokenStore(path)
 	require.NoError(t, err)
@@ -779,6 +791,7 @@ func TestEnroll_AStoreThatBreaksAtTheSwapIsNotBlamedOnTheToken(t *testing.T) {
 // ordering exists to prevent. If this ever goes green with the token still
 // pending, the swap has moved.
 func TestEnroll_ASigningFailureAfterTheSwapStillSpendsTheToken(t *testing.T) {
+	t.Parallel()
 	caObj := newTestCA(t)
 	tokens := enroll.NewTokenStore()
 	svc := &enroll.Service{Tokens: tokens, CA: brokenSigner{bundle: caObj.CertPEM()}}
