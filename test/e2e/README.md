@@ -92,6 +92,8 @@ Everything except one scenario.
 | `TestFileSearchToolsWalkTheSandbox` | `fleet_ls`, `fleet_glob` and `fleet_grep` — the last of which is a server stream — over a real tree. |
 | `TestExecIsAudited` | The exec reaches the audit log, attributed to the authenticated principal, with no output in it. |
 | `TestShellRunsOnTheSelectedSandboxAndReturnsItsExitCode` | `fleetctl select`, then `fleetctl shell` on a real pseudo-terminal: the session runs on the selected host, and the remote shell's exit code becomes the CLI's own. |
+| `TestAgentSeesItsOwnPerUserToolchain` | The shipped binary, in its own process, resolves by name a program that exists nowhere but under its own home directory, runs it, and records that it did — which is what "the agent has the operator's environment" has to mean and what session 0 makes false (#74). |
+| `TestAgentReportsAToolchainItCannotReach` | The confined shape: the toolchain is installed, `PATH` is populated, and `PATH` does not reach it. The daemon reports `hidden`, names the directory, runs nothing, and says so in its log rather than reporting itself healthy. |
 | `TestShellSessionIsAuditedWithoutItsContents` | The session reaches the audit log with its principal, sandbox, start, duration and exit status — and neither what was typed nor what was printed appears there or in the agent's own log. |
 | `TestShellCtrlCInterruptsTheRemoteProgramRatherThanTheClient` | Ctrl-C reaches the remote foreground process; the client survives it and the session keeps answering. |
 | `TestShellResizeReflowsTheRemoteProgram` | Resizing the local terminal changes the size a program *inside* the session reads. |

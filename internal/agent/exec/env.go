@@ -3,6 +3,7 @@ package exec
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -40,6 +41,76 @@ import (
 // localeVars are passed through from the daemon when set. They describe how to
 // render text, and nothing else.
 var localeVars = []string{"LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES"}
+
+// windowsPassthrough names the variables a Windows command needs on top of PATH
+// and the home directory.
+//
+// A bare PATH is enough on Unix and is not here: SystemRoot is where the loader
+// finds the system DLLs, and a child launched without it fails to initialise —
+// winsock in particular — before it ever reads its own arguments. COMSPEC is
+// what `shell: true` resolves cmd.exe through, and PATHEXT is what makes a bare
+// name resolve to a .exe or .bat at all.
+//
+// APPDATA and LOCALAPPDATA are here for #74, and they are the reason this list
+// is in an untagged file. Windows keeps per-user configuration and credentials
+// under them — npm's npmrc, pip.ini, the NuGet and gh configuration, the
+// credential helpers git reads — and this repository names "%APPDATA% that git
+// and the package registries read" in four places as the thing a session-0
+// agent cannot see and a properly installed one can. It could not: the base
+// environment dropped both, so no command this agent ran found any of it under
+// *either* mechanism, and the promise the Scheduled Task exists to keep was
+// half kept. They cost nothing to pass: they name directories the account
+// already owns, this daemon already hands that account's %USERPROFILE% to every
+// command, and neither carries a value — which is what this list excludes.
+//
+// It is no longer the same list as internal/agent/host's probePassthrough,
+// which it used to mirror, and the difference is deliberate: that one runs
+// `node --version` to inventory a host and has no business reading anybody's
+// configuration, while this one is the environment the operator's own commands
+// run in.
+//
+// The list is deliberately short, and carries nothing that identifies a user or
+// holds a credential — which is the reason the base environment exists rather
+// than inheriting the daemon's.
+var windowsPassthrough = []string{
+	"SystemRoot",
+	"SystemDrive",
+	"windir",
+	"COMSPEC",
+	"PATHEXT",
+	"APPDATA",
+	"LOCALAPPDATA",
+	"NUMBER_OF_PROCESSORS",
+	"PROCESSOR_ARCHITECTURE",
+	"PROCESSOR_IDENTIFIER",
+	"ProgramData",
+	"ProgramFiles",
+	"ProgramFiles(x86)",
+	"CommonProgramFiles",
+	"PUBLIC",
+}
+
+// unixPassthrough is empty: PATH, HOME, TMPDIR and the locale are all a process
+// needs, and everything else in the daemon's environment is exactly what must
+// not be inherited.
+var unixPassthrough []string
+
+// passthroughFor is the platform's list, with the platform supplied rather than
+// read.
+//
+// The long list is the Windows one, and asserting it only on Windows means
+// asserting it only where it is already too late to find out — the same reason
+// buildBaseEnv takes its lookup as an argument, and the same reason the service
+// package's own per-user directory list takes a goos.
+func passthroughFor(goos string) []string {
+	if goos == "windows" {
+		return windowsPassthrough
+	}
+	return unixPassthrough
+}
+
+// basePassthrough is this host's list.
+var basePassthrough = passthroughFor(runtime.GOOS)
 
 // BaseEnv returns the documented base environment for this host.
 func BaseEnv() []string { return buildBaseEnv(os.Getenv) }

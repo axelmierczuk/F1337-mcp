@@ -95,6 +95,42 @@ func TestBuildBaseEnv_FallsBackToAPlatformPathAndInventsNothingElse(t *testing.T
 	}
 }
 
+// The Windows list, asserted from every runner.
+//
+// It lives in an untagged file for exactly this: it is the long one, it is the
+// only one that decides anything, and asserted only on Windows it is asserted
+// only where finding out is already too late. The two entries named here are
+// the ones #74 turns on — Windows keeps per-user configuration and credentials
+// under %APPDATA% and %LOCALAPPDATA%, this repository names them in four places
+// as what a session-0 agent cannot see and a properly installed one can, and
+// the base environment dropped both. A command run through the agent therefore
+// found none of it whichever mechanism hosted the daemon, which is half of the
+// promise the Scheduled Task exists to keep.
+func TestPassthroughFor_WindowsCarriesThePerUserApplicationData(t *testing.T) {
+	windows := passthroughFor("windows")
+	for _, name := range []string{"APPDATA", "LOCALAPPDATA"} {
+		require.Containsf(t, windows, name,
+			"npm, pip, NuGet, gh and git's credential helpers read %%%s%%; without it a command this agent runs finds none of the operator's configuration", name)
+	}
+	require.Contains(t, windows, "SystemRoot",
+		"a child launched without it fails to initialise before it reads its own arguments")
+
+	// And the list stays an allowlist of names that describe the machine or the
+	// account's own directories. Anything holding a credential belongs to
+	// whatever installed the service, which is the reason this package builds
+	// an environment instead of inheriting one.
+	for _, name := range windows {
+		for _, forbidden := range []string{"TOKEN", "SECRET", "PASSWORD", "KEY"} {
+			require.NotContainsf(t, strings.ToUpper(name), forbidden,
+				"%s looks like it carries a value rather than naming a directory", name)
+		}
+	}
+
+	require.Empty(t, passthroughFor("linux"),
+		"PATH, HOME, TMPDIR and the locale are all a Unix process needs; everything else in the daemon's environment is what must not be inherited")
+	require.Empty(t, passthroughFor("darwin"))
+}
+
 // A request entry replaces the base entry of the same name rather than joining
 // it, and the platform decides whether the names fold.
 func TestMergeEnv_ReplacesRatherThanAppends(t *testing.T) {

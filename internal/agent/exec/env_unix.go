@@ -16,8 +16,3 @@ const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bi
 
 // tempVars are the temporary-directory variables passed through when set.
 var tempVars = []string{"TMPDIR"}
-
-// basePassthrough is empty on Unix: PATH, HOME, TMPDIR and the locale are all
-// a process needs, and everything else in the daemon's environment is exactly
-// what must not be inherited.
-var basePassthrough []string

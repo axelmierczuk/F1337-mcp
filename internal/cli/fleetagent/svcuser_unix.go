@@ -4,12 +4,14 @@ package fleetagent
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"syscall"
 )
 
 // systemUserName is the dedicated account the Linux installer creates. It owns
@@ -62,25 +64,22 @@ func describeDefaultUser() string {
 // is the one the operator is sitting in front of — so that is what is used.
 func defaultServiceUser() (string, error) {
 	if runtime.GOOS == "darwin" {
-		if name := os.Getenv("SUDO_USER"); name != "" && name != "root" {
-			return name, nil
+		// invokingServiceUser, not a second copy of its rule. The refusal it
+		// carries is the one thing between `sudo fleet-agent service install`
+		// and an agent that runs every command a model issues as root, and
+		// macOS used to have its own inline version of it — reachable only
+		// from a suite running as root, therefore asserted by nothing, and
+		// free to drift from the Windows one its own comment says it shares.
+		if name := os.Getenv("SUDO_USER"); name != "" {
+			return invokingServiceUser(name)
 		}
 		current, err := user.Current()
 		if err != nil {
 			return "", fmt.Errorf("determine the invoking user; pass --user with the account the agent should run as: %w", err)
 		}
-		if current.Username == "root" {
-			return "", fmt.Errorf("refusing to default the service account to root: every command the agent runs would run as root.\n\nPass --user with a dedicated account, or --user root to accept that deliberately")
-		}
-		return current.Username, nil
+		return invokingServiceUser(current.Username)
 	}
 	return linuxServiceUser(accountExists), nil
-}
-
-// accountExists reports whether name resolves to an account on this host.
-func accountExists(name string) bool {
-	_, err := user.Lookup(name)
-	return err == nil
 }
 
 // linuxServiceUser applies the same rule the config directories follow: a host
@@ -151,11 +150,6 @@ func ensureServiceUser(name string, create bool) error {
 	}
 	return fmt.Errorf("create service account %q: %w\n\nCreate it manually and re-run, or pass --user with an existing account", name, lastErr)
 }
-
-// serviceAccessByOwnership records that on Unix, giving the service account
-// access to a file is a matter of ownership — which `install` can do. On
-// Windows it is ACLs, which it does not touch.
-const serviceAccessByOwnership = true
 
 // grantServiceUserAccess makes the enrollment material readable by the account
 // the daemon will run as.
@@ -228,4 +222,100 @@ func lookupServiceIDs(name string) (uid, gid int, err error) {
 		return 0, 0, fmt.Errorf("parse gid %q for %q: %w", u.Gid, name, err)
 	}
 	return uid, gid, nil
+}
+
+// currentAccount is how the platform names the account this process is running
+// as.
+func currentAccount() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return ""
+}
+
+// inSessionZero is a Windows question; Unix has no session 0 to be isolated in.
+func inSessionZero() bool { return false }
+
+// executableAccessProblem reports why the service account may not be able to
+// start the agent from exe.
+//
+// The same failure as the Windows one, from the other direction: `enroll` and
+// `install` run as root, root reads /root/fleet-agent and ~/bin/fleet-agent
+// perfectly well, and the unit then names a path whose 0700 ancestor the
+// service account cannot traverse. systemd reports 203/EXEC, which names
+// neither the path nor the account.
+//
+// Whether that refuses the install or warns is executableAccessIsFatal's.
+func executableAccessProblem(exe, account string) string {
+	uid, gid, err := lookupServiceIDs(account)
+	if err != nil || uid == 0 {
+		// An account that does not resolve is ensureServiceUser's to report,
+		// and it has a better message for it. The superuser reads everything.
+		return ""
+	}
+	return unixPathAccessProblem(exe, uid, gid)
+}
+
+// unixPathAccessProblem returns the first component of exe that uid/gid appears
+// unable to get through, or "".
+func unixPathAccessProblem(exe string, uid, gid int) string {
+	for _, path := range append(ancestorDirs(exe), exe) {
+		info, err := os.Stat(path)
+		if err != nil {
+			// Cannot tell. Saying nothing is right: this check exists to catch
+			// a mistake, not to become one.
+			return ""
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return ""
+		}
+		if hasExecuteBit(info.Mode(), int(st.Uid), int(st.Gid), uid, gid) {
+			continue
+		}
+		if path == exe {
+			return fmt.Sprintf("%s is mode %#o and owned by uid %d, so uid %d cannot execute it", path, info.Mode().Perm(), st.Uid, uid)
+		}
+		return fmt.Sprintf("%s is mode %#o and owned by uid %d, so uid %d cannot traverse it to reach %s", path, info.Mode().Perm(), st.Uid, uid, exe)
+	}
+	return ""
+}
+
+// hasExecuteBit reports whether uid/gid gets the execute bit on a file owned by
+// ownerUID/ownerGID with mode.
+func hasExecuteBit(mode os.FileMode, ownerUID, ownerGID, uid, gid int) bool {
+	perm := mode.Perm()
+	switch {
+	case uid == ownerUID:
+		return perm&0o100 != 0
+	case gid == ownerGID:
+		return perm&0o010 != 0
+	default:
+		return perm&0o001 != 0
+	}
+}
+
+// ancestorDirs lists every directory above path, outermost first.
+func ancestorDirs(path string) []string {
+	var dirs []string
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		dirs = append(dirs, dir)
+		if dir == filepath.Dir(dir) {
+			break
+		}
+	}
+	// Outermost first, so the message names the shallowest thing that is wrong
+	// rather than the deepest.
+	for i, j := 0, len(dirs)-1; i < j; i, j = i+1, j-1 {
+		dirs[i], dirs[j] = dirs[j], dirs[i]
+	}
+	return dirs
+}
+
+// readPassword is never reached on Unix: no Unix service manager asks for an
+// account's password, and serviceNeedsPassword says so. It exists so that the
+// shared install path compiles, and errors rather than prompting so a future
+// caller finds out instead of quietly echoing a password to a terminal.
+func readPassword(io.Reader, io.Writer, string) (string, error) {
+	return "", fmt.Errorf("a service account password is only ever needed by the Windows SCM")
 }

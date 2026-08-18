@@ -5,13 +5,121 @@ service manager so it starts at boot. It needs elevation, and it refuses
 early — before creating a user or a directory — when it does not have it.
 
 ```sh
-sudo fleet-agent service install          # systemd, launchd, or the Windows SCM
+sudo fleet-agent service install          # systemd, launchd, or Windows
 sudo fleet-agent service start
 fleet-agent service status
 ```
 
 `install` bakes the config path into the service definition, so the daemon does
 not have to rediscover it as whichever account it ends up running as.
+
+`fleet-agent service install --dry-run` resolves everything and registers
+nothing. It needs no elevation and changes no file, and it is the way to see
+which mechanism a host will get, under which account, and whether the binary is
+somewhere that account can read — before running the command that acts on it.
+It also says when the host does not have the account: Linux creates a system
+account and says it will, and everywhere else a missing account is what the
+real `install` refuses on, so a plan that did not mention it was a plan that
+could not be carried out.
+
+**A dry run reports what `install` would refuse; it does not refuse.** It
+registers nothing, so there is nothing for a refusal to prevent, and returning
+one instead of the plan withholds the two answers an operator has no other way
+to get. It fails only when it cannot produce a plan at all — `--mechanism task`
+under a built-in service identity has no plan to print.
+
+## Windows has two mechanisms, and the difference decides whether it works
+
+**Every Windows service runs in session 0**, which has been isolated from every
+interactive session since Vista. Under a built-in service identity it has no
+operator profile at all, so it sees none of nvm, rustup, pyenv, cargo, scoop,
+npm globals, or the credentials in `%APPDATA%` that git and the package
+registries read. On a developer machine that is most of `PATH`, and an agent
+whose entire purpose is running the commands the operator would type cannot run
+them. That was the default until #74; it is not any more.
+
+| `--mechanism` | What it registers | Runs as | Sees the operator's toolchains |
+| --- | --- | --- | --- |
+| `task` (Windows default) | A logon-triggered Scheduled Task | The invoking user, in their own session | Yes |
+| `service` | A Windows service, through the SCM | `--user`, in session 0 | Only if the SCM loaded that account's profile |
+| `service --user 'NT AUTHORITY\NetworkService'` | A Windows service | A built-in identity, in session 0 | No, by construction |
+
+`auto` — the default — picks `task`, unless `--user` names a built-in service
+identity, which is a deliberate ask for a confined agent and can only be a
+service. `--mechanism task` with a built-in identity is refused rather than
+registered: a logon trigger fires when an account logs on interactively, and
+those accounts never do.
+
+### The Scheduled Task
+
+```powershell
+fleet-agent service install                 # elevated; runs as you, in your session
+fleet-agent service start
+```
+
+No password, no session-0 isolation, the full profile and `PATH`. The rendered
+definition sets `InteractiveToken`, `LeastPrivilege` (your ordinary token, not
+your elevated one), `ExecutionTimeLimit` `PT0S` so the three-day default does
+not kill it, and turns off the battery settings that otherwise refuse to start a
+task on a laptop and stop it when the laptop unplugs.
+
+Two things it costs, both said by `install` at the moment you get them:
+
+- **It stops at logout.** A logon trigger runs the task while that account is
+  logged on. For a machine nobody signs into, use `--mechanism service` with a
+  `--user`.
+- **Ending the task takes the supervised processes with it.** Task Scheduler
+  ends a task by terminating what the task started. That is the opposite of what
+  `KillMode=process` and `AbandonProcessGroup` buy on the other two platforms,
+  and Windows offers no setting for it. It is not only `service stop`:
+  `service restart`, `service uninstall`, and the `service install` that
+  replaces a running task all end it, and each says so before it does.
+
+### The service, under a named account
+
+```powershell
+fleet-agent service install --mechanism service --user 'WORKSTATION\build'
+# prompts for the password; --password-stdin reads it from a pipe instead
+```
+
+The SCM logs the account on to start the service, so it needs credentials. The
+password is read once, handed to `CreateService`, and stored by the SCM as a
+machine-bound LSA secret. Nothing here writes it to a file, an environment
+variable, or a log line, and nothing can read it back off the machine it was
+stored on.
+
+**The account also needs the "Log on as a service" right**, and nothing in this
+command grants it. `CreateService` stores the password; the privilege
+(`SeServiceLogonRight`) is separate, the Services MMC grants it as a side
+effect and the API does not, and without it the service installs cleanly and
+every start fails with **error 1069, "the service did not start due to a logon
+failure"** — the same shape as the error 5 below, from the other direction.
+`install` says so when it registers one. Granting it means `LsaAddAccountRights`,
+which is not something to hand-roll into an installer; do it with `secedit`, or
+under *Local Security Policy → Local Policies → User Rights Assignment → Log on
+as a service*.
+
+The account is still in session 0. Whether it sees its own per-user toolchains
+depends on whether its profile is loaded, which the SCM does not guarantee —
+so `service status` checks rather than assumes. See
+[When the agent is running and cannot work](#when-the-agent-is-running-and-cannot-work).
+
+### There is no third mechanism, and that is a decision
+
+The configuration neither of the two covers is "starts at boot with no logon,
+follows whoever is at the console, survives a reboot on an unattended machine".
+Reaching it means a `LocalSystem` launcher —
+`WTSGetActiveConsoleSessionId`, `WTSQueryUserToken`, a duplicated primary token
+with its session set, `CreateEnvironmentBlock` after `LoadUserProfile`, and
+session-change handling for fast user switching and RDP. It is deliberately not
+built. The reasoning is recorded in full on
+[PR #79](https://github.com/axelmierczuk/fleet-mcp/pull/79); in short, it is a
+standing privilege-escalation primitive on every host in the fleet, for the
+third-most-common configuration, written entirely in the part of the tree no
+runner here can execute. If that configuration is ever actually reported, the
+cheaper partial answer is a second trigger on the task — and the expensive one
+belongs in a separate binary with its own review, not in another branch of
+`service install`.
 
 ## The service account
 
@@ -25,7 +133,7 @@ model.
 | --- | --- | --- |
 | Linux | `fleet`, a system account (but see the pre-rebrand rule below) | Yes, via `useradd` or `adduser` |
 | macOS | The invoking user (`$SUDO_USER`) | No — pass `--user` for a different one |
-| Windows | `NT AUTHORITY\NetworkService` | n/a, it is a built-in identity |
+| Windows | The invoking user, in a logon-triggered Scheduled Task | No — pass `--user` for a different one |
 
 `--user` overrides the default everywhere. `--create-user=false` turns off
 account creation, so an install against a missing account fails with a message
@@ -47,17 +155,40 @@ conventionally gets a dedicated system account and `useradd` makes creating one
 a single command. On macOS creating a system account means a sequence of `dscl`
 calls and a hand-picked UID, and the account that already has the toolchains,
 the caches, and a home directory the agent can build in is the one the operator
-is sitting in front of. On Windows, `NetworkService` is a standing
-non-administrative identity — unlike `LocalSystem`, which is what the SCM would
-pick on its own and is the Windows equivalent of root.
+is sitting in front of. On Windows the same reasoning applies, and until #74 it
+had simply never been applied: the account with the toolchains is the
+operator's, and the only way to run as it is a task in their session. `NT AUTHORITY\NetworkService`
+is still available — it is a standing non-administrative identity, unlike
+`LocalSystem`, which is what the SCM would pick on its own and is the Windows
+equivalent of root — and it is now something you choose rather than something
+you get by not choosing.
 
 `--user root` (or `--user LocalSystem`) works. It prints a warning naming the
 consequence, and does what you asked.
 
 **Whatever account you choose must be able to read and write the allowed
 roots.** On Linux and macOS that is ordinary ownership. On Windows it is ACLs,
-and `install` does not set them: grant the service account access to the roots
-yourself.
+and `install` sets them for its own directories only — the state directory, the
+log directory and the enrollment material, via `icacls`. Grant the account
+access to the allowed roots yourself.
+
+### install refuses a binary the account cannot read
+
+`install` registers the binary where it is; it does not copy it. A manual
+download lands on the Desktop, which is inside a profile directory whose ACL
+admits its owner, `SYSTEM` and the administrators and nobody else — so
+registering a service there under a built-in identity used to produce a service
+that installed cleanly and then failed every start with **error 5, access
+denied**, before a line of agent code ran.
+
+`install` knows the path it is about to register and the account it is about to
+register it for, so it refuses, names both, and prints the copy that fixes it.
+`--dry-run` prints the same thing as part of the plan and exits zero, because a
+dry run registers nothing and has nothing to refuse.
+Installing from your own Desktop to run as yourself — which is what the Windows
+default now is — is fine and is not refused. On Linux and macOS the same check
+runs against the mode bits and **warns** rather than refusing, because a
+supplementary group can grant what the bits appear to deny.
 
 ### The enrollment material changes hands
 
@@ -72,10 +203,183 @@ The directory only changes hands when it is one `enroll` created (`/etc/fleet`,
 Point `--config` somewhere else and `install` gives away the four files but
 leaves the directory alone, and says so: `--config /etc/agent.yaml` must not
 turn into `chown fleet /etc`. Make that directory traversable by the service
-account yourself.
+account yourself — `install` prints the command, `chown` here and an `icacls`
+grant on Windows.
 
-On Windows nothing is chowned: access there is by ACL, and `%ProgramData%\fleet`
-already admits the built-in service identities.
+On Windows nothing is chowned — access there is by ACL — but the same handover
+happens through `icacls`: the enrollment material is granted read to the account
+the daemon will run as, and the state and log directories are granted modify,
+inheritable. `%ProgramData%\fleet` already admits the built-in service
+identities, and admits nothing else: the directories are created by an elevated
+install, so their contents belong to the administrators and an ordinary
+operator token cannot write them without this step. The old default needed
+none of it; the new one does.
+
+A `--config` outside `%ProgramData%\fleet` gets the same treatment as on Unix:
+the four files are granted read individually and the directory holding them is
+left alone. It needs the traverse grant `install` prints, or the daemon starts
+and fails on a config it cannot open.
+
+## When the agent is running and cannot work
+
+An agent confined out of doing its job is up, answers health checks, and fails
+every command a model gives it. Nothing about the process looks wrong, so
+`service status` used to report it as `running` and the operator found out one
+failed command at a time.
+
+It now reports:
+
+```
+service fleet-agent: running, but unusable
+mechanism:  Windows service
+platform:   windows-service
+pid:        4242
+runs as:    NT AUTHORITY\NETWORK SERVICE
+home:       C:\Windows\ServiceProfiles\NetworkService
+per-user toolchains: unknown (none installed under the home directory it was started with)
+
+UNUSABLE
+  This agent is running in session 0 as NT AUTHORITY\NETWORK SERVICE.
+  ...
+```
+
+and **exits non-zero**. "Not installed" is the answer to a question and still
+exits zero; an agent that is registered, running, and cannot execute anything
+the operator has installed is a fault, and a script that branches on this
+command should not read it as success.
+
+### Where the answer comes from
+
+`service status` runs as the operator, in the operator's session. Everything
+that decides whether the daemon can work — which session it landed in, the home
+directory it was given, whether the `PATH` a spawned command gets reaches
+anything installed per-user — is observable only from inside the daemon. So the
+daemon writes it down.
+
+At every start, `serve` records `state_dir/runtime.json`: its pid and start
+identity, the account the platform says it is running as, the home directory it
+was started with, whether it is in session 0, and the result of a probe.
+
+The account is the one the *platform* names, not the one the service definition
+asked for, and on Windows those are spelled differently: `CreateService` takes
+`NT AUTHORITY\NetworkService` and `LookupAccountSid` gives back the display name
+for the same well-known SID, `NT AUTHORITY\NETWORK SERVICE`. Both are recognised
+as the same built-in identity, in the report and in `--user`. The two disagreeing
+is itself worth seeing, which is why the record keeps the platform's answer. The
+probe looks on disk for the directories a toolchain installs into when it is
+installed for one user — `.cargo\bin`, `AppData\Roaming\npm`, `scoop\shims`,
+`.local/bin` and the rest — and then asks whether the `PATH` the exec service
+hands every command reaches them. Where it does, it resolves one program it
+recognises **by name off that PATH**, checks that what it resolved is the copy
+under the home directory, and runs it. "`PATH` is not empty" proves nothing: a
+session-0 service has a `PATH`, it is the machine's, and that is exactly the
+failure.
+
+Three answers, and the third is not a failure:
+
+- **visible** — a per-user directory is on that `PATH`, and a program in it was
+  found by name and ran.
+- **hidden** — per-user toolchains are installed and `PATH` reaches none of the
+  directories holding them. The report names them.
+- **unknown** — nothing is installed per-user, so there is nothing to conclude.
+  A freshly imaged machine is not a broken one.
+
+A home directory that is a filesystem root — `/`, `C:\` — is `unknown` too, and
+is not probed at all. Every question the probe asks is "is this under the home
+directory", and a root answers yes to all of them: `HOME=/` makes `$HOME/bin`
+mean `/bin`, so the probe would find a machine directory, find it on `PATH`,
+report `visible`, and run whichever of `node`, `go` or `cargo` happens to be in
+there as its evidence. A container started for a uid with no `passwd` entry gets
+`HOME=/`, so this is the shape a fleet agent lands in on a build box.
+
+The question is asked of the *canonical* path, not of the string as it arrived.
+`/.`, `/..` and `/anywhere/..` all name the root once anything cleans them —
+and everything else the probe does with the home directory does clean it, since
+`filepath.Join` resolves `..` and `filepath.Rel` cleans both its arguments — so
+a check against the literal `/` would let every one of those spellings back in
+with the false `visible`, and the execution, intact.
+
+There is one confined shape the probe cannot see, because it looks under the
+home directory the daemon was given and the daemon was given the wrong one: a
+service under a named account started with a built-in *service* profile —
+`C:\Windows\system32\config\systemprofile`, `C:\Windows\ServiceProfiles\...` or
+`C:\Users\Default` — has no profile of its own loaded at all, so the probe finds
+nothing to look for and answers `unknown`. `status` reads that pair of recorded
+facts, the ordinary account and the service profile, and reports it as unusable
+rather than as a machine with nothing installed.
+
+`status` reads the file back and refuses it unless the process that wrote it is
+still the process running — same pid *and* same start identity, so a reused pid
+cannot answer for a daemon that is gone.
+
+**When it cannot read the file, it says so.** A missing record is an ordinary
+state and means nothing; a record that is there and cannot be read is this
+command being unable to reach the only source of every answer above. On Linux
+that is the common case rather than the exotic one: `install` gives the state
+directory to the service account at `0750`, and `status` is not an elevated
+command, so an operator who is not in that group gets `permission denied` here.
+Reported as "no record", that silently turned the whole verdict off and still
+exited zero. It now prints a `NOTE` naming the file and the reason, and says to
+re-run as the service account or elevated.
+
+**And when there is no record at all under a daemon that is running, it says
+that too.** `serve` writes the record before it binds the listener, so "something
+is running here" and "there is no record of it" cannot both be true of the same
+daemon — but they can both be true of this command. `install --config` bakes a
+config path into the service definition; `status` discovers a config of its own
+and reads `state_dir` out of whichever it found. Point `--config` outside the
+discovered location and `status` looks in the wrong state directory, finds
+nothing, and used to print `running` and exit zero — which is the outcome this
+whole section exists to stop. It now names the file it looked for and says that
+a `--config` other than the one it printed is where a running daemon's record
+goes instead.
+
+### What a script can branch on
+
+Three states, and the exit code separates two of them:
+
+| State | Exit | Headline |
+| --- | --- | --- |
+| Not installed | `0` | `service fleet-agent: not installed` |
+| Running and able to work | `0` | `service fleet-agent: running` |
+| Running and confined | `1` | `service fleet-agent: running, but unusable`, plus an `UNUSABLE` block |
+
+`1` is also what the command exits with when it fails for an ordinary reason, so
+a script that has to tell "unusable" from "status itself broke" matches the
+`UNUSABLE` block rather than the exit code alone.
+
+## One host, one agent — and every command acts on both
+
+A host can carry both registrations. That is not hypothetical: it is what
+switching mechanisms produces unless something removes the old one, and two
+registrations means two daemons starting against the same state directory, both
+re-adopting the same supervised processes.
+
+`install` removes the one it replaces and `status` warns when it finds two. It
+also **starts the new registration when the one it removed was running**, so
+following the `--mechanism task` advice `status` prints does not take the agent
+down: switching mechanism is a replacement, and `install` restarts what it
+replaces. A daemon that was stopped before the command stays stopped — `install`
+registers, `service start` starts.
+
+The registration being replaced is stopped before it is removed, whether it is
+the other mechanism's or `install`'s own. On Windows that is load-bearing rather
+than tidy: `DeleteService` only *marks* a running service for deletion, the
+entry stays in the SCM database until the process exits, and the `CreateService`
+that follows fails with "service fleet-agent already exists" — leaving a host
+with a definition marked for deletion and no replacement. And when the thing
+being stopped is a Scheduled Task, stopping it ends the processes the agent
+supervises, so `install` prints the same warning `stop` does before it happens.
+
+If the write fails after the old registration is gone, the host has no agent
+registered on it at all, and the error says so rather than leaving "install
+failed" to be read as "nothing happened".
+`start`, `stop`, `restart` and `uninstall` act on **every** registration the
+host carries, and keep going when one of them refuses — a `stop` that stops the
+service and returns before it reaches the task leaves the daemon an operator
+just asked to stop still running, with an error naming the other mechanism as
+the reason. Whatever failed is reported; the command exits non-zero once, at the
+end.
 
 ## Hardening
 
@@ -148,6 +452,10 @@ removes the unit, job, or service registration and **leaves**:
 Re-installing therefore rejoins the fleet without minting and redeeming a new
 enrollment token. To leave a fleet properly, remove the enrollment directory by
 hand after uninstalling.
+
+`uninstall` stops every registration it removes, so on Windows removing a
+Scheduled Task ends the background processes the agent supervises. It says so
+before it does it, for the same reason `stop` does.
 
 Installing twice is idempotent: the second `install` replaces the definition
 rather than failing, and restarts the service if it was running. That is what
@@ -240,16 +548,109 @@ sudo fleet-agent service uninstall
 
 ### Windows
 
-From an elevated PowerShell:
+Everything that decides *what* gets registered is unit-tested on every runner —
+the rendered Scheduled Task XML, the mechanism rule, the session-0 rule, the
+executable-access refusal, and the probe that decides `visible`/`hidden`. What
+cannot be tested anywhere is the registration itself and the session the daemon
+lands in. From an elevated PowerShell:
 
 ```powershell
+fleet-agent service install --dry-run       # changes nothing; says which mechanism
+
+# The default: a task in your own session.
 fleet-agent service install
 fleet-agent service start
-fleet-agent service status
+# `service start` only asks the scheduler to run the task; give the daemon a
+# second to bind and write its record before asking what it can reach, or
+# `status` answers about the moment before it started.
+fleet-agent service status                  # running; per-user toolchains: visible (ran ...)
+Get-ScheduledTask fleet-agent | Format-List TaskName, State
+Get-ScheduledTaskInfo fleet-agent
+
+# The claim, checked from outside the agent: the daemon is in your session,
+# not in session 0.
+Get-Process fleet-agent | Select-Object Id, SessionId    # SessionId must not be 0
+
+# The other half: a per-user toolchain resolves through the agent. Run a
+# command through the MCP server that only a per-user install can answer, e.g.
+#   cargo --version, or `where.exe cargo`
+# and confirm the path it reports is under your profile.
+
+# The mechanism's two defining behaviours, and the only place either can be
+# checked. Nothing in CI has a session to log out of.
+#   1. Log off, and from another account or an RDP session confirm no
+#      fleet-agent process is left. `service status` then reports the task as
+#      installed and stopped.
+#   2. Log back on. The logon trigger starts it again with no command run:
+#      `Get-Process fleet-agent` has a pid, in your new session id.
+#   3. Restart-Computer, log on, and confirm the same. A task with only a logon
+#      trigger comes back at logon, not at boot — which is the trade this
+#      mechanism makes and the reason --mechanism service exists.
+
+fleet-agent service uninstall
+#   NOTE printed first: ending the task terminates what it started, so anything
+#   the agent was supervising is gone. Confirm that is what happened.
+
+# Now the confined shape, deliberately, to see it reported:
+fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
+fleet-agent service start
+fleet-agent service status                  # MUST print "running, but unusable"; exits 1
+#   and MUST name the account: `runs as: NT AUTHORITY\NETWORK SERVICE`, which is
+#   how LookupAccountSid spells the identity CreateService took without a space.
+#   The verdict is drawn from that name, so the two have to agree.
 Get-Service fleet-agent                     # Running, StartType Automatic
 sc.exe qfailure fleet-agent                 # restart action, 5s delay
-Get-EventLog -LogName Application -Source fleet-agent -Newest 20
+fleet-agent service install --mechanism service --user "NT AUTHORITY\NetworkService"
+#   re-run over the running service: it stops it, replaces the definition and
+#   starts it again. DeleteService only marks a running service for deletion, so
+#   without the stop this is where the replacement fails and the host is left
+#   with no registration.
+fleet-agent service uninstall
+
+# And a service under a named account, which is the headless answer. It needs an
+# account that exists and has the "Log on as a service" right — without the
+# right the install is clean and every start fails with error 1069.
+net user build /add                         # if this host does not have one
+#   grant SeServiceLogonRight: secedit, or Local Security Policy > User Rights
+#   Assignment > Log on as a service. `install` prints the commands.
+fleet-agent service install --mechanism service --user "$env:COMPUTERNAME\build"
+#   prompts for the password; the SCM stores it as an LSA secret
+fleet-agent service start                   # error 1069 here means the right is missing
+fleet-agent service status                  # visible or hidden, depending on the profile
 
 Restart-Computer                               # survives a reboot
+fleet-agent service status
 fleet-agent service uninstall
 ```
+
+The task is registered through `schtasks.exe /Create /XML`, so the definition
+above is what `schtasks /Query /TN fleet-agent /XML` prints back.
+
+**Not verified anywhere.** `service stop` under the task mechanism ends the task,
+and Task Scheduler terminates what the task started. Whether that reaches the
+job objects the supervisor puts each background process in has not been checked
+on a real Windows host.
+
+The documentation states the conservative reading — supervised processes stop
+with the agent — and that is the right thing to print.
+
+It is the right thing because it is very probably the true thing, and the
+argument does not depend on the supervisor's own job objects at all. **A Windows
+process is a member of its parent's job unless it breaks away**, and nothing
+here breaks away: `internal/platform` starts every supervised process without
+`CREATE_BREAKAWAY_FROM_JOB`, and sets no `JOB_OBJECT_LIMIT_BREAKAWAY_OK` or
+`SILENT_BREAKAWAY_OK` on the jobs it does create. So a process the agent
+supervises is a member of whatever job the *agent* is in, whether or not the
+supervisor also managed to put it in one of its own — and on this definition the
+agent is in the task's job, because `UseUnifiedSchedulingEngine` has UBPM manage
+each task instance through one. Ending the task terminates that job, which
+terminates every process in it and in every job nested inside it. The
+supervisor's nested-assignment failing (see the comment on `terminate` in
+`internal/platform/group_windows.go`, which records that it does fail in the
+field when the agent is already inside a job that forbids nesting) changes
+nothing here: it removes the *inner* job, not the outer membership.
+
+And it is the right thing to print even if that reasoning is wrong, because of
+what being wrong costs. An operator who believes the warning and is wrong runs
+`service start` again. An operator who believes the opposite and is wrong loses
+every dev server in the fleet.

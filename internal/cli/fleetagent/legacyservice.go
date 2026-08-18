@@ -32,14 +32,14 @@ import (
 // makes several.
 const legacyServiceName = "sandboxd-agent"
 
-// legacyServiceInstalled reports whether this host still has a service
+// hostLegacyServiceInstalled reports whether this host still has a service
 // registered under the pre-rebrand name.
 //
 // It asks the same way [isInstalled] does and inherits the same bias: any
 // failure to read a status reads as "not installed". A host with no service
 // manager, or one this process cannot query, therefore stays silent rather than
 // warning about a service that may not be there.
-func legacyServiceInstalled() bool {
+func hostLegacyServiceInstalled() bool {
 	svc, err := service.New(&program{}, &service.Config{
 		Name:        legacyServiceName,
 		DisplayName: "sandboxd agent",

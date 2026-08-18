@@ -112,19 +112,71 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		return err
 	}
 
+	log.Info("agent starting",
+		"config", path,
+		"version", version.String(),
+		"name", cfg.Name,
+	)
+
+	// Before agent.New, which binds the listener.
+	//
+	// That ordering is the whole reason anything can assert on the record this
+	// writes: once the socket is open a client can dial, and a test — or an
+	// operator running `service status` the moment a start returns — would be
+	// reading whatever the *previous* daemon left in the state directory. Doing
+	// it first makes "the port is open" imply "the report describes this
+	// process", which is a happens-before rather than a guess about how long a
+	// probe takes. Moving this below agent.New reintroduces exactly that race.
+	recordRuntime(ctx, cfg, log)
+
 	// The jail state is announced by agent.New, which is the one place that
 	// decides it — see jailFor. Doing it here as well would let the two drift.
 	srv, err := agent.New(serverOptions(cfg, log, opts.drain))
 	if err != nil {
 		return err
 	}
-
-	log.Info("agent starting",
-		"config", path,
-		"version", version.String(),
-		"name", cfg.Name,
-	)
 	return run(ctx, srv, log.Error)
+}
+
+// recordRuntime works out what this daemon can actually reach, says so when the
+// answer is "not the operator's toolchains", and writes it where `service
+// status` will look.
+//
+// This is the half of #74 that no amount of care at install time can cover.
+// `service status` runs as the operator, in the operator's session; everything
+// that decides whether the daemon can do its job — the session it landed in,
+// the home directory it was given, whether the PATH a spawned command gets
+// reaches anything installed per-user — is observable only from in here. So the
+// daemon writes it down, once, at start.
+//
+// Failing to write it is not a reason to refuse to serve. An agent that works
+// and cannot be reported on is strictly better than no agent, and the report
+// being absent is itself something `status` says.
+func recordRuntime(ctx context.Context, cfg *agent.Config, log *slog.Logger) {
+	report := collectRuntimeReport(ctx)
+
+	if confinement := confinementFor(report); confinement != nil {
+		log.Warn("this agent cannot reach the toolchains installed on this host",
+			"account", report.Account,
+			"home", report.Home,
+			"session_zero", report.SessionZero,
+			"unreachable", report.Profile.Unreachable,
+			"summary", confinement.Summary,
+		)
+	} else if report.Profile.Ran != "" {
+		// The positive half, and the only evidence anywhere that a command this
+		// daemon spawns can run something installed only under a home
+		// directory: it was resolved by name off the PATH those commands get,
+		// and it ran.
+		log.Info("a per-user toolchain resolves and runs", "program", report.Profile.Ran)
+	}
+
+	if cfg.StateDir == "" {
+		return
+	}
+	if err := writeRuntimeReport(cfg.StateDir, report); err != nil {
+		log.Warn("could not record what `fleet-agent service status` reads to report on this daemon", "error", err)
+	}
 }
 
 // program adapts the daemon to kardianos/service's lifecycle: Start must

@@ -5,7 +5,14 @@
 .DESCRIPTION
     Downloads the release binary for this platform, verifies its SHA-256
     against the release checksum file, installs it, and optionally enrolls the
-    host and registers a Windows service.
+    host and registers the agent to start at logon.
+
+    Registration defaults to a logon-triggered Scheduled Task running as the
+    account that ran this script, in that account's own session. A Windows
+    service would run in session 0, which has no operator profile and therefore
+    no nvm, rustup, pyenv, cargo, scoop or npm globals: see docs/service.md.
+    Use `fleet-agent service install --mechanism service --user <account>` for
+    a headless box.
 
     Piping a script from the network into a shell is trust-on-first-use no
     matter how careful the script is. This one at least refuses to install an
@@ -55,7 +62,9 @@ param(
     # Install prefix.
     [string] $InstallDir,
 
-    # Register a Windows service. Defaults to true when running elevated.
+    # Register the agent to start at logon. Defaults to true when running
+    # elevated. See docs/service.md for the two mechanisms and which one this
+    # picks.
     [ValidateSet('yes', 'no', 'auto')]
     [string] $Service = 'auto',
 
@@ -131,7 +140,7 @@ if ($Service -eq 'auto') {
     $Service = if ($elevated) { 'yes' } else { 'no' }
 }
 if ($Service -eq 'yes' -and -not $elevated) {
-    throw 'Registering a Windows service requires an elevated PowerShell session.'
+    throw 'Registering the agent to start at logon requires an elevated PowerShell session: it writes a Scheduled Task or a Windows service and creates directories under ProgramData.'
 }
 
 $archive      = "fleet-agent_windows_$arch.zip"
@@ -216,10 +225,13 @@ This means the download was corrupted or tampered with. Not installing.
         if ($LASTEXITCODE -ne 0) { throw "Enrollment failed with exit code $LASTEXITCODE." }
 
         if ($Service -eq 'yes') {
-            Write-Step 'registering Windows service'
+            # `service install` prints which mechanism it chose, the account,
+            # and what that account costs: a task stops at logout, and a
+            # service in session 0 cannot see a per-user toolchain.
+            Write-Step 'registering the agent to start at logon'
             & $target service install
             if ($LASTEXITCODE -ne 0) {
-                Write-Warn "Service registration failed; run 'fleet-agent service install' manually."
+                Write-Warn "Registration failed; run 'fleet-agent service install --dry-run' to see why, then 'fleet-agent service install' manually."
             } else {
                 & $target service start
                 if ($LASTEXITCODE -ne 0) {
