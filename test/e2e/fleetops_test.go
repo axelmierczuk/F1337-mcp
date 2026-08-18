@@ -105,10 +105,15 @@ func TestListReportsAnUnreachableSandboxWithoutWaitingForIt(t *testing.T) {
 	s := f.connect(t)
 
 	list := structured[listResult](t, s.ok("fleet_list", map[string]any{"refresh": true}))
+	liveAgent := map[string]string{}
 	for _, line := range list.Sandboxes {
 		if line.Health != "serving" {
 			t.Fatalf("%s is %q before anything was stopped: %+v", line.Name, line.Health, line)
 		}
+		if line.Agent == "" {
+			t.Fatalf("%s reports no agent version while it is serving: %+v", line.Name, line)
+		}
+		liveAgent[line.Name] = line.Agent
 	}
 
 	beta.kill()
@@ -134,6 +139,17 @@ func TestListReportsAnUnreachableSandboxWithoutWaitingForIt(t *testing.T) {
 			if line.Health == "serving" {
 				t.Fatalf("a sandbox whose daemon was killed is still reported serving: %+v", line)
 			}
+		}
+		// The AGENT column has two sources — the value the daemon answers with
+		// while it is up, and the one the registry recorded at enrollment — and
+		// the listing silently prefers whichever it has. A host going
+		// unreachable must not therefore appear to change version: that reads
+		// as "something about the agent changed" at the exact moment an
+		// operator is working out what went wrong. See #61.
+		if line.Agent != liveAgent[line.Name] {
+			t.Fatalf("%s reports agent %q now that it is %q, having reported %q while it was serving: "+
+				"the stored and live version strings disagree",
+				line.Name, line.Agent, line.Health, liveAgent[line.Name])
 		}
 	}
 

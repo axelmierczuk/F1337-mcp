@@ -22,6 +22,7 @@ type sandboxLine struct {
 	Address  string `json:"address"`
 	Platform string `json:"platform"`
 	Health   string `json:"health"`
+	Agent    string `json:"agent"`
 	Selected bool   `json:"selected"`
 }
 
