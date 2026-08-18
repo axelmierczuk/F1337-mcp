@@ -277,7 +277,25 @@ if [ -n "$TOKEN" ]; then
 else
   cat >&2 <<EOF
 
-  Installed, but not enrolled. To join a fleet:
+  Installed. Nothing else was configured: no CA, no certificate, no service.
+
+  If the network between this host and your workstation already authenticates
+  its peers — a tailnet, a WireGuard mesh, a tight VPC — write an agent.yaml
+  naming this host, a listen address on that network, and:
+
+    tls:
+      enabled: false
+
+  then register it to start at boot:
+
+    sudo ${INSTALL_DIR}/fleet-agent service install
+    sudo ${INSTALL_DIR}/fleet-agent service start
+
+  With mTLS off this agent authenticates nobody: anyone who can reach its port
+  can run commands on this host. It refuses to serve on an address that is
+  neither loopback nor private for exactly that reason. See docs/security.md.
+
+  Otherwise, enroll against a fleet CA so both ends carry a certificate:
 
     ${INSTALL_DIR}/fleet-agent enroll \\
       --token <enrollment-token> \\

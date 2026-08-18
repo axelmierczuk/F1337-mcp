@@ -4,8 +4,20 @@
 
 - Go 1.25+ on your workstation (until binary releases are published).
 - A machine to use as a sandbox, reachable from your workstation.
-- The sandbox host must be able to reach your workstation's control-plane port
-  once, during enrollment.
+
+Steps 2–6 below set up a fleet CA and enroll the host against it, so both ends
+of every connection carry a certificate. That is worth doing when the agent's
+port is reachable by anything you do not control, and it is the only part of
+this document that needs the sandbox host to reach your workstation's
+control-plane port.
+
+If the network between them already authenticates its peers — a Tailscale
+tailnet, a WireGuard mesh, a VPC whose security groups admit only the control
+plane — skip to [On a network that already authenticates its
+peers](#on-a-network-that-already-authenticates-its-peers), which is the
+README's default path and needs no CA at all. Read
+[security.md → Running without mTLS](security.md#running-without-mtls) first:
+without mTLS the agent authenticates nobody, so the network has to.
 
 ## 1. Workstation tools
 
@@ -263,18 +275,35 @@ also encrypts the traffic, and you can skip the CA entirely:
 
 ```sh
 # On the host: an agent.yaml with no certificates in it.
-cat > /etc/fleet/agent.yaml <<'YAML'
+sudo tee /etc/fleet/agent.yaml >/dev/null <<'YAML'
 name: "tailnet-box"
 listen: "100.83.4.17:8722"   # this host's tailnet address, not 0.0.0.0
 tls:
   enabled: false
 YAML
-fleet-agent serve --config /etc/fleet/agent.yaml
+sudo fleet-agent service install    # creates the state and log directories
+sudo fleet-agent service start
 ```
+
+`serve` reads the same config if you would rather run it in the foreground, but
+it writes to the system state directory (`/var/lib/fleet`, or
+`/Library/Application Support/fleet/state` on macOS), so it wants the same
+privileges `service install` does.
 
 Then register it from the workstation — `fleet_add(name="tailnet-box",
 address="100.83.4.17:8722", insecure=true)` — and it appears in `fleetctl list`
-as `auth none`.
+as `auth none`. There is no `fleetctl` equivalent: enrollment is what normally
+writes a registry entry, and this path has no enrollment. To write it by hand
+instead, add the sandbox to `~/.config/fleet/registry.yaml`:
+
+```yaml
+version: 1
+sandboxes:
+  - name: tailnet-box
+    address: 100.83.4.17:8722
+    insecure: true
+    enrolled_at: 2026-08-18T00:00:00Z
+```
 
 **Read [docs/security.md → Running without mTLS](security.md#running-without-mtls)
 before you do this.** With mTLS off the agent authenticates nobody: anyone who

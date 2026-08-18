@@ -244,7 +244,25 @@ This means the download was corrupted or tampered with. Not installing.
     } else {
         Write-Host @"
 
-  Installed, but not enrolled. To join a fleet:
+  Installed. Nothing else was configured: no CA, no certificate, no service.
+
+  If the network between this host and your workstation already authenticates
+  its peers — a tailnet, a WireGuard mesh, a tight VPC — write an agent.yaml
+  naming this host, a listen address on that network, and:
+
+    tls:
+      enabled: false
+
+  then register it to start at logon, from an elevated PowerShell:
+
+    $target service install
+    $target service start
+
+  With mTLS off this agent authenticates nobody: anyone who can reach its port
+  can run commands on this host. It refuses to serve on an address that is
+  neither loopback nor private for exactly that reason. See docs/security.md.
+
+  Otherwise, enroll against a fleet CA so both ends carry a certificate:
 
     $target enroll ``
       --token <enrollment-token> ``

@@ -28,7 +28,7 @@ Four binaries, one Go module:
 
 - **`fleet-mcp`** — runs on your workstation. The MCP server your agent
   talks to. Owns the registry of known sandboxes and the current selection.
-- **`fleet-agent`** — runs on every sandbox host. Listens over gRPC/mTLS,
+- **`fleet-agent`** — runs on every sandbox host. Listens over gRPC,
   runs commands, and supervises background processes.
 - **`fleetctl`** — runs on your workstation. Sets up the CA, mints
   enrollment tokens, inspects the fleet, and opens an interactive shell on a
@@ -52,39 +52,55 @@ go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
 go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest   # for `fleetctl tui`
 ```
 
-**2. Create a CA and mint an enrollment token:**
+**2. Put the agent on the sandbox host, and give it a config:**
 
 ```sh
-fleetctl ca init                       # prints the CA fingerprint — keep it
-fleetctl ca sign --profile control     # this workstation's own identity
-fleetctl serve &                       # enrollment endpoint, :9443 — stop it after
-fleetctl enroll mint --name build-box --address build-box.internal:8722
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh | sh
 ```
 
-**3. Enroll a machine as a sandbox:**
-
-`enroll mint` prints the command to run, with the token, control address and CA
-fingerprint already filled in. Paste it on the host:
+That downloads the release binary for the platform, checks it against the
+published checksum, and installs it. Nothing else — no CA, no certificate, no
+service. Windows uses `install.ps1` the same way.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
-  | sh -s -- --token sbx_ey... \
-      --control your-workstation:9443 \
-      --ca-fingerprint 9F:2C:8A:1E:... \
-      --listen 0.0.0.0:8722
+sudo tee /etc/fleet/agent.yaml >/dev/null <<'YAML'
+name: "build-box"
+listen: "100.83.4.17:8722"    # this host's own address on your private network
+tls:
+  enabled: false
+YAML
 ```
 
-This detects the platform, verifies the release checksum, enrolls the host
-(the private key is generated locally and never leaves the machine), and
-installs a system service. Use `install.ps1` on Windows — the PowerShell form
-is printed too.
+That path is Linux's. macOS reads `/Library/Application Support/fleet/agent.yaml`
+and Windows `%ProgramData%\fleet\agent.yaml`; everything else is the same.
 
-Then stop `fleetctl serve`, and check the fleet:
+**Name the interface you mean.** With `tls.enabled: false` the agent refuses to
+serve on an address that is neither loopback nor private, because on any other
+address there would be nothing between the port and a shell on the host.
+Loopback, RFC 1918, unique-local, link-local and CGNAT space — `100.64.0.0/10`,
+where every Tailscale node lives — are permitted. A wildcard bind, a public
+address, and a hostname it would have to resolve are refused. `serve
+--allow-unauthenticated-public` is the only way past that, and the default
+`listen` is `0.0.0.0:8722`, so a config that omits the line does not start.
+
+Leaving `tls.enabled` out is not the same as writing `false`. Unset means "on if
+this config names a certificate", so a host that enrolled keeps authenticating
+across an upgrade, and one written like the above never starts asking for a CA.
+
+**3. Start it:**
 
 ```sh
-fleetctl list          # one listing
-fleetctl tui           # or watch the whole fleet, its processes and their logs
+sudo fleet-agent service install
+sudo fleet-agent service start
 ```
+
+On Windows that registers a logon-triggered Scheduled Task in your own session
+rather than a Windows service. A service runs in session 0 with no operator
+profile, so it sees none of nvm, rustup, pyenv, cargo, scoop or npm globals —
+most of `PATH` on a developer machine, and an agent whose job is running the
+commands you would type cannot run them. The task stops when you log off;
+`--mechanism service --user <account>` is the answer for a machine nobody signs
+into. See [docs/service.md](docs/service.md).
 
 **4. Point your agent at the MCP server:**
 
@@ -99,7 +115,98 @@ fleetctl tui           # or watch the whole fleet, its processes and their logs
 }
 ```
 
+**5. Register the sandbox.** There is no CA, so there is no enrollment: nothing
+is issued and nothing is proved. What is left is giving the host a name, which
+your agent does with one tool call:
+
+```
+fleet_add(name="build-box", address="100.83.4.17:8722", insecure=true)
+```
+
+`insecure` has to be said because it cannot be discovered — an agent serving
+plaintext and one refusing a handshake look identical to a dialer that has not
+been told. Get it wrong and the connection fails; it never quietly downgrades.
+The call writes an entry to `~/.config/fleet/registry.yaml`, which you can write
+yourself instead:
+
+```yaml
+version: 1
+sandboxes:
+  - name: build-box
+    address: 100.83.4.17:8722
+    insecure: true
+    enrolled_at: 2026-08-18T00:00:00Z
+```
+
+That entry is a name this workstation assigned to an address, and the host never
+proves it. If something else answers there, the fleet will call it `build-box`
+and record its commands under that name. On a network that decides who can
+answer, that is the whole of what a name means.
+
+```sh
+fleetctl list          # AUTH reads none, and a line under the table says what that means
+fleetctl tui           # or watch the whole fleet, its processes and their logs
+```
+
 Done. `fleet_list` should show `build-box`.
+
+### What the default assumes
+
+Without mTLS the agent's authentication is whatever the network provides, and
+nothing else. It runs arbitrary commands on its host by design, so on a port
+something unauthorized can reach, that is unauthenticated remote code execution
+— and the failure is silent, because an agent that skipped the CA works
+immediately and looks exactly like a secured one. The precondition is that **the
+network authenticates its peers**: a tailnet, a WireGuard mesh, a VPC whose
+security groups admit only the control plane. On those, the identity check has
+already been made by something that also encrypts the traffic, and a second
+identity system buys nothing. If that is not true of your network, use mTLS.
+[docs/security.md → Running without mTLS](docs/security.md#running-without-mtls)
+is the full account.
+
+<details>
+<summary><strong>Setting up mTLS instead</strong></summary>
+
+Both ends present certificates issued by a CA you run, and the handshake — not
+the network — is the boundary. On your workstation:
+
+```sh
+fleetctl ca init                       # prints the CA fingerprint — keep it
+fleetctl ca sign --profile control     # this workstation's own identity
+fleetctl serve &                       # enrollment endpoint, :9443 — stop it after
+fleetctl enroll mint --name build-box --address build-box.internal:8722
+```
+
+`enroll mint` prints the command to run on the host, with the token, control
+address and CA fingerprint already filled in. Paste it there:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/axelmierczuk/fleet-mcp/main/install.sh \
+  | sh -s -- --token sbx_ey... \
+      --control your-workstation:9443 \
+      --ca-fingerprint 9F:2C:8A:1E:... \
+      --listen 0.0.0.0:8722
+```
+
+It verifies the release checksum, enrolls the host — the private key is
+generated there and never leaves it — writes `tls.enabled: true` into the
+config, and registers a system service when run as root. Windows gets the
+PowerShell form, printed alongside.
+
+Enrollment registers the sandbox for you, so there is no `fleet_add` step, and
+`0.0.0.0` is an ordinary listen address here: the listen guard applies only when
+the agent authenticates nobody.
+
+Then stop `fleetctl serve`, and check the fleet:
+
+```sh
+fleetctl list          # AUTH reads mtls
+```
+
+The long form, including rotating the CA and adding more hosts, is
+[docs/quickstart.md](docs/quickstart.md).
+
+</details>
 
 ### Why `fleet-tui` is its own binary
 
@@ -138,12 +245,13 @@ never silently acts on the wrong host.
 
 ## Security
 
-- **mTLS by default.** Both ends present certificates from the fleet CA.
-  It can be turned off for a network that already authenticates its peers —
-  a tailnet, a WireGuard mesh, a tight VPC — and then the agent refuses to
-  serve on any address that is neither loopback nor private, says so at every
-  start, shows as `auth none` in `fleetctl list`, and records every command
-  against the address it came from rather than a verified identity.
+- **Transport authentication is a decision you make.** `fleet-agent enroll`
+  writes `tls.enabled: true`, and both ends then present certificates from the
+  fleet CA. A config with no certificates in it serves plaintext instead, for a
+  network that already authenticates its peers — and then the agent refuses any
+  address that is neither loopback nor private, says so at every start, shows as
+  `auth none` in `fleetctl list`, and records every command against the address
+  it came from rather than a verified identity.
 - **Keys never move.** Enrollment is a CSR exchange against a single-use token.
 - **No shell by default.** Commands take an argv, not a string.
 - **Caps and audit.** Wall-clock timeouts, output limits, append-only JSONL
