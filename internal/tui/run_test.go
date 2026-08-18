@@ -482,3 +482,34 @@ func TestTheViewIsTheRenderer(t *testing.T) {
 	p := &program{model: demoModel(80, 24), theme: NewTheme(ProfileNone), glyphs: unicodeGlyphs, src: &recordingSource{}}
 	require.Equal(t, Render(p.model, p.theme, p.glyphs), p.View())
 }
+
+// TestTheResetSequenceIsWrittenOnlyOnThePanicPath.
+//
+// The two lines that decide this live inside guardTerminal, which returns a
+// no-op for anything that is not a terminal — so every test, every pipe and
+// every CI runner takes the branch that decides nothing, and the decision
+// itself was covered by nothing at all. Restoring the defect the last round
+// fixed — sending the escapes on every path — left the whole tree green.
+//
+// What is at stake is a Windows console, which keeps
+// ENABLE_VIRTUAL_TERMINAL_PROCESSING off unless something turns it on:
+// bubbletea turns it on for the run and puts it back on the way out, so bytes
+// written after that are printed rather than acted on, and every clean exit
+// left "<ESC>[?1049l<ESC>[?25h" on the operator's screen.
+func TestTheResetSequenceIsWrittenOnlyOnThePanicPath(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	modes := 0
+	restore := restoreTerminal(func() { modes++ }, &out)
+
+	restore(false)
+	require.Equal(t, 1, modes, "a clean exit must still put the terminal mode back")
+	require.Empty(t, out.String(),
+		"a clean exit wrote the reset sequence, which a console that is not interpreting it prints")
+
+	restore(true)
+	require.Equal(t, 2, modes, "the panic path must put the terminal mode back too")
+	require.Equal(t, resetSequence, out.String(),
+		"the panic path is the one bubbletea has not already covered, and the one that needs the escapes")
+}

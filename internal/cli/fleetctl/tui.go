@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/axelmierczuk/fleet-mcp/internal/client"
 	"github.com/axelmierczuk/fleet-mcp/internal/tui"
 )
 
@@ -39,12 +40,35 @@ func healthIntervalFor(refresh time.Duration) time.Duration {
 	return refresh
 }
 
-func newTUICommand(out io.Writer) *cobra.Command {
-	var (
-		control      controlFlags
-		registryPath string
-		refresh      time.Duration
-	)
+// tuiFlags is everything `fleetctl tui` reads off its command line.
+//
+// A struct rather than three locals so a test can hold the same values the
+// command parsed into and then build the pool the one way the command builds
+// it. See [tuiFlags.pool].
+type tuiFlags struct {
+	control      controlFlags
+	registryPath string
+	refresh      time.Duration
+}
+
+// pool builds the pool the view runs on: the operator's credentials, and the
+// background health loop at the interval --refresh chose.
+//
+// A method rather than a line inside RunE because RunE refuses before it gets
+// this far whenever the output is not a terminal, which is every test in this
+// package — so the flag's journey to the pool was asserted by nothing.
+// Replacing healthIntervalFor(f.refresh) with the default left this repository
+// green, end-to-end suite included: the scenario that kills an agent waits a
+// minute for the re-probe, and the ten-second default delivers one well inside
+// that. What the scenario covers is that the view gets a probing pool at all,
+// which is the other half.
+func (f *tuiFlags) pool() (*client.Pool, error) {
+	return f.control.pool(healthIntervalFor(f.refresh))
+}
+
+func newTUICommand(out io.Writer) *cobra.Command { return newTUICommandWith(out, &tuiFlags{}) }
+
+func newTUICommandWith(out io.Writer, f *tuiFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tui",
 		Short: "Watch the fleet in a full-screen terminal view",
@@ -75,7 +99,7 @@ func newTUICommand(out io.Writer) *cobra.Command {
 				return err
 			}
 
-			fleet, err := openRegistry(registryPath)
+			fleet, err := openRegistry(f.registryPath)
 			if err != nil {
 				return err
 			}
@@ -83,7 +107,7 @@ func newTUICommand(out io.Writer) *cobra.Command {
 			// source and the only thing in this program that probes on a
 			// schedule, so it gets the interval the operator chose rather
 			// than the one a command that probes once and exits wants.
-			pool, err := control.pool(healthIntervalFor(refresh))
+			pool, err := f.pool()
 			if err != nil {
 				return err
 			}
@@ -98,7 +122,7 @@ func newTUICommand(out io.Writer) *cobra.Command {
 			defer stop()
 
 			return tui.Run(ctx, tui.Options{
-				Source:   tui.NewFleetSource(fleet, pool, control.probeTimeout()),
+				Source:   tui.NewFleetSource(fleet, pool, f.control.probeTimeout()),
 				Schedule: tui.DefaultSchedule,
 				Out:      tty,
 				TTY:      tty,
@@ -111,9 +135,9 @@ func newTUICommand(out io.Writer) *cobra.Command {
 			})
 		},
 	}
-	control.register(cmd)
-	cmd.Flags().StringVar(&registryPath, "registry", "", "path to the fleet registry (default: <config dir>/registry.yaml)")
-	cmd.Flags().DurationVar(&refresh, "refresh", defaultHealthInterval,
+	f.control.register(cmd)
+	cmd.Flags().StringVar(&f.registryPath, "registry", "", "path to the fleet registry (default: <config dir>/registry.yaml)")
+	cmd.Flags().DurationVar(&f.refresh, "refresh", defaultHealthInterval,
 		"how often each sandbox's health is re-probed in the background")
 	return cmd
 }

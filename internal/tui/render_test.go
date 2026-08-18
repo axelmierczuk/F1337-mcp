@@ -592,3 +592,88 @@ func TestOneFailureReadsTheSameWayEverywhere(t *testing.T) {
 	require.GreaterOrEqual(t, strings.Count(frame, "no answer within the timeout"), 2,
 		"the panes and the fleet row do not describe the failure the same way")
 }
+
+// TestNothingASandboxSaysCanMoveTheCursorFromTheFooterEither.
+//
+// The footer was the one string in a frame that did not go through [safe].
+// Both things that land in it are far-side text: a confirmation prompt names a
+// sandbox, and a status line is built from a sandbox name — and, once #43
+// lands, from whatever [Status] the shell hook reports back with, which is a
+// program on somebody else's machine describing how it exited.
+//
+// The sweep in TestNothingASandboxSaysCanMoveTheCursor could not see this: it
+// renders in normal mode with no status set, which is the one state where the
+// footer holds nothing but the program's own key hints.
+func TestNothingASandboxSaysCanMoveTheCursorFromTheFooterEither(t *testing.T) {
+	t.Parallel()
+
+	const attack = "\x1b[2J\x1b[Hevil\x07\r\x1b]0;pwned\x07"
+
+	// A prompt built the way the model builds one. %q is what keeps this
+	// particular string safe today — it renders a control character as the
+	// four printable bytes "\x1b" — so this case is the second lock rather
+	// than the first, and it is here to fail if that ever becomes %s.
+	confirming := demoModel(120, 40)
+	confirming.sandboxes[0].Name = attack
+	confirming.procFor = attack
+	confirming, _ = press(confirming, "x")
+	require.Equal(t, modeConfirm, confirming.mode)
+	require.NotContains(t, confirming.confirm.Prompt, "\x1b", "the prompt is built with %q, which is what quotes the escape")
+
+	// And a prompt that reached the footer unquoted, which is what the
+	// renderer's own sanitising is for: the footer draws what it is given.
+	raw := demoModel(120, 40)
+	raw.confirm = Confirmation{Prompt: "Stop " + attack + "?", Effect: Effect{Kind: EffectSignal}}
+	raw.mode = modeConfirm
+
+	reported := demoModel(120, 40)
+	reported, _ = reported.Step(Status("shell on " + attack + " exited 3"))
+
+	acted := demoModel(120, 40)
+	acted.sandboxes[0].Name = attack
+	acted.procFor = attack
+	acted, _ = press(acted, "x", "y")
+
+	failed := demoModel(120, 40)
+	failed.sandboxes[0].Name = attack
+	failed.procFor = attack
+	failed, _ = failed.Step(actionMsg{
+		done:      "stopped web-dev-server on " + attack,
+		attempted: "stop web-dev-server on " + attack,
+		err:       status.Error(codes.PermissionDenied, "no"),
+	})
+
+	for name, m := range map[string]Model{
+		"a confirmation prompt": confirming,
+		"an unquoted prompt":    raw,
+		"a hook's status":       reported,
+		"an action in progress": acted,
+		"a refused action":      failed,
+	} {
+		for _, size := range [][2]int{{80, 24}, {120, 40}, {40, 9}} {
+			m := withSize(m, size[0], size[1])
+			frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+			require.NotContainsf(t, frame, "\x1b", "%s at %dx%d put an escape on the screen", name, size[0], size[1])
+			require.NotContainsf(t, frame, "\a", "%s at %dx%d", name, size[0], size[1])
+			require.NotContainsf(t, frame, "\r", "%s at %dx%d", name, size[0], size[1])
+			require.Containsf(t, frame, "evil", "%s at %dx%d lost the text either side of the escape", name, size[0], size[1])
+		}
+	}
+}
+
+// TestTheFooterAlwaysOffersQuitAndHelp. An operator who can find neither is
+// stuck inside a full-screen program, so those two hints are the ones the
+// narrowing is not allowed to drop.
+func TestTheFooterAlwaysOffersQuitAndHelp(t *testing.T) {
+	t.Parallel()
+
+	for w := minWidth; w <= 200; w++ {
+		for _, h := range []int{minHeight, 9, 14, 24, 60} {
+			m := withSize(demoModel(80, 24), w, h)
+			lines := strings.Split(Render(m, NewTheme(ProfileNone), unicodeGlyphs), "\n")
+			footer := lines[len(lines)-1]
+			require.Containsf(t, footer, "q quit", "%dx%d: the footer does not say how to leave", w, h)
+			require.Containsf(t, footer, "? help", "%dx%d: the footer does not say where the keys are", w, h)
+		}
+	}
+}

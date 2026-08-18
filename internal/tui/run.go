@@ -29,9 +29,16 @@ import (
 // tick with an unchanged buffer is a mutex and a length check, but sixty of
 // anything a second is not "no busy-wait".
 //
-// Measured, on an idle empty fleet over a two-minute window: 0.52% of one core
-// at 60, 0.23% at 20. The difference is the only thing this constant buys, and
-// it is why it is not simply left at the default.
+// Measured on macOS/arm64, from the process's own rusage over a two-minute
+// window on a pseudo-terminal, with the short run subtracted so start-up does
+// not count: an idle empty fleet costs 0.42% of one core at 60 and 0.19% at
+// 20, and twenty registered-and-unreachable sandboxes cost 0.38% at 20. That
+// difference is the only thing this constant buys, and it is why it is not
+// simply left at the default.
+//
+// The method is written down because the figure is not: three places in this
+// branch quoted three different pairs of numbers for it, which is what a
+// measurement nobody can repeat turns into.
 const renderFPS = 20
 
 // Options configures a run.
@@ -224,10 +231,24 @@ func guardTerminal(f *os.File) func(panicked bool) {
 	if err != nil {
 		return func(bool) {}
 	}
+	return restoreTerminal(func() { _ = term.Restore(f.Fd(), state) }, f)
+}
+
+// restoreTerminal is the decision [guardTerminal] makes once there is a
+// terminal to put back: the mode goes back whichever way this was reached, and
+// the escape sequences on the panic path only.
+//
+// It is its own function because guardTerminal returns a no-op for anything
+// that is not a terminal — which is every unit test, every pipe and every CI
+// runner — so the two lines that decide this were reachable from no test at
+// all. Sending the escapes on every path is the defect the last audit round
+// found and fixed; putting it back left the whole tree green, end-to-end suite
+// included.
+func restoreTerminal(restoreMode func(), out io.Writer) func(panicked bool) {
 	return func(panicked bool) {
-		_ = term.Restore(f.Fd(), state)
+		restoreMode()
 		if panicked {
-			writeReset(f)
+			writeReset(out)
 		}
 	}
 }

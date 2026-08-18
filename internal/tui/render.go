@@ -208,6 +208,15 @@ func fleetSummary(sandboxes []Sandbox) string {
 // renderFooter is the confirmation prompt if there is one, the status line if
 // there is one, and the key hints otherwise — in that order, because a prompt
 // that a status line could hide is not a prompt.
+//
+// Both carry far-side text and both go through [safe], which every other cell
+// of every other pane already did: the prompt names a sandbox, and the status
+// line is built from a sandbox name too — and, once #43 lands, from whatever
+// [Status] the shell hook reports back with, which is the output of a program
+// on somebody else's machine. It was the one string in a frame that reached the
+// terminal unsanitised. The signal picker and the key hints are the program's
+// own chrome, and are styled rather than sanitised, because sanitising would
+// strip the styles.
 func renderFooter(m Model, t Theme, g Glyphs, l Layout) string {
 	switch {
 	case m.mode == modeConfirm:
@@ -217,11 +226,11 @@ func renderFooter(m Model, t Theme, g Glyphs, l Layout) string {
 		// visible answer, which is the one way this footer can fail.
 		const choice = "  [y/N]"
 		room := l.Width - 1 - ansi.StringWidth(choice)
-		return fit(" "+t.Alarm.apply(clipToWidth(m.confirm.Prompt, room, g)+choice), l.Width, g)
+		return fit(" "+t.Alarm.apply(clipToWidth(safe(m.confirm.Prompt), room, g)+choice), l.Width, g)
 	case m.mode == modeSignal:
 		return fit(" "+t.Alarm.apply("signal: ")+signalChoices(m, t), l.Width, g)
 	case m.status != "":
-		return fit(" "+t.Warn.apply(m.status), l.Width, g)
+		return fit(" "+t.Warn.apply(safe(m.status)), l.Width, g)
 	default:
 		return fit(" "+t.Dim.apply(hints(m, g, l)), l.Width, g)
 	}
@@ -492,7 +501,15 @@ func processBody(m Model, t Theme, g Glyphs, w, h int) []string {
 	if !ok {
 		return []string{t.Dim.apply("no sandbox selected")}
 	}
-	if m.procFor != sb.Name && m.procState.err == nil {
+	if m.procFor != sb.Name {
+		// Whose processes these are is decided before anything else, and
+		// without consulting the error: this used to fall through to the table
+		// when a refresh had failed, and drew one machine's process list under
+		// another machine's name. A pane that can do that is the failure this
+		// whole package exists to avoid, on one screen.
+		if m.procState.err != nil {
+			return wrapStyled(t.Bad, paneError(m.procState.err), w, h)
+		}
 		return []string{t.Dim.apply("asking " + safe(sb.Name) + g.Ellipsis)}
 	}
 	if len(m.processes) == 0 {

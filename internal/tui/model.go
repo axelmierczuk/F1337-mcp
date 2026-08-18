@@ -712,9 +712,22 @@ func (m Model) applySandboxes(msg sandboxesMsg) Model {
 	if sb, ok := m.selectedSandbox(); ok {
 		selected = sb.Name
 	}
+	before := m.focusedName()
 	m.sandboxes = msg.sandboxes
 	m.sbLoaded = true
 	m.sbCursor = indexOf(m.sandboxes, selected, m.sbCursor)
+	if m.focusedName() != before {
+		// A listing that no longer holds the selected sandbox lands the
+		// cursor on a different machine. That is the same change of subject
+		// that moving the cursor is, and everything scoped to the old machine
+		// is now an answer about somewhere else — but only `move` cleared it.
+		// What that cost was a processes pane titled with the name of the
+		// machine that took the place of the one that left, listing the
+		// processes of the one that left: the pane's own guard was written as
+		// "wrong sandbox and no error", and a machine on its way out produces
+		// exactly the failed refresh that guard then stood down for.
+		m = m.clearFocused()
+	}
 	return m
 }
 

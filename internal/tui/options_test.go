@@ -45,9 +45,10 @@ func builtProgram(t *testing.T, opts ...tea.ProgramOption) *tea.Program {
 //
 // bubbletea's default is 60, which is a frame rate for animation. This
 // program's fastest legitimate change is a keystroke. Measured on a pty over a
-// two-minute idle window, the difference is 0.50% of one core against 0.15%,
-// and "no busy-wait: idle CPU is ~0 when nothing is changing" is an acceptance
-// criterion, so the constant is not decoration.
+// two-minute idle window, the difference is 0.42% of one core against 0.19%
+// — see renderFPS for the method — and "no busy-wait: idle CPU is ~0 when
+// nothing is changing" is an acceptance criterion, so the constant is not
+// decoration.
 func TestTheRendererRunsSlowerThanTheDefault(t *testing.T) {
 	t.Parallel()
 

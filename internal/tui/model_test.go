@@ -14,31 +14,59 @@ import (
 	"github.com/axelmierczuk/fleet-mcp/internal/client"
 )
 
-// TestNoKeyMutatesWithoutConfirmation walks every key the program binds and
-// asserts that none of them, on its own, produces an effect that changes a
-// sandbox.
+// TestNoKeyMutatesWithoutConfirmation sweeps every key the program can be sent,
+// in every mode it has, and asserts that exactly one combination produces an
+// effect that changes a sandbox: "y" at a confirmation prompt.
 //
-// It is written as a sweep rather than as three tests about the three mutating
-// keys, because the failure it guards against is a key added later that skips
-// the gate. A test naming the keys it knows about cannot see that; this one
-// fails the moment any keystroke emits a mutating effect directly.
+// It is a sweep rather than three tests about the three mutating keys, because
+// the failure it guards against is a key bound later that skips the gate — and
+// a sweep over a hand-written list of keys cannot see that either, which is
+// what this used to be. Every printable ASCII rune and every named key, in
+// every mode, is the smallest space that contains any key a future edit could
+// bind without also editing this test.
 func TestNoKeyMutatesWithoutConfirmation(t *testing.T) {
 	t.Parallel()
 
 	every := []string{
-		"tab", "shift+tab", "up", "down", "j", "k", "pgup", "pgdown", "g", "G",
-		"home", "end", "enter", "esc", "f", "t", "ctrl+r", "s", "x", "r", "S",
-		"y", "Y", "n", "1", "2", "3", "4", "5", "6", "?", "a", "z", " ",
+		"tab", "shift+tab", "up", "down", "pgup", "pgdown", "home", "end",
+		"enter", "esc", "ctrl+c", "ctrl+r",
 	}
-	for _, k := range every {
-		m := demoModel(80, 24)
-		next, effects := m.Step(key(k))
-		require.Emptyf(t, mutating(effects), "key %q emitted a mutating effect with no confirmation", k)
-		// And a key that proposes something must have left a prompt behind,
-		// so that "no effect" cannot be achieved by silently doing nothing.
-		if next.mode == modeConfirm {
-			require.NotEmptyf(t, next.confirm.Prompt, "key %q opened a confirmation with no prompt", k)
-			require.Truef(t, next.confirm.Effect.Kind.Mutating(), "key %q confirmed a non-mutating effect", k)
+	for r := ' '; r <= '~'; r++ {
+		every = append(every, string(r))
+	}
+
+	modes := map[string]struct {
+		want  mode
+		start func() Model
+	}{
+		"normal":  {modeNormal, func() Model { return demoModel(80, 24) }},
+		"confirm": {modeConfirm, func() Model { m, _ := press(demoModel(80, 24), "x"); return m }},
+		"signal":  {modeSignal, func() Model { m, _ := press(demoModel(80, 24), "S"); return m }},
+		"help":    {modeHelp, func() Model { m, _ := press(demoModel(80, 24), "?"); return m }},
+	}
+	for name, tc := range modes {
+		require.Equalf(t, tc.want, tc.start().mode, "the %s fixture is not in %s mode", name, name)
+		for _, k := range every {
+			m := tc.start()
+			next, effects := m.Step(key(k))
+
+			// The one combination that may: an operator who has read the
+			// prompt and said yes.
+			if tc.want == modeConfirm && (k == "y" || k == "Y") {
+				require.Lenf(t, mutating(effects), 1, "%q did not confirm the prompt it was answering", k)
+				continue
+			}
+			require.Emptyf(t, mutating(effects),
+				"%s mode: key %q emitted a mutating effect with no confirmation", name, k)
+
+			// And a key that proposes something must have left a prompt
+			// behind, so that "no effect" cannot be achieved by silently doing
+			// nothing.
+			if next.mode == modeConfirm && m.mode != modeConfirm {
+				require.NotEmptyf(t, next.confirm.Prompt, "%s mode: key %q opened a confirmation with no prompt", name, k)
+				require.Truef(t, next.confirm.Effect.Kind.Mutating(), "%s mode: key %q confirmed a non-mutating effect", name, k)
+				require.Containsf(t, next.confirm.Prompt, `"alpha"`, "%s mode: key %q did not name the sandbox", name, k)
+			}
 		}
 	}
 }
@@ -665,4 +693,73 @@ func TestTheFirstFetchIsMarkedInFlight(t *testing.T) {
 
 	_, again := m.tick(m.now.Add(time.Hour))
 	require.Empty(t, kinds(again), "the opening read was asked for twice")
+}
+
+// TestALostSandboxDoesNotLeaveItsProcessesUnderTheNextOnesName.
+//
+// A refresh of the fleet can move the selection without a keystroke: when the
+// registry no longer holds the sandbox the cursor was on, the cursor lands on
+// whatever now occupies its index. That is a change of machine exactly as
+// pressing "down" is, and everything scoped to the old one is now an answer
+// about somewhere else — but only `move` cleared it.
+//
+// The visible cost was a processes pane titled "beta-builder (stale)" listing
+// four processes belonging to a machine that had just left the fleet. The
+// pane's own guard was written as "wrong sandbox *and* no error", so a failed
+// refresh — which is exactly what a sandbox on its way out produces — let the
+// rows through.
+func TestALostSandboxDoesNotLeaveItsProcessesUnderTheNextOnesName(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(120, 40)
+	require.Len(t, m.processes, 4)
+
+	// A refresh of alpha fails, which is what a machine going away looks like.
+	m, _ = m.Step(processesMsg{sandbox: "alpha", err: errors.New("no answer within the timeout")})
+	require.True(t, m.procState.stale)
+
+	// And then alpha leaves the registry, so the cursor lands on beta-builder.
+	m, _ = m.Step(sandboxesMsg{sandboxes: demoFleet()[1:], at: fixedNow})
+	sb, ok := m.selectedSandbox()
+	require.True(t, ok)
+	require.Equal(t, "beta-builder", sb.Name)
+
+	require.Empty(t, m.processes,
+		"the machine that left the fleet took its process list with it")
+	require.Empty(t, m.detailFor)
+	require.Empty(t, m.logs.Lines)
+
+	frame := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+	require.NotContains(t, frame, "web-dev-server",
+		"one machine's processes are drawn under another machine's name")
+
+	// And the pane refuses to draw them even if they are somehow still there,
+	// which is the second lock on the same door.
+	stuck := demoModel(120, 40)
+	stuck.sandboxes = demoFleet()[1:]
+	stuck.procState.err, stuck.procState.stale = errors.New("no answer within the timeout"), true
+	require.NotContains(t, Render(stuck, NewTheme(ProfileNone), unicodeGlyphs), "web-dev-server",
+		"the processes pane drew a list it holds for a different sandbox")
+}
+
+// TestARefreshThatKeepsTheSelectionKeepsEverythingElseToo, which is the other
+// half: the clear above must not fire on the ordinary refresh, or every pane
+// would blank twice a second.
+func TestARefreshThatKeepsTheSelectionKeepsEverythingElseToo(t *testing.T) {
+	t.Parallel()
+
+	m := demoModel(120, 40)
+	before := Render(m, NewTheme(ProfileNone), unicodeGlyphs)
+
+	m, _ = m.Step(sandboxesMsg{sandboxes: demoFleet(), at: fixedNow})
+	require.Len(t, m.processes, 4)
+	require.Equal(t, "alpha", m.detailFor)
+	require.Equal(t, before, Render(m, NewTheme(ProfileNone), unicodeGlyphs),
+		"an ordinary fleet refresh redrew the panes it did not change")
+
+	// Including one that re-sorts and gains a member, as long as the selection
+	// survives it.
+	grown := append([]Sandbox{{Name: "aaa-new", Health: client.HealthUnknown}}, demoFleet()...)
+	m, _ = m.Step(sandboxesMsg{sandboxes: grown, at: fixedNow})
+	require.Len(t, m.processes, 4, "a fleet that gained a member blanked the focused sandbox's panes")
 }

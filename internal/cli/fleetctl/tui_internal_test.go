@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/axelmierczuk/fleet-mcp/internal/tui"
 )
 
 // The pool `tui` runs on, which is the one thing about this command that is
@@ -66,10 +68,66 @@ func TestTUIRunsOnAPoolThatKeepsProbing(t *testing.T) {
 
 	// `tui --refresh 0` reaches the same place as `tui`, rather than the
 	// one-shot interval, which would be a view whose health stopped after the
-	// first probe and never said so. That the flag reaches the pool at all is
-	// covered where it can be observed: test/e2e kills an agent the view has
-	// already drawn as serving.
+	// first probe and never said so. That the flag reaches the pool from the
+	// command line is TestTheRefreshFlagReachesThePoolTheViewRunsOn below —
+	// this used to claim test/e2e covered it, which it does not: that scenario
+	// waits a minute for a re-probe the ten-second default also delivers, so
+	// what it pins is that the view gets a probing pool at all.
 	require.Equal(t, defaultHealthInterval, healthIntervalFor(0))
 	require.Equal(t, defaultHealthInterval, healthIntervalFor(-time.Second))
 	require.Equal(t, 5*time.Second, healthIntervalFor(5*time.Second))
+}
+
+// TestTheRefreshFlagReachesThePoolTheViewRunsOn.
+//
+// The interval is what decides whether a machine going away is noticed while
+// the operator is still looking at the screen, and until now nothing connected
+// the flag to the pool: healthIntervalFor was asserted on its own, pool() was
+// asserted on its own, and the line in RunE that composes them was covered by
+// neither. Replacing it with the default left this repository green, end-to-end
+// suite included — that scenario waits a minute for a re-probe the default
+// delivers in ten seconds, so it pins "the view gets a probing pool" and not
+// "the flag reaches it".
+//
+// This drives the command an operator types: cobra parses the real flags, RunE
+// refuses because a buffer is not a terminal, and the pool is then built the
+// one way the command builds it.
+func TestTheRefreshFlagReachesThePoolTheViewRunsOn(t *testing.T) {
+	t.Setenv("FLEET_CONFIG_DIR", t.TempDir())
+	controlCredentials(t)
+
+	cases := []struct {
+		name string
+		args []string
+		want time.Duration
+	}{
+		{"no flag at all", nil, defaultHealthInterval},
+		{"an interval the operator chose", []string{"--refresh", "5s"}, 5 * time.Second},
+		{"a slower one", []string{"--refresh", "45s"}, 45 * time.Second},
+		// Nought is the flag's default rather than "never": a pool asked for no
+		// interval gives a one-shot command what it wants, and here that is a
+		// view whose health stopped after the first probe and never said so.
+		{"nought", []string{"--refresh", "0"}, defaultHealthInterval},
+		{"a negative one", []string{"--refresh", "-1s"}, defaultHealthInterval},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				f   tuiFlags
+				out bytes.Buffer
+			)
+			cmd := newTUICommandWith(&out, &f)
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			cmd.SetArgs(tc.args)
+			require.ErrorIs(t, cmd.Execute(), tui.ErrNotATerminal,
+				"the command did not get as far as parsing its flags")
+
+			pool, err := f.pool()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = pool.Close() })
+			require.Equal(t, tc.want, pool.HealthInterval(),
+				"the pool the view runs on does not re-probe at the interval the command line asked for")
+		})
+	}
 }
