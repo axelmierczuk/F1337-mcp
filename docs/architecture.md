@@ -34,6 +34,13 @@
    │   internal/security/enroll           │  EnrollmentService, tokens
    │   internal/client                    │  the same client fleet-mcp uses
    └──────────────────────────────────────┘
+              │  `fleetctl tui` hands over its argv and its terminal
+              ▼
+   ┌──────────────────────────────────────┐
+   │ fleet-tui                            │
+   │   internal/cli/fleetctl              │  the same command tree
+   │   internal/tui                       │  the full-screen view
+   └──────────────────────────────────────┘
 ```
 
 `fleetctl` is a separate control plane rather than a subcommand of the MCP
@@ -55,6 +62,25 @@ pane for every host is what makes a large fleet unwatchable. The model, the
 layout and the rendering are pure functions over values, so the parts a terminal
 cannot be asked about in a test — refresh scheduling, confirmation gating,
 degradation below 80x24 — are asserted on directly.
+
+It is also the one thing here that is a separate process, and that is a linking
+decision rather than a design one. bubbletea's package init asks the terminal
+for its background colour and reads for up to five seconds waiting for an
+answer; package inits run in every process that links the package, whatever
+subcommand was typed, so linking the view into `fleetctl` made `fleetctl
+version` on a terminal that does not answer cost five seconds and swallow
+whatever was typed meanwhile (#73). Nothing inside the process can opt out —
+every escape hatch the library has is read during that init, before any of our
+code runs — so the only fix is not to link it, and the only way to keep the
+command while not linking it is a second binary.
+
+`fleet-tui` is therefore not a second CLI. It is this same command tree, built
+by the same `NewRootCommandWithView`, with the view supplied; `fleetctl tui`
+finds it beside itself and hands over its command line unchanged. There is one
+implementation of every flag, every default and every credential path. What
+holds that in place is `TestOnlyTheViewBinaryLinksATerminalUI`, which resolves
+each command's imports and fails if a binary that draws nothing links something
+that owns the terminal.
 
 ## Selection under a stateless protocol
 

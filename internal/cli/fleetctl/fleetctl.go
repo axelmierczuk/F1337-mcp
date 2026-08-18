@@ -9,8 +9,12 @@
 // # Adding a command
 //
 // Write a newXCommand(out io.Writer) *cobra.Command constructor in its own
-// file and add it to the list in [NewRootCommand]. That list is the whole
-// registration surface; there is no plugin table and no init() magic.
+// file and add it to the list in [NewRootCommandWithView]. That list is the
+// whole registration surface; there is no plugin table and no init() magic.
+//
+// There is one seam, and it is not a plugin table: `tui` takes a [View],
+// because the package that draws it queries the terminal from an init and so
+// must not be linked into `fleetctl` at all. See tui.go and handoff.go.
 //
 // Two conventions keep the commands consistent, and both are one line each:
 //
@@ -51,7 +55,19 @@ func Main(args []string, out io.Writer) int {
 // the two paths converge rather than competing. fleet-agent's CLI has the same
 // pair for the same reason.
 func MainContext(ctx context.Context, args []string, out io.Writer) int {
-	root := NewRootCommand(out)
+	return MainWithView(ctx, args, out, nil)
+}
+
+// MainWithView is MainContext for a binary that links the full-screen view.
+//
+// Only cmd/fleet-tui calls it with a non-nil view. See the head of tui.go: the
+// view's dependency queries the terminal from a package init, so `fleetctl`
+// itself must not link it, and `fleetctl tui` hands over to the binary that
+// does. Both binaries run this same command tree, which is what makes the
+// hand-off invisible — there is one implementation of every flag, every default
+// and every credential path, not two.
+func MainWithView(ctx context.Context, args []string, out io.Writer, view View) int {
+	root := NewRootCommandWithView(out, view)
 	root.SetArgs(args)
 	if err := root.ExecuteContext(ctx); err != nil {
 		// A command that ran something elsewhere reports what it got, rather
@@ -70,7 +86,16 @@ func MainContext(ctx context.Context, args []string, out io.Writer) int {
 }
 
 // NewRootCommand builds the command tree, writing all output to out.
-func NewRootCommand(out io.Writer) *cobra.Command {
+//
+// The tree it builds does not draw the full-screen view; `tui` hands that to
+// the binary that does. See [NewRootCommandWithView].
+func NewRootCommand(out io.Writer) *cobra.Command { return NewRootCommandWithView(out, nil) }
+
+// NewRootCommandWithView builds the command tree with view as what `tui` runs.
+//
+// A nil view is the base `fleetctl`, and is what every caller but cmd/fleet-tui
+// wants.
+func NewRootCommandWithView(out io.Writer, view View) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "fleetctl",
 		Short: "Operator CLI for the fleet control plane",
@@ -100,7 +125,7 @@ func NewRootCommand(out io.Writer) *cobra.Command {
 		newSelectCommand(out),
 		newShellCommand(out),
 		newSocksCommand(out),
-		newTUICommand(out),
+		newTUICommand(out, view),
 		newVersionCommand(out),
 	)
 	return root

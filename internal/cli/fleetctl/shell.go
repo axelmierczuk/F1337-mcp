@@ -39,15 +39,26 @@ import (
 // a line on stderr saying which.
 const sessionFailed = 255
 
-// exitStatus carries a session's exit code out to the process's own.
+// exitStatus carries a child's exit code out to this process's own.
 //
 // It is an error because that is the only thing a cobra RunE can return, and it
 // is handled in [MainContext] rather than printed: `exit 3` in a remote shell
 // means the CLI exits 3, not that it prints an error about it.
-type exitStatus struct{ code int }
+//
+// what names whose status it is, because there are two: a remote shell, and on
+// Windows the helper `fleetctl tui` hands the console to. Empty means the
+// shell, which is every use of it outside handoff_windows.go.
+type exitStatus struct {
+	what string
+	code int
+}
 
 func (e *exitStatus) Error() string {
-	return fmt.Sprintf("the remote shell exited with status %d", e.code)
+	what := e.what
+	if what == "" {
+		what = "the remote shell"
+	}
+	return fmt.Sprintf("%s exited with status %d", what, e.code)
 }
 
 // newShellCommand takes no writer, unlike every other command in this package.

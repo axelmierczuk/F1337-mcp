@@ -147,22 +147,6 @@ func TestOnlyThePanicPathSendsTheResetSequence(t *testing.T) {
 	require.Equal(t, []bool{false, false, true}, sent)
 }
 
-// TestRunRefusesWithoutATerminal. A full-screen program whose output is a pipe
-// produces escape sequences and no frames, which reads as a hang.
-func TestRunRefusesWithoutATerminal(t *testing.T) {
-	t.Parallel()
-
-	f, err := os.CreateTemp(t.TempDir(), "not-a-tty")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = f.Close() })
-
-	err = RequireTerminal(f)
-	require.ErrorIs(t, err, ErrNotATerminal)
-	require.Contains(t, err.Error(), "fleetctl list --json", "the refusal must name what to use instead")
-
-	require.ErrorIs(t, RequireTerminal(nil), ErrNotATerminal)
-}
-
 func TestRunWithoutASourceIsRefused(t *testing.T) {
 	t.Parallel()
 	require.Error(t, Run(context.Background(), Options{}))

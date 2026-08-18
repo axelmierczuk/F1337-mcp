@@ -33,6 +33,10 @@ Three binaries, one Go module:
 - **`fleetctl`** — runs on your workstation. Sets up the CA, mints
   enrollment tokens, inspects the fleet, and opens an interactive shell on a
   host with `fleetctl shell`.
+- **`fleet-tui`** — runs on your workstation, and you never type its name.
+  `fleetctl tui` hands the terminal to it. It is a separate binary so that
+  `fleetctl` itself does not link a terminal UI; see [the note
+  below](#why-fleet-tui-is-its-own-binary).
 
 The agent CLI (Claude Code, Cursor, etc.) calls `fleet_select` to pick a
 host, then uses the same exec/file/process tools it already knows — they
@@ -45,6 +49,7 @@ just execute wherever you pointed them.
 ```sh
 go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-mcp@latest
 go install github.com/axelmierczuk/fleet-mcp/cmd/fleetctl@latest
+go install github.com/axelmierczuk/fleet-mcp/cmd/fleet-tui@latest   # for `fleetctl tui`
 ```
 
 **2. Create a CA and mint an enrollment token:**
@@ -80,6 +85,26 @@ Then stop `fleetctl serve`, and check the fleet:
 fleetctl list          # one listing
 fleetctl tui           # or watch the whole fleet, its processes and their logs
 ```
+
+### Why `fleet-tui` is its own binary
+
+`fleetctl tui` is one command, and it stays one command — this is only about
+what gets linked into what.
+
+The view is built on bubbletea, whose package init asks the terminal for its
+background colour and reads for up to five seconds waiting for the answer. A
+package init runs in every process that links the package, whatever subcommand
+was typed, so linking the view into `fleetctl` made `fleetctl version` cost five
+seconds on any terminal that does not answer — a bare pty, a CI log, a serial
+console — and swallow whatever was typed while it waited. Nothing inside the
+process can opt out; every escape hatch the library has is read during that
+init, before any of our code runs.
+
+So the view lives in `fleet-tui`, and `fleetctl tui` hands it the terminal with
+its command line unchanged. There is nothing extra to configure: `fleet-tui` is
+`fleetctl`'s own command tree with the view linked in, reading the same config
+directory, the same CA and the same registry.
+
 
 **4. Point your agent at the MCP server:**
 

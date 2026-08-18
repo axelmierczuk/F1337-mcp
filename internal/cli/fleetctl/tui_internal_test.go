@@ -2,12 +2,12 @@ package fleetctl
 
 import (
 	"bytes"
+	"context"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/axelmierczuk/fleet-mcp/internal/tui"
 )
 
 // The pool `tui` runs on, which is the one thing about this command that is
@@ -24,6 +24,42 @@ import (
 // now, and test/e2e's TestTUIDrawsTheFleetAndGivesTheTerminalBack kills an
 // agent the view has already drawn as serving, which is the only place the
 // second probe can be observed at all.
+
+// TestATerminalIsWhatRequireTerminalRequires.
+//
+// Directly, on a file that is not a terminal, because the command has two ways
+// to refuse and only one of them is this function: RunE first checks that its
+// writer is an *os.File at all, and every test in this package writes to a
+// buffer, so all of them take that branch instead. Neutering this check left
+// them green — the refusal they observe comes from the other branch — and the
+// only thing that noticed was test/e2e running the real binary with its stdout
+// on a pipe. This is the unit-level half of that, and it is the assertion
+// internal/tui used to hold before the check moved here.
+func TestATerminalIsWhatRequireTerminalRequires(t *testing.T) {
+	t.Parallel()
+
+	f, err := os.CreateTemp(t.TempDir(), "not-a-tty")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+
+	err = requireTerminal(f)
+	require.ErrorIs(t, err, ErrNotATerminal)
+	require.Contains(t, err.Error(), "fleetctl list --json", "the refusal must name what to use instead")
+
+	require.ErrorIs(t, requireTerminal(nil), ErrNotATerminal)
+}
+
+// stubView stands in for the view a linked binary would run.
+//
+// It fails rather than returns: every case below asserts the command refuses
+// before there is anything to draw on, so reaching this is the assertion
+// failing, not the fixture being used. Non-nil rather than nil so that what is
+// pinned is "the terminal is checked first" and not "this binary has no view" —
+// with nil, the same refusal would arrive from the hand-off path instead and
+// the test could not tell the two apart.
+func stubView(context.Context, ViewInput) error {
+	panic("the view ran on something that is not a terminal")
+}
 
 // controlCredentials puts a CA and a control leaf in the configured directory,
 // through the two commands docs/quickstart.md tells an operator to run.
@@ -116,11 +152,11 @@ func TestTheRefreshFlagReachesThePoolTheViewRunsOn(t *testing.T) {
 				f   tuiFlags
 				out bytes.Buffer
 			)
-			cmd := newTUICommandWith(&out, &f)
+			cmd := newTUICommandWith(&out, stubView, &f)
 			cmd.SetOut(&out)
 			cmd.SetErr(&out)
 			cmd.SetArgs(tc.args)
-			require.ErrorIs(t, cmd.Execute(), tui.ErrNotATerminal,
+			require.ErrorIs(t, cmd.Execute(), ErrNotATerminal,
 				"the command did not get as far as parsing its flags")
 
 			pool, err := f.pool()

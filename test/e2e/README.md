@@ -99,6 +99,10 @@ Everything except one scenario.
 | `TestShellRefusesWhenStdinIsNotATerminal` | An interactive command run from a script is refused, with the tool that does the job named. |
 | `TestLargeFileTransferRoundTrips` | 24 MiB pushed and pulled back with matching digests, and a repeat push that moves nothing. |
 | `TestTransferTreeRoundTrips` | A directory transfer with the default exclusions applied. |
+| `TestTUIDrawsTheFleetAndGivesTheTerminalBack` | `fleetctl tui` on a real pseudo-terminal: both sandboxes and a supervised process drawn, one machine going away re-probed and drawn unreachable without blanking the view, and the terminal put back on quit. |
+| `TestTUIGivesTheTerminalBackOnSIGTERM` | The same restoration on the exit path nobody chooses, reaching the view through the pid the operator's shell knows about. |
+| `TestTUIWithoutATerminalSaysWhatToUseInstead` | A full-screen command whose stdout is a pipe is refused, naming the scriptable view. |
+| `TestNoCommandInterrogatesTheTerminalAtStartup` | On a pseudo-terminal that answers nothing, `fleetctl version` and `fleetctl list` write no background-colour query and no cursor-position request, and a line typed while they start is still in the input queue afterwards (#73). |
 
 ## What needs a container
 

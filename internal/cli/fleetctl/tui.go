@@ -1,6 +1,8 @@
 package fleetctl
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,8 +13,72 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/axelmierczuk/fleet-mcp/internal/client"
-	"github.com/axelmierczuk/fleet-mcp/internal/tui"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
+	"github.com/axelmierczuk/fleet-mcp/internal/registry"
 )
+
+// This file is `fleetctl tui` — the command, its flags, and everything it does
+// before there is anything to draw. What it does not do is import the thing
+// that draws, and that omission is the point of the file.
+//
+// bubbletea's package init calls lipgloss.HasDarkBackground(), which writes an
+// OSC 11 background-colour query and a cursor-position request to the terminal,
+// puts it into no-echo non-canonical mode, and reads for up to five seconds
+// waiting for the answers. Package inits run in every process that links the
+// package, whatever subcommand was typed — so linking the view here made
+// `fleetctl version` on a terminal that does not answer cost five seconds and
+// eat whatever was typed meanwhile. There is no way to opt out from inside the
+// process: every escape hatch termenv has (TERM, COLORFGBG, an explicit
+// lipgloss background) is read *during* that init, and Go initialises an
+// imported package before any code that imports it can run.
+//
+// So the base binary does not link it. [View] is the seam: nil here, non-nil in
+// the one binary built to draw. See [handOff] for what nil means in practice
+// and cmd/fleet-tui for the other side.
+
+// View draws the fleet until the operator quits or ctx is cancelled.
+//
+// Its signature deliberately names nothing from internal/tui. A seam whose
+// types come from the package it exists to keep out is not a seam.
+type View func(ctx context.Context, in ViewInput) error
+
+// ViewInput is everything the view needs that this command resolved: the
+// operator's fleet, their credentials, and their terminal.
+type ViewInput struct {
+	// Fleet is the registry the panes read.
+	Fleet *registry.Registry
+	// Pool holds the operator's credentials and the background health loop
+	// the view's refresh is built on. The caller closes it.
+	Pool *client.Pool
+	// ProbeTimeout is the per-sandbox deadline a health probe runs under, so
+	// one machine that has gone away never holds up the view.
+	ProbeTimeout time.Duration
+	// TTY is the operator's terminal: what the view draws on, and what it
+	// reads its keys from.
+	TTY *os.File
+}
+
+// ErrNotATerminal is what a run without a terminal fails with.
+//
+// It lives here rather than in internal/tui because the refusal is this
+// command's contract — it names `fleetctl list --json` — and because the base
+// binary has to be able to make it without linking the view. Two sentinels for
+// one condition would be worse than either: `errors.Is` would answer differently
+// depending on which binary produced the error.
+var ErrNotATerminal = errors.New("fleetctl tui needs a terminal")
+
+// requireTerminal refuses a run that has no terminal to draw on.
+//
+// A full-screen program whose output is a pipe produces escape sequences and no
+// frames, which reads as a hang. Saying so, and naming the command that does
+// have machine-readable output, is the difference between a bug report and a
+// second try.
+func requireTerminal(f *os.File) error {
+	if f == nil || !platform.IsTerminal(f.Fd()) {
+		return fmt.Errorf("%w: stdout is not one. `fleetctl list --json` is the scriptable view of the same data", ErrNotATerminal)
+	}
+	return nil
+}
 
 // defaultHealthInterval is how often the pool re-probes each sandbox while the
 // TUI is open.
@@ -66,9 +132,11 @@ func (f *tuiFlags) pool() (*client.Pool, error) {
 	return f.control.pool(healthIntervalFor(f.refresh))
 }
 
-func newTUICommand(out io.Writer) *cobra.Command { return newTUICommandWith(out, &tuiFlags{}) }
+func newTUICommand(out io.Writer, view View) *cobra.Command {
+	return newTUICommandWith(out, view, &tuiFlags{})
+}
 
-func newTUICommandWith(out io.Writer, f *tuiFlags) *cobra.Command {
+func newTUICommandWith(out io.Writer, view View, f *tuiFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tui",
 		Short: "Watch the fleet in a full-screen terminal view",
@@ -93,9 +161,28 @@ func newTUICommandWith(out io.Writer, f *tuiFlags) *cobra.Command {
 			// was told to write to.
 			tty, ok := out.(*os.File)
 			if !ok {
-				return fmt.Errorf("%w: output is not a terminal. `fleetctl list --json` is the scriptable view of the same data", tui.ErrNotATerminal)
+				return fmt.Errorf("%w: output is not a terminal. `fleetctl list --json` is the scriptable view of the same data", ErrNotATerminal)
 			}
-			if err := tui.RequireTerminal(tty); err != nil {
+			if err := requireTerminal(tty); err != nil {
+				return err
+			}
+
+			// Before the registry is opened and before a single agent is
+			// dialled: this binary does not draw, so everything below would be
+			// work done twice. See [handOff] — on Unix it does not return.
+			if view == nil {
+				err := handOff(os.Args[1:])
+				// Windows has no exec, so there the helper is a child and its
+				// status is this command's. Silenced for the reason
+				// `fleetctl shell` silences a remote shell's: the status is
+				// the result, and cobra printing an error about it would be
+				// noise over a screen the operator has already seen. Set here
+				// rather than on the command, so a helper that could not be
+				// found still prints why.
+				var status *exitStatus
+				if errors.As(err, &status) {
+					cmd.SilenceErrors = true
+				}
 				return err
 			}
 
@@ -121,17 +208,11 @@ func newTUICommandWith(out io.Writer, f *tuiFlags) *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			return tui.Run(ctx, tui.Options{
-				Source:   tui.NewFleetSource(fleet, pool, f.control.probeTimeout()),
-				Schedule: tui.DefaultSchedule,
-				Out:      tty,
-				TTY:      tty,
-				// OpenShell is left nil until #43 lands. See the comment on
-				// tui.Options.OpenShell: with it nil the key reports that
-				// this build has no shell rather than doing nothing, and
-				// wiring it is this one field — a closure that hands the
-				// terminal to `fleetctl shell` through tea.Exec and reports
-				// what it did with tui.Status.
+			return view(ctx, ViewInput{
+				Fleet:        fleet,
+				Pool:         pool,
+				ProbeTimeout: f.control.probeTimeout(),
+				TTY:          tty,
 			})
 		},
 	}
