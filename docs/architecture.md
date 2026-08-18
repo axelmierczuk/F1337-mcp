@@ -220,6 +220,17 @@ that spawns a process takes a slot from one shared limiter, because a limit each
 service enforced from its own count would not be a limit on the agent: two
 services each allowing 32 is a host running 64.
 
+A slot stands for a process that is running, not for an RPC that is open. So
+`ExecService` gives its slot back as soon as the command has finished and been
+waited for — before it writes the audit record and before it puts the result on
+the stream. That last send is a plain gRPC `Send`, and grpc-go returns from one
+only when the flow-control window opens or the stream ends: a client that stays
+connected, stops reading and set no deadline parks the handler there for as long
+as it likes. Holding the slot across that would let such a caller take a piece of
+the agent's capacity permanently, one piece per call. It now costs a goroutine
+and its own stream, both of which end when its connection does, and the result
+is still delivered in full if it ever starts reading again.
+
 **Command execution.** Starting a supervised process runs a command, so
 `ProcessService` is refused on an agent configured with `exec.enabled: false` —
 the one configuration in which `allowed_roots` is a real boundary. See

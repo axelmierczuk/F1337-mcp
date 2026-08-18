@@ -567,6 +567,98 @@ func stallsTheOutputCopier(t *testing.T, attempt int, budget time.Duration) bool
 	return true
 }
 
+// A caller parked on its terminal result costs a goroutine, not capacity.
+//
+// This is the one message #72 does not cover. Its fix bounds a stalled *output*
+// stream, and it works by giving up on a command the watchdog has already
+// killed — but by the time the terminal result is sent, Wait has returned and
+// done is closed, so the watchdog is gone. sendResult is a plain Send, grpc-go
+// returns from one of those only when the flow-control window opens or the
+// stream ends, and a client that stays connected, stops calling Recv and set no
+// deadline of its own does neither. Before the fix that parked the handler with
+// its concurrency slot still held, permanently, once per such call.
+//
+// So the agent is given exactly one slot, and the assertions are what that slot
+// is worth: it is back while the first handler is still inside Send, and a
+// second command runs to completion on it. Neither is a duration. The wedged
+// handler's own Send is what the fixture holds, so "still inside Send" is a
+// state this test establishes rather than waits for.
+//
+// The command writes nothing at all, which is what makes the result the only
+// message on the stream — there is no copier to stall, so the fixture cannot
+// accidentally reproduce #72's case instead of this one, and the parked message
+// is read back rather than assumed either way.
+func TestExec_ACallerParkedOnItsResultDoesNotHoldItsSlot(t *testing.T) {
+	h := newHarness(t, withCaps(policy.Caps{
+		DefaultTimeout: 30 * time.Second,
+		MaxTimeout:     time.Minute,
+		MaxOutputBytes: 1 << 20,
+		MaxConcurrent:  1,
+	}))
+
+	block := make(chan struct{})
+	// Released at the end, so the parked Send finishes and the handler returns
+	// inside the test rather than after it.
+	unblock := sync.OnceFunc(func() { close(block) })
+	defer unblock()
+
+	stream := newFakeStream(context.Background())
+	stream.blockSend = block
+	stream.parked = make(chan *sandboxdv1.ExecResponse, 1)
+
+	wedged := make(chan error, 1)
+	go func() { wedged <- h.svc.Exec(helperReq("exit", "0"), stream) }()
+
+	var parked *sandboxdv1.ExecResponse
+	select {
+	case parked = <-stream.parked:
+	case err := <-wedged:
+		t.Fatalf("Exec returned %v without any Send parking, so nothing was wedged", err)
+	case <-time.After(stallFailsafe):
+		t.Fatalf("nothing reached the stream in %s and Exec has not returned", stallFailsafe)
+	}
+	require.NotNil(t, parked.GetResult(),
+		"a command that writes nothing has only its result to send, so that is what must have parked")
+
+	// The recorded fact. The release happens before sendResult in the handler's
+	// own order, so a message parked in Send means the slot is already back;
+	// there is nothing here to race with.
+	require.Equal(t, 0, h.svc.policy.InUse(),
+		"the command has finished, so its slot stands for nothing running")
+
+	// And the handler really is still in there: it cannot return until the
+	// fixture lets its Send finish, which it has not.
+	select {
+	case err := <-wedged:
+		t.Fatalf("Exec returned %v while its terminal Send was still parked", err)
+	default:
+	}
+
+	// What the slot is for. The agent has one, the wedged caller is sitting on
+	// its result, and a second command runs on it start to finish.
+	second, err := h.run(t, helperReq("echo", "second"))
+	require.NoError(t, err, "a caller parked on its own result must not cost the next caller its capacity")
+	require.Equal(t, "second", second.output(sandboxdv1.Stream_STREAM_STDOUT))
+
+	// Nothing was thrown away to buy that: the wedged caller still gets the
+	// result of a command that succeeded, whenever it starts reading again.
+	unblock()
+	select {
+	case err := <-wedged:
+		require.NoError(t, err)
+	case <-time.After(stallFailsafe):
+		t.Fatalf("Exec did not return in %s after the stream started accepting again", stallFailsafe)
+	}
+	res := stream.result()
+	require.NotNil(t, res)
+	require.Equal(t, int32(0), res.GetExitCode())
+
+	records := h.records(t)
+	require.Len(t, records, 2)
+	require.Equal(t, policy.OutcomeOK, records[0].Outcome, "the wedged call ran a command that succeeded")
+	require.Equal(t, policy.OutcomeOK, records[1].Outcome, "and so did the one that used the slot it gave back")
+}
+
 // A descendant that outlived its parent does not outlive the RPC.
 //
 // This is the one the kill path never sees: the command succeeded, so nothing
@@ -987,6 +1079,76 @@ func TestExec_ConcurrencyCapIsEnforced(t *testing.T) {
 	require.Len(t, records, 2)
 	require.Equal(t, policy.OutcomeError, records[0].Outcome)
 	require.Equal(t, policy.OutcomeOK, records[1].Outcome)
+}
+
+// The slot bounds a command that is running, and it is held for exactly that
+// long.
+//
+// The other half of #81. Holding the slot *past* the command — across a
+// delivery a caller can park forever — was the bug; giving it up *before* the
+// command would leave process.max_concurrent bounding nothing at all, and an
+// agent set to one would run as many commands at once as it was asked to.
+// Nothing asserted that half: the cap's own test takes the slot by hand rather
+// than by running something, so a handler that gave its slot away before
+// starting its command passed every test in this file.
+func TestExec_TheSlotIsHeldForAsLongAsTheCommandRuns(t *testing.T) {
+	h := newHarness(t, withCaps(policy.Caps{
+		DefaultTimeout: 30 * time.Second,
+		MaxTimeout:     time.Minute,
+		MaxOutputBytes: 1 << 20,
+		MaxConcurrent:  1,
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The helper prints its child's pid before it settles down to sleep, so
+	// the first thing on the stream is the recorded fact that the command is
+	// running — not an interval anyone had to guess at.
+	running := make(chan struct{})
+	announce := sync.OnceFunc(func() { close(running) })
+	stream := newFakeStream(ctx)
+	stream.onSend = func(*sandboxdv1.ExecResponse) { announce() }
+
+	pidFile := filepath.Join(t.TempDir(), "held.pid")
+	returned := make(chan error, 1)
+	go func() { returned <- h.svc.Exec(helperReq("spawn", pidFile), stream) }()
+
+	select {
+	case <-running:
+	case err := <-returned:
+		t.Fatalf("Exec returned %v before its command produced anything", err)
+	case <-time.After(stallFailsafe):
+		t.Fatalf("the command produced nothing in %s and Exec has not returned", stallFailsafe)
+	}
+
+	require.Equal(t, 1, h.svc.policy.InUse(),
+		"the agent's only slot is taken by a command that is running")
+
+	// So the next caller is refused, and refused because the agent is full
+	// rather than because it gave up: this one bounds its own wait.
+	refused := helperReq("echo", "queued")
+	refused.Timeout = durationpb.New(300 * time.Millisecond)
+	_, err := h.run(t, refused)
+	require.Error(t, err)
+	require.Equal(t, codes.ResourceExhausted, status.Code(err))
+
+	// And the slot comes back when the command does, tree and all.
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(stallFailsafe):
+		t.Fatalf("Exec did not return in %s after its caller went away", stallFailsafe)
+	}
+	require.Equal(t, 0, h.svc.policy.InUse())
+
+	through, err := h.run(t, helperReq("echo", "through"))
+	require.NoError(t, err)
+	require.Equal(t, "through", through.output(sandboxdv1.Stream_STREAM_STDOUT))
+
+	leader, child := readPIDs(t, pidFile)
+	requireProcessGone(t, leader)
+	requireProcessGone(t, child)
 }
 
 // A full agent refuses rather than queueing a caller indefinitely.

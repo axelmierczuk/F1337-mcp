@@ -3,9 +3,12 @@
 package e2e
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestEnrollConnectExecReadBack is the walking skeleton: a host joins a fleet
@@ -189,4 +192,98 @@ func containsString(haystack []string, needle string) bool {
 // shellQuote wraps a string in single quotes for `sh -c`.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// The agent-wide process cap bounds commands that are running, and gives the
+// slot back when they finish.
+//
+// This is the invariant #81's fix has to preserve from the other side. That fix
+// gives the concurrency slot back as soon as the command has been waited for —
+// before the result is delivered — because a caller that stops reading can park
+// the handler on that last send indefinitely, and a slot held across it is
+// capacity lost for the life of the daemon. Give it back any earlier, though,
+// and process.max_concurrent stops bounding anything: the agent would run as
+// many commands at once as it was asked to.
+//
+// Nothing covered this end to end. The unit tests take the slot by hand rather
+// than by running something, so an agent that handed its slot back before
+// starting its command passed all of them — and the cap is what an operator
+// sets, so the tool they set it for is where it has to be true.
+//
+// The wedge that motivated the fix is deliberately not reproduced here: neither
+// fleet-mcp nor fleetctl stops reading a stream, so it would take a bespoke gRPC
+// client that also pinned its own flow-control window, which is client transport
+// configuration no product binary exposes. It is proved against a real gRPC
+// transport in internal/agent/exec instead.
+func TestExecConcurrencyCapIsAgentWide(t *testing.T) {
+	f := newFleet(t)
+	a := f.enroll("busy-box", enrollOptions{maxConcurrent: 1})
+	s := f.connect(t)
+	s.ok("fleet_select", map[string]any{"name": a.name})
+
+	// The command announces that it is running by creating a file, so the
+	// second call goes out when the slot is provably taken rather than after
+	// an interval somebody guessed at. It then sleeps well past its own
+	// timeout, so what ends it is the agent killing it.
+	type holding struct {
+		res  execResult
+		fail string
+	}
+	marker := filepath.Join(a.home, "holding-the-slot")
+	held := make(chan holding, 1)
+	go func() {
+		res, err := s.tryCall("fleet_exec", map[string]any{
+			"argv":            []string{"sh", "-c", "touch " + shellQuote(marker) + "; sleep 60"},
+			"timeout_seconds": 5,
+		}, callOptions{})
+		switch {
+		case err != nil:
+			held <- holding{fail: fmt.Sprintf("the holding call failed at the protocol level: %v", err)}
+		case res.IsError:
+			held <- holding{fail: "the holding call reported an error: " + resultText(res)}
+		default:
+			out, decodeErr := decodeStructured[execResult](res)
+			if decodeErr != nil {
+				held <- holding{fail: decodeErr.Error()}
+				return
+			}
+			held <- holding{res: out}
+		}
+	}()
+
+	waitFor(t, 60*time.Second, "the first command to start running", func() (bool, string) {
+		if _, err := os.Stat(marker); err == nil {
+			return true, ""
+		}
+		return false, "the command has not created " + marker
+	})
+
+	// The agent's only slot is taken by a command that is still running, so the
+	// next caller is refused — and refused for the agent being full, which is a
+	// different answer, and a different audit outcome, from a caller that gave
+	// up while queued.
+	msg := s.fails("fleet_exec", map[string]any{
+		"argv":            []string{"true"},
+		"timeout_seconds": 1,
+	})
+	if !contains(msg, "too many concurrent processes") || !contains(msg, "limit 1") {
+		t.Fatalf("a call to a full agent should name the cap that refused it, got: %s", msg)
+	}
+
+	// And the slot comes back with the command. A killed command is a result
+	// and not an RPC failure, which is why this is read rather than awaited.
+	first := <-held
+	if first.fail != "" {
+		t.Fatalf("the holding call did not run to a result: %s", first.fail)
+	}
+	if !first.res.TimedOut {
+		t.Fatalf("the holding command sleeps a minute on a five-second timeout; it should have been killed, got %+v", first.res)
+	}
+
+	through := structured[execResult](t, s.ok("fleet_exec", map[string]any{
+		"argv": []string{"echo", "through"},
+	}))
+	if through.ExitCode != 0 || !contains(through.Stdout, "through") {
+		t.Fatalf("the slot did not come back after the command that held it ended: %+v", through)
+	}
 }
