@@ -274,9 +274,10 @@ func TestAFollowCannotBeUnbounded(t *testing.T) {
 	require.False(t, LogOptions{FollowFor: -time.Second}.Follows())
 	require.True(t, LogOptions{FollowFor: time.Second}.Follows())
 
-	require.Equal(t, time.Minute, clampDuration(time.Hour, 0, maxFollow))
-	require.Equal(t, time.Duration(0), clampDuration(-time.Hour, 0, maxFollow))
-	require.Equal(t, 2*time.Second, clampDuration(2*time.Second, 0, maxFollow))
+	require.Equal(t, maxFollow, boundFollow(time.Hour))
+	require.Equal(t, time.Duration(0), boundFollow(-time.Hour))
+	require.Equal(t, time.Duration(0), boundFollow(0))
+	require.Equal(t, 2*time.Second, boundFollow(2*time.Second))
 
 	// And the window the model actually asks for is inside it.
 	m := demoModel(80, 24)

@@ -207,7 +207,7 @@ func (s *fleetSource) Logs(ctx context.Context, sandbox, address, processID stri
 	// Clamped on both sides here rather than trusted: this is the one request
 	// in the program whose duration decides how long a call can last, and the
 	// bound has to hold even for a caller that asked for something absurd.
-	follow := clampDuration(opts.FollowFor, 0, maxFollow)
+	follow := boundFollow(opts.FollowFor)
 	req := &sandboxdv1.GetProcessLogsRequest{
 		ProcessId: processID,
 		TailLines: uint32(clamp(opts.TailLines, 0, 1<<20)), //nolint:gosec // clamped
@@ -372,12 +372,14 @@ func (s *fleetSource) Detail(ctx context.Context, sandbox, address string, toolc
 // was meant to fill.
 const maxFollow = time.Minute
 
-func clampDuration(d, lo, hi time.Duration) time.Duration {
-	if d < lo {
-		return lo
+// boundFollow is the near side of the rule: no window follows for longer than
+// maxFollow, and a negative one does not follow at all.
+func boundFollow(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
 	}
-	if d > hi {
-		return hi
+	if d > maxFollow {
+		return maxFollow
 	}
 	return d
 }
