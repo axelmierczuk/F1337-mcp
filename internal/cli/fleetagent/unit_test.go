@@ -2,9 +2,12 @@ package fleetagent_test
 
 import (
 	"encoding/xml"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -264,4 +267,128 @@ func TestParseHardening(t *testing.T) {
 	_, err := fleetagent.ParseHardening("paranoid")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "standard, strict, none")
+}
+
+// The Windows Scheduled Task is the answer to #74, and like the systemd unit
+// and the launchd plist it is a pure function of UnitParams — so what an
+// operator's machine would actually be given is asserted on every runner
+// instead of only on a Windows one with an elevated token.
+func TestScheduledTaskXML_RunsInTheOperatorsSession(t *testing.T) {
+	p := params()
+	p.User = `WORKSTATION\axel`
+	doc := p.ScheduledTaskXML()
+
+	// The line the whole change turns on. A service cannot have it: every
+	// Windows service runs in session 0 whoever it runs as.
+	assert.Contains(t, doc, "<LogonType>InteractiveToken</LogonType>")
+	assert.NotContains(t, doc, "<LogonType>Password</LogonType>")
+	assert.NotContains(t, doc, "<LogonType>S4U</LogonType>")
+
+	// The agent runs every command a model asks for. It gets the operator's
+	// ordinary token, not their elevated one.
+	assert.Contains(t, doc, "<RunLevel>LeastPrivilege</RunLevel>")
+	assert.NotContains(t, doc, "HighestAvailable")
+
+	// Logon trigger and principal both name the account, or the task either
+	// never fires or fires as somebody else.
+	assert.Equal(t, 2, strings.Count(doc, "<UserId>WORKSTATION\\axel</UserId>"))
+	assert.Contains(t, doc, "<LogonTrigger>")
+}
+
+// Every setting here is a Task Scheduler default that is wrong for a daemon,
+// and each one produces a different flavour of "the agent stopped and nobody
+// knows why".
+func TestScheduledTaskXML_SettingsThatMakeItADaemon(t *testing.T) {
+	doc := params().ScheduledTaskXML()
+
+	// The default execution time limit is three days, after which Task
+	// Scheduler kills the task.
+	assert.Contains(t, doc, "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>")
+	// The defaults refuse to start on battery and stop when a laptop unplugs.
+	// A workstation is the case this mechanism exists for.
+	assert.Contains(t, doc, "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>")
+	assert.Contains(t, doc, "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>")
+	// A second logon must not start a second daemon against the same state
+	// directory.
+	assert.Contains(t, doc, "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
+	// The default priority is 7, which is below normal. The agent's children
+	// are builds.
+	assert.Contains(t, doc, "<Priority>5</Priority>")
+	assert.NotContains(t, doc, "<Priority>7</Priority>")
+	// Task Scheduler rejects a restart interval under a minute, so the 5s
+	// delay the other two platforms honour is rounded up rather than rejected.
+	assert.Contains(t, doc, "<Interval>PT1M</Interval>")
+}
+
+// The daemon is started with the config path baked in here too, and a config
+// path with a space in it is one argument.
+func TestScheduledTaskXML_Action(t *testing.T) {
+	p := params()
+	p.Executable = `C:\Program Files\fleet\fleet-agent.exe`
+	p.ConfigPath = `C:\ProgramData\fleet\agent.yaml`
+	doc := p.ScheduledTaskXML()
+
+	assert.Contains(t, doc, `<Command>C:\Program Files\fleet\fleet-agent.exe</Command>`)
+	assert.Contains(t, doc, `<Arguments>serve --config C:\ProgramData\fleet\agent.yaml</Arguments>`)
+
+	p.ConfigPath = `C:\Program Files\fleet\agent.yaml`
+	assert.Contains(t, p.ScheduledTaskXML(),
+		`<Arguments>serve --config &quot;C:\Program Files\fleet\agent.yaml&quot;</Arguments>`,
+		"Task Scheduler hands the arguments to CreateProcess as one string, so a path with a space has to be quoted")
+}
+
+// It has to be a document, not a string that looks like one.
+func TestScheduledTaskXML_IsWellFormed(t *testing.T) {
+	p := params()
+	p.User = `WORK "GROUP"\a&b`
+	p.Executable = `C:\tools\fleet & co\fleet-agent.exe`
+
+	dec := xml.NewDecoder(strings.NewReader(p.ScheduledTaskXML()))
+	// The document declares UTF-16 because that is what schtasks reads; the
+	// renderer returns Go's UTF-8 and TaskXMLBytes does the conversion.
+	dec.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) { return input, nil }
+	for {
+		_, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+	}
+}
+
+// schtasks rejects a UTF-8 file with an error that names neither the encoding
+// nor the file, so the bytes have to be right the first time.
+func TestTaskXMLBytes_IsUTF16LEWithABOM(t *testing.T) {
+	encoded := fleetagent.TaskXMLBytes("<a/>")
+	require.Equal(t, []byte{0xFF, 0xFE, '<', 0, 'a', 0, '/', 0, '>', 0}, encoded)
+
+	full := fleetagent.TaskXMLBytes(params().ScheduledTaskXML())
+	require.Equal(t, byte(0xFF), full[0])
+	require.Equal(t, byte(0xFE), full[1])
+	decoded := utf16.Decode(func() []uint16 {
+		units := make([]uint16, 0, (len(full)-2)/2)
+		for i := 2; i+1 < len(full); i += 2 {
+			units = append(units, uint16(full[i])|uint16(full[i+1])<<8)
+		}
+		return units
+	}())
+	assert.Equal(t, params().ScheduledTaskXML(), string(decoded))
+}
+
+// The Windows command-line quoting rules the <Arguments> element depends on.
+func TestQuoteWindowsArgv(t *testing.T) {
+	assert.Equal(t, `serve --config C:\ProgramData\fleet\agent.yaml`,
+		fleetagent.QuoteWindowsArgvForTest([]string{"serve", "--config", `C:\ProgramData\fleet\agent.yaml`}))
+
+	assert.Equal(t, `"C:\Program Files\fleet\agent.yaml"`,
+		fleetagent.QuoteWindowsArgvForTest([]string{`C:\Program Files\fleet\agent.yaml`}))
+
+	// A trailing backslash inside quotes would otherwise escape the closing
+	// quote and swallow the next argument.
+	assert.Equal(t, `"C:\a b\\" next`,
+		fleetagent.QuoteWindowsArgvForTest([]string{`C:\a b\`, "next"}))
+
+	// A literal quote is escaped, and the backslashes before it are doubled.
+	assert.Equal(t, `"say \"hi\""`,
+		fleetagent.QuoteWindowsArgvForTest([]string{`say "hi"`}))
 }

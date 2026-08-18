@@ -4,12 +4,14 @@ package fleetagent
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"syscall"
 )
 
 // systemUserName is the dedicated account the Linux installer creates. It owns
@@ -228,4 +230,107 @@ func lookupServiceIDs(name string) (uid, gid int, err error) {
 		return 0, 0, fmt.Errorf("parse gid %q for %q: %w", u.Gid, name, err)
 	}
 	return uid, gid, nil
+}
+
+// serviceAccountName is what the platform's service manager wants the account
+// spelled as. On Unix that is the account.
+func serviceAccountName(name string) string { return name }
+
+// currentAccount is how the platform names the account this process is running
+// as.
+func currentAccount() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return ""
+}
+
+// inSessionZero is a Windows question; Unix has no session 0 to be isolated in.
+func inSessionZero() bool { return false }
+
+// executableAccessProblem reports why the service account may not be able to
+// start the agent from exe.
+//
+// The same failure as the Windows one, from the other direction: `enroll` and
+// `install` run as root, root reads /root/fleet-agent and ~/bin/fleet-agent
+// perfectly well, and the unit then names a path whose 0700 ancestor the
+// service account cannot traverse. systemd reports 203/EXEC, which names
+// neither the path nor the account.
+//
+// It warns rather than refuses. Unix access is not decided by the mode bits
+// alone — a supplementary group this code does not enumerate can grant what the
+// bits appear to deny — and a wrong refusal costs an operator an install that
+// would have worked.
+func executableAccessProblem(exe, account string) (problem string, refuse bool) {
+	uid, gid, err := lookupServiceIDs(account)
+	if err != nil || uid == 0 {
+		// An account that does not resolve is ensureServiceUser's to report,
+		// and it has a better message for it. The superuser reads everything.
+		return "", false
+	}
+	return unixPathAccessProblem(exe, uid, gid), false
+}
+
+// unixPathAccessProblem returns the first component of exe that uid/gid appears
+// unable to get through, or "".
+func unixPathAccessProblem(exe string, uid, gid int) string {
+	for _, path := range append(ancestorDirs(exe), exe) {
+		info, err := os.Stat(path)
+		if err != nil {
+			// Cannot tell. Saying nothing is right: this check exists to catch
+			// a mistake, not to become one.
+			return ""
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return ""
+		}
+		if hasExecuteBit(info.Mode(), int(st.Uid), int(st.Gid), uid, gid) {
+			continue
+		}
+		if path == exe {
+			return fmt.Sprintf("%s is mode %#o and owned by uid %d, so uid %d cannot execute it", path, info.Mode().Perm(), st.Uid, uid)
+		}
+		return fmt.Sprintf("%s is mode %#o and owned by uid %d, so uid %d cannot traverse it to reach %s", path, info.Mode().Perm(), st.Uid, uid, exe)
+	}
+	return ""
+}
+
+// hasExecuteBit reports whether uid/gid gets the execute bit on a file owned by
+// ownerUID/ownerGID with mode.
+func hasExecuteBit(mode os.FileMode, ownerUID, ownerGID, uid, gid int) bool {
+	perm := mode.Perm()
+	switch {
+	case uid == ownerUID:
+		return perm&0o100 != 0
+	case gid == ownerGID:
+		return perm&0o010 != 0
+	default:
+		return perm&0o001 != 0
+	}
+}
+
+// ancestorDirs lists every directory above path, outermost first.
+func ancestorDirs(path string) []string {
+	var dirs []string
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		dirs = append(dirs, dir)
+		if dir == filepath.Dir(dir) {
+			break
+		}
+	}
+	// Outermost first, so the message names the shallowest thing that is wrong
+	// rather than the deepest.
+	for i, j := 0, len(dirs)-1; i < j; i, j = i+1, j-1 {
+		dirs[i], dirs[j] = dirs[j], dirs[i]
+	}
+	return dirs
+}
+
+// readPassword is never reached on Unix: no Unix service manager asks for an
+// account's password, and serviceNeedsPassword says so. It exists so that the
+// shared install path compiles, and errors rather than prompting so a future
+// caller finds out instead of quietly echoing a password to a terminal.
+func readPassword(io.Reader, io.Writer, string) (string, error) {
+	return "", fmt.Errorf("a service account password is only ever needed by the Windows SCM")
 }

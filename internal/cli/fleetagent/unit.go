@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/kardianos/service"
 )
@@ -300,7 +301,19 @@ func (p UnitParams) LaunchdPlist() string {
 // parameters, including the per-platform options that the rendered unit files
 // do not cover.
 func (p UnitParams) ServiceConfig() *service.Config {
-	return &service.Config{
+	return p.ServiceConfigWithPassword("")
+}
+
+// ServiceConfigWithPassword is ServiceConfig for a Windows service registered
+// under a named account, which the SCM will not create without credentials.
+//
+// The password is a parameter rather than a field on UnitParams because
+// UnitParams is the value that gets rendered, compared and printed — including
+// into a test failure — and the one thing this password must never do is end up
+// anywhere but the LSA secret the SCM stores it in. It is handed to
+// CreateService and then goes out of scope.
+func (p UnitParams) ServiceConfigWithPassword(password string) *service.Config {
+	cfg := &service.Config{
 		Name:        ServiceName,
 		DisplayName: "fleet agent",
 		Description: "Runs commands and serves files for a fleet over mTLS gRPC.",
@@ -325,6 +338,10 @@ func (p UnitParams) ServiceConfig() *service.Config {
 			"OnFailureResetPeriod": 86400,
 		},
 	}
+	if password != "" {
+		cfg.Option["Password"] = password
+	}
+	return cfg
 }
 
 func writeKey(b *strings.Builder, key, value string) {
@@ -362,4 +379,173 @@ func seconds(d time.Duration) string {
 		return "0"
 	}
 	return strconv.Itoa(int(d.Round(time.Second) / time.Second))
+}
+
+// TaskPath is the Task Scheduler path the Windows Scheduled Task registers
+// under. Tasks live in a folder tree; the root folder is where an operator
+// looking for it in taskschd.msc will look first.
+const TaskPath = `\` + ServiceName
+
+// ScheduledTaskXML renders the complete Task Scheduler definition for a
+// logon-triggered task running in the operator's own session.
+//
+// This is the Windows answer to the systemd unit and the launchd job, and it is
+// rendered rather than assembled for the same reason they are: what gets
+// registered is then a pure function of UnitParams, so the decisions in it are
+// assertable from every runner instead of only from a Windows one with an
+// elevated token.
+//
+// The settings that are not boilerplate:
+//
+//   - LogonType InteractiveToken is the whole point. It runs the agent in the
+//     session the operator is logged into, with their profile and their PATH,
+//     and it needs no password. A service cannot do this: every Windows service
+//     runs in session 0.
+//   - RunLevel LeastPrivilege. The task inherits the operator's ordinary token,
+//     not an elevated one. Every command the agent runs runs as them, and this
+//     project's position is that handing the model an administrator is the same
+//     mistake as handing it root.
+//   - ExecutionTimeLimit PT0S disables the three-day default kill. A daemon is
+//     not a batch job.
+//   - The battery settings are inverted from the Task Scheduler defaults, which
+//     refuse to start on battery and stop when a laptop unplugs. A workstation
+//     is the case this mechanism exists for.
+//   - Priority 5 is NORMAL_PRIORITY_CLASS. The default for a scheduled task is
+//     7, which is below normal, and the agent's children are builds.
+//   - MultipleInstancesPolicy IgnoreNew, so a second logon does not start a
+//     second daemon against the same state directory.
+func (p UnitParams) ScheduledTaskXML() string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-16"?>` + "\r\n")
+	b.WriteString(`<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` + "\r\n")
+
+	b.WriteString("  <RegistrationInfo>\r\n")
+	b.WriteString("    <Description>Runs commands and serves files for a fleet over mTLS gRPC.</Description>\r\n")
+	b.WriteString("    <URI>" + escapeXML(TaskPath) + "</URI>\r\n")
+	b.WriteString("  </RegistrationInfo>\r\n")
+
+	b.WriteString("  <Triggers>\r\n")
+	b.WriteString("    <LogonTrigger>\r\n")
+	b.WriteString("      <Enabled>true</Enabled>\r\n")
+	b.WriteString("      <UserId>" + escapeXML(p.User) + "</UserId>\r\n")
+	b.WriteString("    </LogonTrigger>\r\n")
+	b.WriteString("  </Triggers>\r\n")
+
+	b.WriteString("  <Principals>\r\n")
+	b.WriteString(`    <Principal id="Author">` + "\r\n")
+	b.WriteString("      <UserId>" + escapeXML(p.User) + "</UserId>\r\n")
+	b.WriteString("      <LogonType>InteractiveToken</LogonType>\r\n")
+	b.WriteString("      <RunLevel>LeastPrivilege</RunLevel>\r\n")
+	b.WriteString("    </Principal>\r\n")
+	b.WriteString("  </Principals>\r\n")
+
+	b.WriteString("  <Settings>\r\n")
+	b.WriteString("    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n")
+	b.WriteString("    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n")
+	b.WriteString("    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n")
+	b.WriteString("    <AllowHardTerminate>true</AllowHardTerminate>\r\n")
+	b.WriteString("    <StartWhenAvailable>true</StartWhenAvailable>\r\n")
+	b.WriteString("    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\r\n")
+	b.WriteString("    <IdleSettings>\r\n")
+	b.WriteString("      <StopOnIdleEnd>false</StopOnIdleEnd>\r\n")
+	b.WriteString("      <RestartOnIdle>false</RestartOnIdle>\r\n")
+	b.WriteString("    </IdleSettings>\r\n")
+	b.WriteString("    <AllowStartOnDemand>true</AllowStartOnDemand>\r\n")
+	b.WriteString("    <Enabled>true</Enabled>\r\n")
+	b.WriteString("    <Hidden>false</Hidden>\r\n")
+	b.WriteString("    <RunOnlyIfIdle>false</RunOnlyIfIdle>\r\n")
+	b.WriteString("    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>\r\n")
+	b.WriteString("    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>\r\n")
+	b.WriteString("    <WakeToRun>false</WakeToRun>\r\n")
+	b.WriteString("    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\r\n")
+	b.WriteString("    <Priority>5</Priority>\r\n")
+	b.WriteString("    <RestartOnFailure>\r\n")
+	// Task Scheduler rejects an interval under a minute, so the restart delay
+	// the other two platforms honour to the second is rounded up to one here
+	// rather than silently rejected at registration.
+	b.WriteString("      <Interval>PT" + taskMinutes(p.RestartDelay) + "M</Interval>\r\n")
+	b.WriteString("      <Count>3</Count>\r\n")
+	b.WriteString("    </RestartOnFailure>\r\n")
+	b.WriteString("  </Settings>\r\n")
+
+	b.WriteString(`  <Actions Context="Author">` + "\r\n")
+	b.WriteString("    <Exec>\r\n")
+	b.WriteString("      <Command>" + escapeXML(p.Executable) + "</Command>\r\n")
+	b.WriteString("      <Arguments>" + escapeXML(quoteWindowsArgv(p.Arguments())) + "</Arguments>\r\n")
+	b.WriteString("    </Exec>\r\n")
+	b.WriteString("  </Actions>\r\n")
+
+	b.WriteString("</Task>\r\n")
+	return b.String()
+}
+
+// taskMinutes renders a duration as whole minutes, never fewer than one.
+func taskMinutes(d time.Duration) string {
+	minutes := int((d + time.Minute - 1) / time.Minute)
+	if minutes < 1 {
+		minutes = 1
+	}
+	return strconv.Itoa(minutes)
+}
+
+// quoteWindowsArgv renders an argv as one command line the CRT will split back
+// into the same arguments.
+//
+// The Task Scheduler takes the arguments as a single string and hands it to
+// CreateProcess, so a config path with a space in it — `C:\Program Files\...`,
+// which is where an operator will put one — becomes two arguments unless it is
+// quoted here. Backslashes are only special immediately before a quote, which
+// is the rule this implements and the reason a Windows path full of them can be
+// quoted without escaping every one.
+func quoteWindowsArgv(argv []string) string {
+	parts := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		if arg != "" && !strings.ContainsAny(arg, " \t\n\v\"") {
+			parts = append(parts, arg)
+			continue
+		}
+		var b strings.Builder
+		b.WriteByte('"')
+		slashes := 0
+		for _, r := range arg {
+			switch r {
+			case '\\':
+				slashes++
+			case '"':
+				// A quote is escaped, and every backslash run that immediately
+				// precedes one has to be doubled first or the CRT reads it as
+				// escaping the backslash instead.
+				b.WriteString(strings.Repeat(`\`, 2*slashes+1))
+				b.WriteByte('"')
+				slashes = 0
+			default:
+				b.WriteString(strings.Repeat(`\`, slashes))
+				slashes = 0
+				b.WriteRune(r)
+			}
+		}
+		// Trailing backslashes are doubled: undoubled, the last one would
+		// escape the closing quote.
+		b.WriteString(strings.Repeat(`\`, 2*slashes))
+		b.WriteByte('"')
+		parts = append(parts, b.String())
+	}
+	return strings.Join(parts, " ")
+}
+
+// TaskXMLBytes encodes a rendered task definition the way schtasks.exe insists
+// on reading one: UTF-16, little-endian, with a byte-order mark.
+//
+// Not a detail worth discovering at an operator's install. schtasks rejects a
+// UTF-8 file with "The task XML contains a value which is incorrectly formatted
+// or out of range", which names neither the encoding nor the file, and the
+// declaration at the top of the document has to agree with the bytes under it.
+func TaskXMLBytes(xml string) []byte {
+	units := utf16.Encode([]rune(xml))
+	out := make([]byte, 0, 2+2*len(units))
+	out = append(out, 0xFF, 0xFE) // BOM, little-endian
+	for _, unit := range units {
+		out = append(out, byte(unit), byte(unit>>8))
+	}
+	return out
 }

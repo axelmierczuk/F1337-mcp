@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"net"
 	"os"
@@ -32,6 +33,7 @@ type enrolledAgent struct {
 	ca         *ca.CA
 	configPath string
 	address    string
+	stateDir   string
 }
 
 // newEnrolledAgent writes an installation with exec left at its default, which
@@ -81,7 +83,7 @@ func newAgentInstall(t *testing.T, execEnabled bool, roots ...string) *enrolledA
 	configPath := filepath.Join(dir, "agent.yaml")
 	require.NoError(t, cfg.Save(configPath))
 
-	return &enrolledAgent{ca: authority, configPath: configPath, address: address}
+	return &enrolledAgent{ca: authority, configPath: configPath, address: address, stateDir: cfg.StateDir}
 }
 
 // freePort asks the kernel for an unused port and gives it straight back. The
@@ -337,5 +339,50 @@ func captureStderr(t *testing.T) func() string {
 		require.NoError(t, w.Close())
 		captured = <-done
 		return captured
+	}
+}
+
+// `serve` records what the daemon can reach, where `service status` reads it.
+//
+// This is the one path that makes the report exist at all: every answer status
+// gives about a confined agent — the account, the session, whether a per-user
+// toolchain resolves — is read out of this file, and nothing else on the host
+// writes it. The report is written before the listener opens, so a daemon that
+// is answering Health has already written one; there is nothing here that
+// depends on how long anything took.
+func TestServe_RecordsWhatTheDaemonCanReach(t *testing.T) {
+	ea := newEnrolledAgent(t, t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	codes, out := runServe(ctx, t, "serve", "--config", ea.configPath)
+	defer cancel()
+	waitServing(t, ea)
+
+	data, err := os.ReadFile(filepath.Join(ea.stateDir, "runtime.json"))
+	require.NoError(t, err, "the daemon has to record its own environment: %s", out.String())
+
+	var report struct {
+		PID     int    `json:"pid"`
+		StartID string `json:"start_id"`
+		Account string `json:"account"`
+		Home    string `json:"home"`
+		Profile struct {
+			Visibility string `json:"visibility"`
+		} `json:"profile"`
+	}
+	require.NoError(t, json.Unmarshal(data, &report))
+
+	assert.Equal(t, os.Getpid(), report.PID, "serve runs in this process here")
+	assert.NotEmpty(t, report.StartID,
+		"without a start identity `service status` refuses the report, so an agent that recorded one would never be reported on")
+	assert.NotEmpty(t, report.Account, "the account the platform says the daemon is running as")
+	assert.NotEmpty(t, report.Home)
+	assert.Contains(t, []string{"visible", "hidden", "unknown"}, report.Profile.Visibility)
+
+	cancel()
+	select {
+	case <-codes:
+	case <-time.After(20 * time.Second):
+		t.Fatal("serve did not exit after its context was cancelled")
 	}
 }

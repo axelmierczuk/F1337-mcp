@@ -233,10 +233,21 @@ sandbox command a model issues runs as root**, and the path jail is the only
 thing between it and the rest of the machine.
 
 So `service install` does not default to a superuser: a dedicated `fleet`
-system account on Linux, the invoking user on macOS, and `NT
-AUTHORITY\NetworkService` rather than `LocalSystem` on Windows. `--user root`
-is available, warns loudly, and is a decision rather than a default. See
-[docs/service.md](service.md).
+system account on Linux, and the invoking user on macOS and Windows. `--user
+root` (or `--user LocalSystem`) is available, warns loudly, and is a decision
+rather than a default. On the two platforms that default to the invoking user,
+`install` refuses when the invoking user *is* the superuser — which, since
+`install` needs elevation, is the common case — rather than quietly handing the
+model root. See [docs/service.md](service.md).
+
+The Windows default is a logon-triggered Scheduled Task in the operator's own
+session, with `LogonType` `InteractiveToken` and `RunLevel` `LeastPrivilege`:
+the operator's ordinary token, not their elevated one. It replaced `NT
+AUTHORITY\NetworkService`, which was the more confined answer and produced an
+agent that could not run anything — session 0 has no operator profile, so no
+per-user toolchain and none of the credentials in `%APPDATA%`. That account is
+still available for someone who wants a confined agent, and `service status`
+now reports such an agent as **unusable** rather than as running.
 
 The systemd unit sets `KillMode=process` and the launchd job sets
 `AbandonProcessGroup`. Those are not hardening — they are what stops a routine

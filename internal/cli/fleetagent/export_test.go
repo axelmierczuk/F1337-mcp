@@ -1,11 +1,17 @@
 package fleetagent
 
 import (
+	"context"
+	"errors"
 	"log/slog"
+	"os"
 	"time"
+
+	"github.com/kardianos/service"
 
 	sandboxdv1 "github.com/axelmierczuk/fleet-mcp/gen/go/sandboxd/v1"
 	"github.com/axelmierczuk/fleet-mcp/internal/agent"
+	"github.com/axelmierczuk/fleet-mcp/internal/platform"
 )
 
 // EnrollRequestForTest is the message `enroll` sends about this host.
@@ -66,3 +72,170 @@ const LegacyServiceNameForTest = legacyServiceName
 // matters: GitHub's Windows runners are administrators, so those tests ran
 // elevated and failed against an error message meant for someone who is not.
 func IsElevatedForTest() bool { return isElevated() }
+
+// ResolveMechanismForTest exposes the rule that decides how a host registers
+// the agent, with the platform supplied rather than read.
+//
+// The rule is the whole of #74: on Windows it decides whether the daemon lands
+// in the operator's session or in session 0, and it has to be assertable from
+// the runners that are not Windows.
+func ResolveMechanismForTest(requested Mechanism, goos, account string) (Mechanism, error) {
+	return resolveMechanism(requested, goos, account)
+}
+
+// ServiceNeedsPasswordForTest exposes when the SCM will refuse an account
+// without its password.
+func ServiceNeedsPasswordForTest(m Mechanism, goos, account string) bool {
+	return serviceNeedsPassword(m, goos, account)
+}
+
+// InvokingServiceUserForTest exposes the default-account rule macOS has always
+// used and Windows now does, including its one refusal.
+func InvokingServiceUserForTest(current string) (string, error) {
+	return invokingServiceUser(current)
+}
+
+// RunsInSessionZeroForTest reports whether an account is a built-in Windows
+// service identity, which is to say one with no operator profile.
+func RunsInSessionZeroForTest(account string) bool { return runsInSessionZero(account) }
+
+// WindowsExecutableAccessProblemForTest exposes the check that stops `install`
+// registering a binary the service account cannot read.
+func WindowsExecutableAccessProblemForTest(exe, account, usersRoot string) string {
+	return windowsExecutableAccessProblem(exe, account, usersRoot)
+}
+
+// ExecutableAccessAdviceForTest exposes the message that check produces.
+func ExecutableAccessAdviceForTest(problem, exe, account, goos string) string {
+	return executableAccessAdvice(problem, exe, account, goos)
+}
+
+// QuoteWindowsArgvForTest exposes the command-line quoting the Scheduled Task's
+// <Arguments> element depends on.
+func QuoteWindowsArgvForTest(argv []string) string { return quoteWindowsArgv(argv) }
+
+// UserToolchainForTest is a program the per-user toolchain probe may execute.
+type UserToolchainForTest = userToolchain
+
+// ProfileProbeForTest runs the per-user toolchain probe against an explicit
+// home directory and PATH.
+//
+// This is the probe that answers "can a command this agent spawns reach what
+// the operator installed under their own profile", which is the question
+// session 0 answers no to and which nothing in this repository used to ask.
+func ProfileProbeForTest(home, pathEnv, goos string, tools []UserToolchainForTest) (visibility, ran string, unreachable []string) {
+	result := profileProbe{Home: home, Path: pathEnv, GOOS: goos, Tools: tools}.probe(context.Background())
+	return string(result.Visibility), result.Ran, result.Unreachable
+}
+
+// Visibility values the probe reports, so a test names the same constants the
+// code does.
+const (
+	ProfileVisibleForTest = string(profileVisible)
+	ProfileHiddenForTest  = string(profileHidden)
+	ProfileUnknownForTest = string(profileUnknown)
+)
+
+// RuntimeReportForTest is a daemon's record of the environment it was started
+// in, in the shape a test needs to plant one.
+type RuntimeReportForTest struct {
+	PID         int
+	StartID     string
+	Account     string
+	Home        string
+	SessionZero bool
+	Visibility  string
+	Ran         string
+	Unreachable []string
+}
+
+func (r RuntimeReportForTest) internal() *runtimeReport {
+	return &runtimeReport{
+		PID:         r.PID,
+		StartID:     r.StartID,
+		StartedAt:   time.Now().UTC(),
+		Executable:  "fleet-agent",
+		Version:     "test",
+		Account:     r.Account,
+		Home:        r.Home,
+		SessionZero: r.SessionZero,
+		Profile: profileResult{
+			Visibility:  profileVisibility(r.Visibility),
+			Ran:         r.Ran,
+			Unreachable: r.Unreachable,
+		},
+	}
+}
+
+// ConfinementForTest exposes the judgement `service status` draws from a
+// report: whether this agent can do the job it exists for.
+func ConfinementForTest(rep *RuntimeReportForTest) (summary string, detail, remedy []string) {
+	if rep == nil {
+		if c := confinementFor(nil); c != nil {
+			return c.Summary, c.Detail, c.Remedy
+		}
+		return "", nil, nil
+	}
+	c := confinementFor(rep.internal())
+	if c == nil {
+		return "", nil, nil
+	}
+	return c.Summary, c.Detail, c.Remedy
+}
+
+// WriteRuntimeReportForTest plants a report where `service status` reads one,
+// through the same writer the daemon uses.
+func WriteRuntimeReportForTest(stateDir string, rep RuntimeReportForTest) error {
+	return writeRuntimeReport(stateDir, rep.internal())
+}
+
+// LiveProcessIdentityForTest is this process's pid and start identity, which is
+// what makes a planted report describe a daemon that is actually running.
+func LiveProcessIdentityForTest() (pid int, startID string) {
+	pid = os.Getpid()
+	if info, err := platform.StatProcess(pid); err == nil {
+		startID = info.StartID
+	}
+	return pid, startID
+}
+
+// CollectRuntimeReportForTest runs the daemon's own self-check against this
+// process, which is what `serve` records at every start.
+func CollectRuntimeReportForTest() (account, home, visibility, ran string, sessionZero bool) {
+	rep := collectRuntimeReport(context.Background())
+	return rep.Account, rep.Home, string(rep.Profile.Visibility), rep.Profile.Ran, rep.SessionZero
+}
+
+// PinInstalledForTest makes the `service` subcommands see a host with the agent
+// registered under the given mechanisms, running or not.
+//
+// Nothing a test may do can register a real service or scheduled task, and the
+// commands that report on one are exactly what #74 is about. See the comment on
+// controlRegistration for why the seam is at the host lookup and not any higher.
+func PinInstalledForTest(mechanisms []Mechanism, running bool) (restore func()) {
+	previousList, previousNew := installedMechanisms, controlRegistration
+	installedMechanisms = func() []Mechanism { return mechanisms }
+	controlRegistration = func(Mechanism) (registration, error) {
+		return fakeRegistration{running: running}, nil
+	}
+	return func() { installedMechanisms, controlRegistration = previousList, previousNew }
+}
+
+// fakeRegistration stands in for a service manager entry that a test cannot
+// create. It answers the one question `service status` asks and refuses the
+// rest, so a command that starts doing more than reporting fails here rather
+// than silently acting on a host.
+type fakeRegistration struct{ running bool }
+
+func (f fakeRegistration) Install() error   { return errors.New("fakeRegistration: Install") }
+func (f fakeRegistration) Uninstall() error { return errors.New("fakeRegistration: Uninstall") }
+func (f fakeRegistration) Start() error     { return errors.New("fakeRegistration: Start") }
+func (f fakeRegistration) Stop() error      { return errors.New("fakeRegistration: Stop") }
+func (f fakeRegistration) Restart() error   { return errors.New("fakeRegistration: Restart") }
+
+func (f fakeRegistration) Status() (service.Status, error) {
+	if f.running {
+		return service.StatusRunning, nil
+	}
+	return service.StatusStopped, nil
+}
